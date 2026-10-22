@@ -1,0 +1,1103 @@
+#Requires -Version 5.1
+<#
+.SYNOPSIS
+  Self-installing ProcDump monitor: captures crash / hang / exception dumps for selected apps,
+  keeps only the newest N dumps, and runs silently from a scheduled task.
+
+.USAGE
+  Interactive (menu: setup, install, status, start/stop, uninstall):
+      powershell -ExecutionPolicy Bypass -File .\ProcDumpMonitor.ps1
+  Unattended deployment (uses existing config, or defaults):
+      powershell -ExecutionPolicy Bypass -File .\ProcDumpMonitor.ps1 -Install
+      powershell -ExecutionPolicy Bypass -File .\ProcDumpMonitor.ps1 -Update   [-Force]
+      powershell -ExecutionPolicy Bypass -File .\ProcDumpMonitor.ps1 -Uninstall
+  -Update only installs if this script is NEWER than the installed copy. -Force also allows
+  same-version reinstall, downgrade, and updating a pre-2.0.0 install whose stop isn't graceful.
+
+.VERSION
+  Version is in $ScriptVersion below - bump it for every change you deploy.
+
+.CHANGELOG
+  2.0.0  First versioned release. Menu/setup, self-install, scheduled task, non-locking logs,
+         graceful ProcDump detach on stop, ProcDump output capture, exe versions, dump reason
+         (.info.txt), duplicate-capture detection, cooldown, configurable -n, Update with version check.
+  (unversioned)  Earlier copies - treated as version 0.0.0 by the update check.
+  Monitor mode (what the scheduled task runs - not meant to be started by hand):
+      ... -File "%ProgramData%\ProcDumpMonitor\ProcDumpMonitor.ps1" -Monitor
+
+.FILES
+  %ProgramData%\ProcDumpMonitor\
+      ProcDumpMonitor.ps1                 installed copy of this script
+      config.json                         settings
+      Tools\procdump*.exe                 downloaded + signature-verified ProcDump
+      Logs\ProcDumpMonitor_<datetime>.log         one per monitor launch
+      Logs\ProcDumpMonitor-Setup_<datetime>.log   one per setup/menu session
+      Logs\ProcDump_<app>_<datetime>.log          ProcDump's own output, one per ProcDump session
+  <DumpDir>\<dump>.dmp + <dump>.info.txt          dump + reason, exception, PID, exe versions
+#>
+[CmdletBinding()]
+param(
+    [switch]$Monitor,
+    [switch]$Install,
+    [switch]$Update,
+    [switch]$Force,
+    [switch]$Uninstall
+)
+
+# =============================== VERSION =================================
+$ScriptVersion = '2.0.0'
+$GracefulStopSince = [version]'2.0.0'   # installed copies older than this may kill apps when stopped
+
+# =============================== CONSTANTS ===============================
+$AppName         = 'ProcDumpMonitor'
+$TaskName        = 'ProcDumpMonitor'
+$BaseDir         = Join-Path $env:ProgramData $AppName
+$ConfigFile      = Join-Path $BaseDir 'config.json'
+$ToolsDir        = Join-Path $BaseDir 'Tools'
+$LogDir          = Join-Path $BaseDir 'Logs'
+$InstalledScript = Join-Path $BaseDir "$AppName.ps1"
+$ProcDumpUrl     = 'https://download.sysinternals.com/files/Procdump.zip'
+$MutexName       = "Global\$AppName"
+$StopFile        = Join-Path $BaseDir 'stop.request'    # created to ask the running monitor to stop gracefully
+
+$arch = if ($env:PROCESSOR_ARCHITEW6432) { $env:PROCESSOR_ARCHITEW6432 } else { $env:PROCESSOR_ARCHITECTURE }
+$ProcDumpExeName = switch ($arch) { 'ARM64' { 'procdump64a.exe' } 'AMD64' { 'procdump64.exe' } default { 'procdump.exe' } }
+$ProcDumpExe     = Join-Path $ToolsDir $ProcDumpExeName
+
+$script:LogFile    = $null
+$script:LogBase    = $null
+$script:LogPart    = 1
+$script:ExitCode   = 0
+$script:LogCount   = 0
+$script:LogPrefix  = $AppName
+$script:EchoLog    = $false        # also print log lines to the console (interactive use)
+$script:LogMaxMB   = 10
+
+# =============================== LOGGING =================================
+# Log name: <prefix>_<launch datetime>.log  ->  rolled parts: <prefix>_<launch datetime>_part2.log, _part3 ...
+function New-LogFile {
+    $script:LogBase = '{0}_{1:yyyyMMdd_HHmmss}' -f $script:LogPrefix, (Get-Date)
+    $script:LogPart = 1
+    $script:LogFile = Join-Path $LogDir "$($script:LogBase).log"
+}
+
+# Non-locking: open, append, close for every line; others may read/write/delete meanwhile.
+function Write-Log {
+    param([string]$Message, [ValidateSet('INFO','WARN','ERROR')][string]$Level = 'INFO')
+    $line = '{0:yyyy-MM-dd HH:mm:ss.fff} [{1,-5}] [PID {2}] {3}' -f (Get-Date), $Level, $PID, $Message
+
+    if ($script:EchoLog) {
+        switch ($Level) {
+            'ERROR' { Write-Host $Message -ForegroundColor Red }
+            'WARN'  { Write-Host $Message -ForegroundColor Yellow }
+            default { Write-Host $Message }
+        }
+    }
+    if (-not $script:LogFile) { return }
+
+    # Check size every 200 lines too, so a burst of logging can't outgrow the limit between cleanups
+    $script:LogCount++
+    if ($script:LogCount % 200 -eq 0) { Update-LogRoll }
+
+    try { if (-not (Test-Path $LogDir)) { New-Item -ItemType Directory -Path $LogDir -Force | Out-Null } } catch { return }
+
+    $bytes = [System.Text.Encoding]::UTF8.GetBytes($line + [Environment]::NewLine)
+    $share = [System.IO.FileShare]::ReadWrite -bor [System.IO.FileShare]::Delete
+    for ($i = 0; $i -lt 5; $i++) {
+        try {
+            $fs = New-Object System.IO.FileStream($script:LogFile, [System.IO.FileMode]::Append,
+                                                  [System.IO.FileAccess]::Write, $share)
+            try { $fs.Write($bytes, 0, $bytes.Length) } finally { $fs.Dispose() }
+            return
+        } catch { Start-Sleep -Milliseconds 100 }
+    }
+}
+
+# Size rotation: when the current log exceeds LogMaxMB, continue in <base>_partN.log.
+# Old files (all parts and launches) are pruned by Remove-OldLogs to LogKeep files.
+function Update-LogRoll {
+    try {
+        if ($script:LogFile -and (Test-Path $script:LogFile) -and
+            (Get-Item $script:LogFile).Length -ge ($script:LogMaxMB * 1MB)) {
+            $old = Split-Path $script:LogFile -Leaf
+            $script:LogPart++
+            $script:LogFile = Join-Path $LogDir ('{0}_part{1}.log' -f $script:LogBase, $script:LogPart)
+            Write-Log "Log continued from $old (size limit $($script:LogMaxMB) MB)."
+        }
+    } catch { }
+}
+
+function Remove-OldLogs([int]$Keep) {
+    Get-ChildItem -Path $LogDir -Filter "$AppName*.log" -File -ErrorAction SilentlyContinue |
+        Where-Object { $_.FullName -ne $script:LogFile } |
+        Sort-Object LastWriteTime -Descending |
+        Select-Object -Skip ([Math]::Max($Keep - 1, 0)) |
+        ForEach-Object { try { Remove-Item $_.FullName -Force -ErrorAction Stop } catch { } }
+}
+
+# =============================== CONFIG ==================================
+function Get-DefaultConfig {
+    [pscustomobject]@{
+        Apps             = @('AppA.exe')
+        DumpDir          = 'C:\dumps'
+        KeepDumps        = 15
+        CheckSeconds     = 5
+        CleanupSeconds   = 300
+        ProcDumpArgs     = '-accepteula -ma -e -h -n 1 -w'   # -n = dumps per ProcDump session (default 1 if omitted)
+        CooldownSeconds  = 60           # after a dump: wait this long before re-arming ProcDump on the SAME process
+        DuplicateAction  = 'Delete'     # Delete | Keep  - what to do with repeat captures of the same event
+        DuplicateWindowSeconds = 300    # hang dumps of a process this soon after its exception dump = duplicate
+        LogKeep          = 20
+        LogMaxMB         = 10
+        RunMode          = 'Logon'      # Logon = as user at logon (GUI apps, hang detection) | Startup = SYSTEM at boot
+        TaskUser         = ''           # Logon mode: DOMAIN\user (empty = console user at install time)
+        HeadlessLauncher = $true        # Logon mode: start via 'conhost --headless' so no window flashes
+    }
+}
+
+function Read-Config {
+    $cfg = Get-DefaultConfig
+    if (Test-Path $ConfigFile) {
+        try {
+            $file = Get-Content $ConfigFile -Raw | ConvertFrom-Json
+            foreach ($name in $cfg.PSObject.Properties.Name) {
+                if ($null -ne $file.$name) { $cfg.$name = $file.$name }
+            }
+        } catch {
+            Write-Log "Config file unreadable, using defaults: $($_.Exception.Message)" 'WARN'
+        }
+    }
+    $cfg.Apps = @($cfg.Apps | Where-Object { $_ } | ForEach-Object { "$_".Trim() })
+    return $cfg
+}
+
+function Save-Config($cfg) {
+    if (-not (Test-Path $BaseDir)) { New-Item -ItemType Directory -Path $BaseDir -Force | Out-Null }
+    $cfg | ConvertTo-Json -Depth 4 | Set-Content -Path $ConfigFile -Encoding UTF8
+    Write-Log "Config saved to $ConfigFile"
+}
+
+# =============================== HELPERS =================================
+function Test-Admin {
+    ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()
+    ).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+}
+
+function Get-ConsoleUser {
+    try { $u = (Get-CimInstance Win32_ComputerSystem -ErrorAction Stop).UserName } catch { $u = $null }
+    if ($u) { $u } else { "$env:USERDOMAIN\$env:USERNAME" }
+}
+
+function Test-ProcDumpSignature([string]$Path) {
+    $sig = Get-AuthenticodeSignature -FilePath $Path
+    return ($sig.Status -eq 'Valid' -and $sig.SignerCertificate.Subject -match 'O=Microsoft Corporation')
+}
+
+function Install-ProcDump([switch]$Force) {
+    if ((Test-Path $ProcDumpExe) -and -not $Force) {
+        if (Test-ProcDumpSignature $ProcDumpExe) { Write-Log "ProcDump present: $ProcDumpExe"; return $true }
+        Write-Log "Existing ProcDump failed signature check, re-downloading." 'WARN'
+    }
+    New-Item -ItemType Directory -Path $ToolsDir -Force | Out-Null
+    $zip = Join-Path $env:TEMP "Procdump_$PID.zip"
+    $tmp = Join-Path $env:TEMP "Procdump_$PID"
+    $localExe = $null
+
+    try {
+        [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
+        $ProgressPreference = 'SilentlyContinue'
+        Write-Log "Downloading ProcDump from $ProcDumpUrl"
+        Invoke-WebRequest -Uri $ProcDumpUrl -OutFile $zip -UseBasicParsing -ErrorAction Stop
+    } catch {
+        Write-Log "Download failed: $($_.Exception.Message)" 'ERROR'
+        if (-not $script:EchoLog) { return $false }
+        $p = Read-Host 'Path to a local Procdump.zip or procdump exe (Enter to cancel)'
+        if ([string]::IsNullOrWhiteSpace($p) -or -not (Test-Path $p)) { return $false }
+        if ($p -like '*.zip') { $zip = $p } else { $localExe = $p }
+    }
+
+    try {
+        if ($localExe) {
+            Copy-Item $localExe $ProcDumpExe -Force
+        } else {
+            Expand-Archive -Path $zip -DestinationPath $tmp -Force
+            Get-ChildItem $tmp -File | Where-Object { $_.Name -like 'procdump*.exe' -or $_.Name -like 'Eula*' } |
+                Copy-Item -Destination $ToolsDir -Force
+        }
+        if (-not (Test-Path $ProcDumpExe)) { throw "$ProcDumpExeName not found after extraction." }
+        if (-not (Test-ProcDumpSignature $ProcDumpExe)) {
+            Remove-Item $ProcDumpExe -Force
+            throw 'Signature check failed (not a valid Microsoft-signed binary). File removed.'
+        }
+        Write-Log "ProcDump installed and verified: $ProcDumpExe ($((Get-Item $ProcDumpExe).VersionInfo.FileVersion))"
+        return $true
+    } catch {
+        Write-Log "ProcDump install failed: $($_.Exception.Message)" 'ERROR'
+        return $false
+    } finally {
+        if (-not $localExe -and $zip -like "$env:TEMP*") { Remove-Item $zip -Force -ErrorAction SilentlyContinue }
+        Remove-Item $tmp -Recurse -Force -ErrorAction SilentlyContinue
+    }
+}
+
+# ---------- Safe ProcDump shutdown ----------
+# ProcDump attaches to the app as a debugger. If ProcDump is KILLED while attached, Windows
+# terminates the app too. So: always ask ProcDump to detach (Ctrl+C / -cancel), wait, and only
+# force-end instances that are still just waiting (-w) with no target running.
+
+function Get-OurProcDumps {
+    @(Get-CimInstance Win32_Process -Filter "Name LIKE 'procdump%'" -ErrorAction SilentlyContinue |
+      Where-Object { $_.ExecutablePath -and $_.ExecutablePath -like "$ToolsDir\*" })
+}
+
+# Which configured app a ProcDump instance is for (from its command line), or $null.
+function Get-ProcDumpApp($pd, $cfg) {
+    foreach ($app in $cfg.Apps) {
+        if ($pd.CommandLine -match "(?i)\s$([regex]::Escape($app))(\s|`"|$)") { return $app }
+    }
+    $null
+}
+
+function Test-AppRunning([string]$App) {
+    [bool](Get-Process -Name ([IO.Path]::GetFileNameWithoutExtension($App)) -ErrorAction SilentlyContinue)
+}
+
+# Sends Ctrl+C to a console process from a separate hidden helper (so our own console is untouched).
+# For ProcDump, Ctrl+C = "end monitoring without terminating the process".
+function Send-CtrlC([int]$ProcessId) {
+    $code = @"
+Add-Type -Namespace W -Name K -MemberDefinition '
+[DllImport("kernel32.dll")] public static extern bool FreeConsole();
+[DllImport("kernel32.dll")] public static extern bool AttachConsole(uint p);
+[DllImport("kernel32.dll")] public static extern bool SetConsoleCtrlHandler(System.IntPtr h, bool add);
+[DllImport("kernel32.dll")] public static extern bool GenerateConsoleCtrlEvent(uint e, uint g);'
+[void][W.K]::FreeConsole()
+if ([W.K]::AttachConsole($ProcessId)) {
+    [void][W.K]::SetConsoleCtrlHandler([IntPtr]::Zero, `$true)
+    [void][W.K]::GenerateConsoleCtrlEvent(0, 0)
+    Start-Sleep -Milliseconds 500
+}
+"@
+    $enc = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($code))
+    try {
+        Start-Process powershell.exe -ArgumentList "-NoProfile -NonInteractive -WindowStyle Hidden -EncodedCommand $enc" `
+                      -WindowStyle Hidden -Wait -ErrorAction Stop
+    } catch { Write-Log "Ctrl+C helper failed for PID ${ProcessId}: $($_.Exception.Message)" 'WARN' }
+}
+
+function Stop-ProcDumpInstances($cfg, [int]$TimeoutSec = 30) {
+    $pds = Get-OurProcDumps
+    if (-not $pds) { return }
+    Write-Log "Detaching $($pds.Count) ProcDump instance(s) gracefully..."
+
+    # 1) Ctrl+C every instance (detaches if attached, quits if waiting)
+    foreach ($pd in $pds) { Send-CtrlC $pd.ProcessId }
+
+    # 2) Also use ProcDump's own -cancel for apps that are running (ProcDump 10+)
+    Start-Sleep -Seconds 2
+    if ((Get-OurProcDumps) -and (Test-Path $ProcDumpExe)) {
+        foreach ($app in $cfg.Apps) {
+            foreach ($proc in @(Get-Process -Name ([IO.Path]::GetFileNameWithoutExtension($app)) -ErrorAction SilentlyContinue)) {
+                & $ProcDumpExe -accepteula -cancel $proc.Id 2>&1 | Out-Null
+            }
+        }
+    }
+
+    # 3) Wait for them to exit on their own
+    $deadline = (Get-Date).AddSeconds($TimeoutSec)
+    while ((Get-OurProcDumps) -and (Get-Date) -lt $deadline) { Start-Sleep -Milliseconds 500 }
+
+    # 4) Leftovers: end only those whose app is NOT running (nothing attached -> safe)
+    foreach ($pd in (Get-OurProcDumps)) {
+        $app = Get-ProcDumpApp $pd $cfg
+        if ($app -and -not (Test-AppRunning $app)) {
+            Invoke-CimMethod -InputObject $pd -MethodName Terminate | Out-Null
+            Write-Log "Ended waiting ProcDump PID $($pd.ProcessId) ($app not running, nothing attached)."
+        } else {
+            Write-Log "ProcDump PID $($pd.ProcessId) ($app) did not detach - LEFT RUNNING so $app is not terminated." 'WARN'
+        }
+    }
+    $n = @(Get-OurProcDumps).Count
+    if ($n -eq 0) { Write-Log 'All ProcDump instances detached.' }
+}
+
+# ProcDump instances still attached after a stop attempt are taken over instead of
+# starting duplicates; they are monitored until they exit (their output isn't captured).
+function Get-AdoptedMonitors($cfg) {
+    $map = @{}
+    foreach ($pd in (Get-OurProcDumps)) {
+        $app = Get-ProcDumpApp $pd $cfg
+        if (-not $app -or $map.ContainsKey($app)) { continue }
+        $proc = Get-Process -Id $pd.ProcessId -ErrorAction SilentlyContinue
+        if (-not $proc) { continue }
+        try { $null = $proc.Handle } catch { }
+        $map[$app] = [pscustomobject]@{ Process = $proc; File = $null; Pos = 0L; Partial = ''; Enc = $null; App = $app; Started = Get-Date }
+        Write-Log "Adopted running ProcDump PID $($pd.ProcessId) for $app."
+    }
+    $map
+}
+
+# =============================== VERSION INFO ============================
+function Get-ExeInfoText([string]$Path) {
+    try {
+        $f  = Get-Item -LiteralPath $Path -ErrorAction Stop
+        $vi = $f.VersionInfo
+        '{0} | FileVersion {1} | ProductVersion {2} | Modified {3:yyyy-MM-dd HH:mm:ss} | {4:N0} KB' -f `
+            $Path, $vi.FileVersion, $vi.ProductVersion, $f.LastWriteTime, ($f.Length / 1KB)
+    } catch { "$Path | version unavailable: $($_.Exception.Message)" }
+}
+
+# Logs path + version whenever the set of running instances of an app changes.
+function Update-AppVersions($cfg, $seen, $lastInfo) {
+    foreach ($app in $cfg.Apps) {
+        $name  = [IO.Path]::GetFileNameWithoutExtension($app)
+        $procs = @(Get-Process -Name $name -ErrorAction SilentlyContinue)
+        $ids   = ($procs | ForEach-Object { $_.Id } | Sort-Object) -join ','
+        if ($ids -eq $seen[$app]) { continue }
+
+        $wasRunning = [bool]$seen[$app]
+        $seen[$app] = $ids
+        if (-not $procs) { if ($wasRunning) { Write-Log "$app no longer running." }; continue }
+
+        $lines = foreach ($p in $procs) {
+            $path = try { $p.Path } catch { $null }
+            if ($path) { "PID $($p.Id): $(Get-ExeInfoText $path)" } else { "PID $($p.Id): path not accessible" }
+        }
+        $lastInfo[$app] = @($lines)
+        foreach ($l in $lines) { Write-Log "$app running - $l" }
+    }
+}
+
+# =============================== DUMP ANALYSIS ===========================
+# keys are hex strings (PowerShell parses 0xC0000005 as a negative Int32, so literals won't match)
+$ExceptionNames = @{
+    'C0000005' = 'ACCESS_VIOLATION';        'C0000374' = 'HEAP_CORRUPTION'
+    'C0000409' = 'STACK_BUFFER_OVERRUN / FAIL_FAST'; 'C00000FD' = 'STACK_OVERFLOW'
+    'E0434352' = '.NET (CLR) EXCEPTION';    'E06D7363' = 'C++ EXCEPTION'
+    '80000003' = 'BREAKPOINT';              '80000004' = 'SINGLE_STEP'
+    'C0000094' = 'INTEGER_DIVIDE_BY_ZERO';  'C000001D' = 'ILLEGAL_INSTRUCTION'
+    'C0000096' = 'PRIVILEGED_INSTRUCTION';  'C0000006' = 'IN_PAGE_ERROR'
+    'C0000008' = 'INVALID_HANDLE';          'C0000420' = 'ASSERTION_FAILURE'
+    'C0000602' = 'FAIL_FAST_EXCEPTION';     'C000041D' = 'FATAL_USER_CALLBACK_EXCEPTION'
+}
+
+# Reads header, exception record, process id and ProcDump's comment straight from the .dmp
+# (only a few KB are read, even for multi-GB dumps).
+function Get-DumpInfo([string]$Path) {
+    $r = [pscustomobject]@{ ProcessId = $null; ThreadId = $null; Code = $null; Address = $null
+                            Params = @(); Comment = ''; Trigger = ''; Exception = '' }
+    $fs = [IO.File]::Open($Path, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::ReadWrite)
+    try {
+        $br = New-Object IO.BinaryReader($fs)
+        if ($br.ReadUInt32() -ne 0x504D444D) { return $null }        # 'MDMP'
+        [void]$br.ReadUInt32()
+        $count = $br.ReadUInt32(); $dirRva = $br.ReadUInt32()
+        $fs.Position = $dirRva
+        $dir = @(for ($i = 0; $i -lt $count; $i++) { ,@($br.ReadUInt32(), $br.ReadUInt32(), $br.ReadUInt32()) })
+        foreach ($s in $dir) {
+            $type = $s[0]; $size = $s[1]; $rva = $s[2]
+            if ($type -eq 6 -and $size -ge 40) {                      # ExceptionStream
+                $fs.Position = $rva
+                $r.ThreadId = $br.ReadUInt32(); [void]$br.ReadUInt32()
+                $r.Code = $br.ReadUInt32(); [void]$br.ReadUInt32(); [void]$br.ReadUInt64()
+                $r.Address = $br.ReadUInt64()
+                $np = [Math]::Min($br.ReadUInt32(), 15); [void]$br.ReadUInt32()
+                $r.Params = @(for ($j = 0; $j -lt $np; $j++) { $br.ReadUInt64() })
+            }
+            elseif ($type -eq 15 -and $size -ge 12) {                 # MiscInfoStream
+                $fs.Position = $rva
+                [void]$br.ReadUInt32(); $flags = $br.ReadUInt32(); $p = $br.ReadUInt32()
+                if ($flags -band 1) { $r.ProcessId = $p }
+            }
+            elseif (($type -eq 10 -or $type -eq 11) -and $size -gt 0 -and $size -lt 65536 -and -not $r.Comment) {
+                $fs.Position = $rva                                   # CommentStreamA / W
+                $enc = if ($type -eq 11) { [Text.Encoding]::Unicode } else { [Text.Encoding]::ASCII }
+                $r.Comment = $enc.GetString($br.ReadBytes([int]$size)).Trim([char]0, ' ', "`r", "`n")
+            }
+        }
+    } finally { $fs.Dispose() }
+
+    if ($null -ne $r.Code) {
+        $hex  = '{0:X8}' -f $r.Code
+        $name = $ExceptionNames[$hex]
+        $r.Exception = '0x{0}{1} at 0x{2:X} on thread {3}' -f $hex, $(if ($name) { " $name" } else { '' }), $r.Address, $r.ThreadId
+        if ($hex -eq 'C0000005' -and $r.Params.Count -ge 2) {
+            $op = switch ($r.Params[0]) { 0 { 'read from' } 1 { 'write to' } 8 { 'execute (DEP) at' } default { 'access to' } }
+            $r.Exception += ' ({0} 0x{1:X})' -f $op, $r.Params[1]
+        }
+    }
+    # ProcDump's comment: "*** procdump <args>" + "*** <reason>" lines
+    $reason = @($r.Comment -split "`r?`n" | ForEach-Object { ($_ -replace '^\*+\s*', '').Trim() } |
+                Where-Object { $_ -and $_ -notmatch '^procdump(64|64a)?(\.exe)?\s' })
+    $r.Trigger = if ($reason) { $reason -join '; ' }
+                 elseif ($r.Exception) { 'Exception (no ProcDump comment in dump)' }
+                 else { 'Unknown (no exception record and no ProcDump comment - likely hang/manual trigger)' }
+    $r
+}
+
+function Get-DumpApp($cfg, [string]$FileName) {
+    $cfg.Apps | Where-Object { $FileName -like "$([IO.Path]::GetFileNameWithoutExtension($_))*" } | Select-Object -First 1
+}
+
+# Handles new dumps once fully written: reads the reason, detects repeat captures of the same
+# event, writes <dump>.info.txt, and logs a one-line summary.
+#   $known   : set of dump paths already handled
+#   $pending : path -> last seen size (dump still being written)
+#   $recent  : app -> last primary dump info (for duplicate detection)
+function Invoke-NewDumps($cfg, $known, $pending, $recent, $lastInfo) {
+    $dumps = @(Get-ChildItem -Path $cfg.DumpDir -Filter *.dmp -File -ErrorAction SilentlyContinue | Sort-Object CreationTime)
+    foreach ($d in $dumps) {
+        if ($known.Contains($d.FullName)) { continue }
+
+        # complete = size unchanged since last check, and no writer holds the file
+        if (-not $pending.ContainsKey($d.FullName) -or $pending[$d.FullName] -ne $d.Length) {
+            if (-not $pending.ContainsKey($d.FullName)) { Write-Log "Dump being written: $($d.Name)" }
+            $pending[$d.FullName] = $d.Length; continue
+        }
+        try { ([IO.File]::Open($d.FullName, 'Open', 'Read', 'Read')).Dispose() } catch { continue }
+        $pending.Remove($d.FullName); [void]$known.Add($d.FullName)
+
+        $app  = Get-DumpApp $cfg $d.Name
+        $info = try { Get-DumpInfo $d.FullName } catch { $null }
+        $ver  = if ($app -and $lastInfo[$app]) { $lastInfo[$app] } else { @('(no version info recorded for this app)') }
+
+        # ---- duplicate detection (same process frozen at the same event) ----
+        $dupOf = $null; $why = ''
+        $prev  = if ($app) { $recent[$app] } else { $null }
+        if ($info -and $prev -and $info.ProcessId -and $info.ProcessId -eq $prev.Info.ProcessId) {
+            if ($null -ne $info.Code -and $info.Code -eq $prev.Info.Code -and
+                $info.Address -eq $prev.Info.Address -and $info.ThreadId -eq $prev.Info.ThreadId) {
+                $dupOf = $prev.Name; $why = 'same process, thread, exception code and address'
+            }
+            elseif ($null -eq $info.Code -and $null -ne $prev.Info.Code -and
+                    ($d.CreationTime - $prev.Time).TotalSeconds -lt $cfg.DuplicateWindowSeconds) {
+                $dupOf = $prev.Name; $why = 'hang trigger while the process was still stopped at the exception'
+            }
+        }
+        if (-not $dupOf -and $app -and $info) { $recent[$app] = @{ Name = $d.Name; Info = $info; Time = $d.CreationTime } }
+
+        $summary = if ($info) { "$($info.Trigger)$(if ($info.Exception) { ' | ' + $info.Exception })$(if ($info.ProcessId) { ' | PID ' + $info.ProcessId })" }
+                   else { 'could not read dump header' }
+
+        if ($dupOf -and $cfg.DuplicateAction -eq 'Delete') {
+            try {
+                Remove-Item -LiteralPath $d.FullName -Force -ErrorAction Stop
+                Write-Log "Duplicate capture deleted: $($d.Name) = repeat of $dupOf ($why)." 'WARN'
+            } catch { Write-Log "Duplicate $($d.Name) could not be deleted: $($_.Exception.Message)" 'WARN' }
+            continue
+        }
+
+        $text = @(
+            "Dump        : $($d.Name)"
+            "Created     : {0:yyyy-MM-dd HH:mm:ss}" -f $d.CreationTime
+            "Size        : {0:N0} MB" -f ($d.Length / 1MB)
+            "App         : $app"
+            "Reason      : $(if ($info) { $info.Trigger } else { 'unknown' })"
+            "Exception   : $(if ($info -and $info.Exception) { $info.Exception } else { '(none - not an exception dump)' })"
+            "Process ID  : $(if ($info) { $info.ProcessId })"
+            "Duplicate   : $(if ($dupOf) { "YES - repeat of $dupOf ($why)" } else { 'no (primary)' })"
+            "Computer    : $env:COMPUTERNAME"
+            "OS          : $([Environment]::OSVersion.VersionString)"
+            "Executable(s) at time of dump:"
+        ) + ($ver | ForEach-Object { "  $_" })
+        if ($info -and $info.Comment) { $text += @('', 'ProcDump comment in dump:') + ($info.Comment -split "`r?`n" | ForEach-Object { "  $_" }) }
+
+        try { Set-Content -LiteralPath ([IO.Path]::ChangeExtension($d.FullName, '.info.txt')) -Value $text -Encoding UTF8 -ErrorAction Stop }
+        catch { Write-Log "Could not write info file for $($d.Name): $($_.Exception.Message)" 'WARN' }
+
+        $lvl = if ($dupOf) { 'WARN' } else { 'INFO' }
+        Write-Log ("Dump complete: {0} ({1:N0} MB) - {2}{3}" -f $d.Name, ($d.Length / 1MB), $summary,
+                   $(if ($dupOf) { " - DUPLICATE of $dupOf (kept)" } else { '' })) $lvl
+    }
+    # forget dumps that no longer exist
+    $existing = @($dumps | ForEach-Object { $_.FullName })
+    @($known)        | Where-Object { $_ -notin $existing } | ForEach-Object { [void]$known.Remove($_) }
+    @($pending.Keys) | Where-Object { $_ -notin $existing } | ForEach-Object { $pending.Remove($_) }
+}
+
+# Effective ProcDump arguments. -n comes from the config; if ProcDumpArgs has no -n, -n 1 is used.
+# With -n 1 the monitor re-arms ProcDump after each dump (with a cooldown), so a process that stays
+# frozen after an exception isn't captured over and over by the hang trigger.
+function Get-EffectiveArgs($cfg) {
+    $a = ($cfg.ProcDumpArgs -replace '\s{2,}', ' ').Trim()
+    if ($a -notmatch '(^|\s)-accepteula(\s|$)') { $a = "-accepteula $a" }
+    if ($a -notmatch '(^|\s)-n\s+\d+') { $a = "$a -n 1" }
+    $a
+}
+
+# =============================== PROCDUMP OUTPUT CAPTURE =================
+# ProcDump is started hidden through cmd.exe with its output redirected to its own log file
+# (Logs\ProcDump_<app>_<datetime>.log, kept like the other logs). Each loop the monitor also
+# copies new lines into the main log, so attach, triggers and dump writes all show up there.
+function Start-ProcDumpCaptured([string]$App, [string]$ArgLine) {
+    New-Item -ItemType Directory -Path $LogDir -Force | Out-Null
+    $name    = [IO.Path]::GetFileNameWithoutExtension($App)
+    $outFile = Join-Path $LogDir ('ProcDump_{0}_{1:yyyyMMdd_HHmmss}.log' -f $name, (Get-Date))
+    if (Test-Path -LiteralPath $outFile) { $outFile = $outFile -replace '\.log$', ('_{0:fff}.log' -f (Get-Date)) }
+
+    $psi = New-Object System.Diagnostics.ProcessStartInfo
+    $psi.FileName        = Join-Path $env:SystemRoot 'System32\cmd.exe'
+    $psi.Arguments       = "/d /c `"`"$ProcDumpExe`" $ArgLine > `"$outFile`" 2>&1`""
+    $psi.UseShellExecute = $false
+    $psi.CreateNoWindow  = $true
+    $proc = [System.Diagnostics.Process]::Start($psi)
+
+    [pscustomobject]@{ Process = $proc; File = $outFile; Pos = 0L; Partial = ''; Enc = $null; App = $App; Started = Get-Date }
+}
+
+function Read-ProcDumpOutput($state, [switch]$Final) {
+    if (-not $state -or -not $state.File) { return }
+    $n = 0
+    if (Test-Path -LiteralPath $state.File) {
+        try {
+            $share = [IO.FileShare]::ReadWrite -bor [IO.FileShare]::Delete
+            $fs = New-Object IO.FileStream($state.File, [IO.FileMode]::Open, [IO.FileAccess]::Read, $share)
+            try {
+                if ($fs.Length -gt $state.Pos) {
+                    [void]$fs.Seek($state.Pos, [IO.SeekOrigin]::Begin)
+                    $buf = New-Object byte[] ([int]($fs.Length - $state.Pos))
+                    $n = $fs.Read($buf, 0, $buf.Length)
+                    $state.Pos += $n
+                }
+            } finally { $fs.Dispose() }
+        } catch { return }
+    }
+
+    $text = $state.Partial
+    if ($n -gt 0) {
+        if (-not $state.Enc) {   # ProcDump may write ANSI/OEM or UTF-16 depending on version
+            $state.Enc = if ($n -ge 2 -and $buf[1] -eq 0) { [Text.Encoding]::Unicode }
+                         else { [Text.Encoding]::GetEncoding([Globalization.CultureInfo]::CurrentCulture.TextInfo.OEMCodePage) }
+        }
+        $text += $state.Enc.GetString($buf, 0, $n)
+    }
+
+    $lines = @($text -split "`r?`n")
+    if ($Final) { $state.Partial = '' }
+    else        { $state.Partial = $lines[-1]; $lines = if ($lines.Count -gt 1) { $lines[0..($lines.Count - 2)] } else { @() } }
+
+    foreach ($l in $lines) {
+        $l = $l.Trim([char]0, [char]0xFEFF, ' ', "`t")
+        if (-not $l) { continue }
+        if ($l -match '^(ProcDump v|Copyright \(C\)|Sysinternals - )') { continue }   # banner
+        $lvl = if ($l -match 'error|failed|unable|denied') { 'WARN' } else { 'INFO' }
+        Write-Log "[ProcDump $($state.App)] $l" $lvl
+    }
+}
+
+# Final read; the ProcDump log file is kept (only removed if it ended up empty).
+function Close-ProcDumpCapture($state) {
+    if (-not $state -or -not $state.File) { return }
+    Read-ProcDumpOutput $state -Final
+    $f = Get-Item -LiteralPath $state.File -ErrorAction SilentlyContinue
+    if ($f -and $f.Length -eq 0) { Remove-Item -LiteralPath $state.File -Force -ErrorAction SilentlyContinue }
+}
+
+function Remove-OldProcDumpLogs([int]$Keep, $active) {
+    Get-ChildItem -Path $LogDir -Filter 'ProcDump_*.log' -File -ErrorAction SilentlyContinue |
+        Where-Object { $_.FullName -notin $active } |
+        Sort-Object LastWriteTime -Descending | Select-Object -Skip $Keep |
+        ForEach-Object { Remove-Item $_.FullName -Force -ErrorAction SilentlyContinue }
+}
+
+# =============================== SCHEDULED TASK ==========================
+function Register-MonitorTask($cfg) {
+    $psExe  = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+    $psArgs = "-NoProfile -NonInteractive -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$InstalledScript`" -Monitor"
+
+    if ($cfg.RunMode -eq 'Startup') {
+        $action    = New-ScheduledTaskAction -Execute $psExe -Argument $psArgs -WorkingDirectory $BaseDir
+        $trigger   = New-ScheduledTaskTrigger -AtStartup
+        $trigger.Delay = 'PT1M'
+        $principal = New-ScheduledTaskPrincipal -UserId 'NT AUTHORITY\SYSTEM' -LogonType ServiceAccount -RunLevel Highest
+        $who = 'SYSTEM at startup'
+    } else {
+        $user = if ($cfg.TaskUser) { $cfg.TaskUser } else { Get-ConsoleUser }
+        if ($cfg.HeadlessLauncher) {
+            $conhost = Join-Path $env:SystemRoot 'System32\conhost.exe'
+            $action  = New-ScheduledTaskAction -Execute $conhost -Argument "--headless `"$psExe`" $psArgs" -WorkingDirectory $BaseDir
+        } else {
+            $action  = New-ScheduledTaskAction -Execute $psExe -Argument $psArgs -WorkingDirectory $BaseDir
+        }
+        $trigger   = New-ScheduledTaskTrigger -AtLogOn -User $user
+        $trigger.Delay = 'PT30S'
+        $principal = New-ScheduledTaskPrincipal -UserId $user -LogonType Interactive -RunLevel Highest
+        $who = "$user at logon"
+    }
+
+    $settings = New-ScheduledTaskSettingsSet -ExecutionTimeLimit ([TimeSpan]::Zero) `
+        -RestartCount 999 -RestartInterval (New-TimeSpan -Minutes 1) `
+        -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable `
+        -MultipleInstances IgnoreNew -Hidden
+
+    Register-ScheduledTask -TaskName $TaskName -Action $action -Trigger $trigger -Principal $principal `
+        -Settings $settings -Description 'ProcDump crash/hang dump monitor' -Force | Out-Null
+    Write-Log "Scheduled task '$TaskName' registered (runs as $who)."
+}
+
+function Get-MonitorTask { Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue }
+
+# Graceful: ask the monitor to stop via a request file; it detaches ProcDump and exits by itself.
+# The task is only force-ended if the monitor doesn't respond in time.
+function Stop-MonitorTask($cfg, [int]$TimeoutSec = 90) {
+    $task = Get-MonitorTask
+    if ($task -and $task.State -eq 'Running') {
+        Set-Content -Path $StopFile -Value (Get-Date -Format o) -ErrorAction SilentlyContinue
+        Write-Log 'Asked monitor to stop (detaching ProcDump without touching the apps)...'
+        $deadline = (Get-Date).AddSeconds($TimeoutSec)
+        while ((Get-Date) -lt $deadline -and (Get-MonitorTask).State -eq 'Running') { Start-Sleep -Seconds 1 }
+        if ((Get-MonitorTask).State -eq 'Running') {
+            Write-Log "Monitor did not stop within $TimeoutSec s - ending task." 'WARN'
+            Stop-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
+        } else {
+            Write-Log 'Monitor stopped.'
+        }
+    }
+    Remove-Item $StopFile -Force -ErrorAction SilentlyContinue
+    Stop-ProcDumpInstances $cfg      # anything left over, still graceful
+}
+
+function Start-MonitorTask {
+    if (Get-MonitorTask) { Start-ScheduledTask -TaskName $TaskName; Write-Log 'Monitor task started.' }
+    else { Write-Log 'Not installed - nothing to start.' 'WARN' }
+}
+
+# =============================== VERSION / UPDATE ========================
+# Reads $ScriptVersion from a script file. Copies from before versioning return 0.0.0; $null = no file.
+function Get-ScriptVersionFromFile([string]$Path) {
+    if (-not $Path -or -not (Test-Path -LiteralPath $Path)) { return $null }
+    $m = Select-String -LiteralPath $Path -Pattern '^\$ScriptVersion\s*=\s*''([\d\.]+)''' -List -ErrorAction SilentlyContinue
+    if ($m) { [version]$m.Matches[0].Groups[1].Value } else { [version]'0.0.0' }
+}
+
+function Format-Version($v) {
+    if ($null -eq $v) { 'not installed' } elseif ($v -eq [version]'0.0.0') { 'unversioned (pre-2.0.0)' } else { "$v" }
+}
+
+function Confirm-Step([string]$Question) {
+    if (-not $script:EchoLog) { return [bool]$Force }       # unattended: only with -Force
+    (Read-Host "$Question (y/N)") -eq 'y'
+}
+
+function Backup-Install([version]$OldVersion) {
+    $bak = Join-Path $BaseDir 'Backup'
+    New-Item -ItemType Directory -Path $bak -Force | Out-Null
+    $tag = '{0}_{1:yyyyMMdd_HHmmss}' -f $(if ($OldVersion -eq [version]'0.0.0') { 'unversioned' } else { "v$OldVersion" }), (Get-Date)
+    Copy-Item $InstalledScript (Join-Path $bak "$AppName`_$tag.ps1") -Force
+    if (Test-Path $ConfigFile) { Copy-Item $ConfigFile (Join-Path $bak "config_$tag.json") -Force }
+    Write-Log "Backup of installed script and config: $bak (*_$tag)"
+    # keep the 5 newest backups of each kind
+    foreach ($f in "$AppName`_*.ps1", 'config_*.json') {
+        Get-ChildItem $bak -Filter $f -File | Sort-Object LastWriteTime -Descending | Select-Object -Skip 5 |
+            Remove-Item -Force -ErrorAction SilentlyContinue
+    }
+}
+
+function Invoke-Update {
+    $new = [version]$ScriptVersion
+    $old = Get-ScriptVersionFromFile $InstalledScript
+    Write-Log "Update check - installed: $(Format-Version $old) | this script: $new"
+
+    if ($null -eq $old) { Write-Log 'Nothing installed yet - use Install.' 'WARN'; return }
+    if ($PSCommandPath -eq $InstalledScript) {
+        Write-Log 'This IS the installed copy. Run Update from the new script file you want to install.' 'WARN'; return
+    }
+
+    if ($new -lt $old) {
+        Write-Log "This script ($new) is OLDER than the installed one ($old)." 'WARN'
+        if (-not (Confirm-Step 'Downgrade anyway?')) { Write-Log 'Update cancelled.'; return }
+    } elseif ($new -eq $old) {
+        Write-Log "Already up to date ($new)."
+        if (-not (Confirm-Step 'Reinstall the same version?')) { return }
+    }
+
+    $task = Get-MonitorTask
+    if ($old -lt $GracefulStopSince -and $task -and $task.State -eq 'Running') {
+        Write-Log ("The installed monitor ($(Format-Version $old)) does not support graceful stop. Stopping it may " +
+                   "terminate the monitored apps. Close them first if possible.") 'WARN'
+        if (-not (Confirm-Step 'Continue and stop the old monitor now?')) { Write-Log 'Update cancelled.'; return }
+    }
+
+    Backup-Install $old
+    $cfg = Read-Config                      # existing settings + defaults for any new ones
+    # old monitors ignore the stop request, so don't wait the full 90 s for them
+    if ($old -lt $GracefulStopSince) { Stop-MonitorTask $cfg 10 } else { Stop-MonitorTask $cfg }
+
+    try {
+        Copy-Item -Path $PSCommandPath -Destination $InstalledScript -Force -ErrorAction Stop
+        Unblock-File -Path $InstalledScript -ErrorAction SilentlyContinue
+    } catch {
+        Write-Log "Copy failed: $($_.Exception.Message) - restarting the previous version." 'ERROR'
+        Start-MonitorTask; return
+    }
+    Save-Config $cfg                        # writes new settings into config.json so they're visible/editable
+    if (-not (Install-ProcDump)) { Write-Log 'ProcDump missing and could not be downloaded.' 'WARN' }
+    Register-MonitorTask $cfg               # task definition may have changed between versions
+    Start-MonitorTask
+
+    $now = Get-ScriptVersionFromFile $InstalledScript
+    if ($now -eq $new) { Write-Log "Update complete: $(Format-Version $old) -> $new." }
+    else { Write-Log "Installed copy reports $(Format-Version $now) after update - check the files." 'ERROR' }
+}
+
+# =============================== INSTALL / UNINSTALL =====================
+function Invoke-Install {
+    # Already installed from somewhere else -> this is an update (with version check)
+    if ((Test-Path $InstalledScript) -and $PSCommandPath -ne $InstalledScript) {
+        Write-Log 'Already installed - running Update instead.'
+        Invoke-Update; return
+    }
+    $cfg = Read-Config
+    if (-not (Test-Path $ConfigFile)) {
+        if ($script:EchoLog) { Write-Host 'No config yet - running setup first.'; $cfg = Edit-Config $cfg }
+        else { Save-Config $cfg }
+    }
+    foreach ($d in @($BaseDir, $ToolsDir, $LogDir, $cfg.DumpDir)) { New-Item -ItemType Directory -Path $d -Force | Out-Null }
+
+    if (-not (Install-ProcDump)) { Write-Log 'Install aborted: ProcDump not available.' 'ERROR'; return }
+
+    if ($PSCommandPath -and ($PSCommandPath -ne $InstalledScript)) {
+        Copy-Item -Path $PSCommandPath -Destination $InstalledScript -Force
+        Unblock-File -Path $InstalledScript -ErrorAction SilentlyContinue
+        Write-Log "Script copied to $InstalledScript"
+    }
+
+    Stop-MonitorTask $cfg
+    Register-MonitorTask $cfg
+    Start-MonitorTask
+    Write-Log "Install complete (version $ScriptVersion)."
+}
+
+function Invoke-Uninstall {
+    $cfg = Read-Config
+    Stop-MonitorTask $cfg
+    if (Get-MonitorTask) { Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false; Write-Log 'Scheduled task removed.' }
+
+    $delDumps = $false; $delAll = $true
+    if ($script:EchoLog) {
+        $delDumps = (Read-Host "Delete dumps in $($cfg.DumpDir)? (y/N)") -eq 'y'
+        $delAll   = (Read-Host "Delete $BaseDir (config, logs, ProcDump)? (Y/n)") -ne 'n'
+    }
+    if ($delDumps) {
+        Get-ChildItem $cfg.DumpDir -Filter *.dmp -File -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue
+        Write-Log 'Dumps deleted.'
+    }
+    if ($delAll) {
+        Write-Log "Removing $BaseDir"
+        $script:LogFile = $null
+        Remove-Item $BaseDir -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    Write-Host 'Uninstall complete.'
+}
+
+# =============================== INTERACTIVE =============================
+function Read-Value([string]$Prompt, $Current) {
+    $v = Read-Host "$Prompt [$Current]"
+    if ([string]::IsNullOrWhiteSpace($v)) { $Current } else { $v.Trim() }
+}
+
+function Read-Int([string]$Prompt, [int]$Current, [int]$Min = 1) {
+    while ($true) {
+        $v = Read-Value $Prompt $Current
+        $n = 0
+        if ([int]::TryParse("$v", [ref]$n) -and $n -ge $Min) { return $n }
+        Write-Host "Enter a whole number >= $Min." -ForegroundColor Yellow
+    }
+}
+
+function Edit-Config($cfg) {
+    Write-Host "`n--- Setup (Enter keeps the current value) ---" -ForegroundColor Cyan
+    $apps = Read-Value 'Apps to monitor, comma separated' ($cfg.Apps -join ', ')
+    $cfg.Apps = @($apps -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ } |
+                  ForEach-Object { if ($_ -notlike '*.exe') { "$_.exe" } else { $_ } })
+    $cfg.DumpDir        = Read-Value 'Dump folder' $cfg.DumpDir
+    $cfg.KeepDumps      = Read-Int   'Number of newest dumps to keep' $cfg.KeepDumps
+    $cfg.ProcDumpArgs   = Read-Value 'ProcDump arguments (-e 1 = also first-chance exceptions; -n = dumps per session, 1 recommended)' $cfg.ProcDumpArgs
+    $cfg.CooldownSeconds = Read-Int  'Cooldown after a dump before re-arming on the same process (seconds)' $cfg.CooldownSeconds 0
+    while ($true) {
+        $a = Read-Value 'Duplicate captures of the same event: Delete / Keep' $cfg.DuplicateAction
+        if ($a -in 'Delete','Keep') { $cfg.DuplicateAction = (Get-Culture).TextInfo.ToTitleCase($a.ToLower()); break }
+        Write-Host 'Type Delete or Keep.' -ForegroundColor Yellow
+    }
+    $cfg.CheckSeconds   = Read-Int   'Process check interval (seconds)' $cfg.CheckSeconds
+    $cfg.CleanupSeconds = Read-Int   'Dump cleanup interval (seconds)' $cfg.CleanupSeconds
+    $cfg.LogKeep        = Read-Int   'Log files to keep' $cfg.LogKeep
+    $cfg.LogMaxMB       = Read-Int   'Max size per log file (MB)' $cfg.LogMaxMB
+
+    while ($true) {
+        $m = Read-Value 'Run mode: Logon (user session, needed for hang detection) / Startup (SYSTEM at boot)' $cfg.RunMode
+        if ($m -in 'Logon','Startup') { $cfg.RunMode = (Get-Culture).TextInfo.ToTitleCase($m.ToLower()); break }
+        Write-Host 'Type Logon or Startup.' -ForegroundColor Yellow
+    }
+    if ($cfg.RunMode -eq 'Logon') {
+        $def = if ($cfg.TaskUser) { $cfg.TaskUser } else { Get-ConsoleUser }
+        $cfg.TaskUser = Read-Value 'Run as user (DOMAIN\user)' $def
+        $cfg.HeadlessLauncher = (Read-Value 'Hide console completely with conhost --headless? (y/n)' ($(if ($cfg.HeadlessLauncher) {'y'} else {'n'}))) -eq 'y'
+    }
+
+    Save-Config $cfg
+    if (Get-MonitorTask) {
+        if ((Read-Host 'Re-register task and restart monitor with new settings? (Y/n)') -ne 'n') {
+            Stop-MonitorTask $cfg
+            Register-MonitorTask $cfg
+            Start-MonitorTask
+        }
+    }
+    return $cfg
+}
+
+function Show-Status {
+    $cfg  = Read-Config
+    $task = Get-MonitorTask
+    Write-Host "`n--- Status ---" -ForegroundColor Cyan
+    if ($task) {
+        $info = Get-ScheduledTaskInfo -TaskName $TaskName
+        Write-Host ("Task       : {0}  (last run {1}, result 0x{2:X})" -f $task.State, $info.LastRunTime, $info.LastTaskResult)
+        Write-Host ("Runs as    : {0}" -f $task.Principal.UserId)
+    } else { Write-Host 'Task       : not installed' -ForegroundColor Yellow }
+
+    Write-Host ("ProcDump   : {0}" -f $(if (Test-Path $ProcDumpExe) { "$ProcDumpExe ($((Get-Item $ProcDumpExe).VersionInfo.FileVersion))" } else { 'not downloaded' }))
+    Write-Host ("Version    : installed {0} | this script {1}" -f (Format-Version (Get-ScriptVersionFromFile $InstalledScript)), $ScriptVersion)
+    Write-Host ("Apps       : {0}" -f ($cfg.Apps -join ', '))
+
+    $pd = @(Get-CimInstance Win32_Process -Filter "Name LIKE 'procdump%'" -ErrorAction SilentlyContinue |
+            Where-Object { $_.ExecutablePath -like "$ToolsDir\*" })
+    Write-Host ("Monitors   : {0} running" -f $pd.Count)
+    $pd | ForEach-Object { Write-Host ("             PID {0}: {1}" -f $_.ProcessId, ($_.CommandLine -replace '^.*?\.exe"?\s*', '')) }
+
+    $dumps = @(Get-ChildItem $cfg.DumpDir -Filter *.dmp -File -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending)
+    $size  = ($dumps | Measure-Object Length -Sum).Sum / 1GB
+    Write-Host ("Dumps      : {0} of max {1} in {2} ({3:N2} GB)" -f $dumps.Count, $cfg.KeepDumps, $cfg.DumpDir, $size)
+    if ($dumps) { Write-Host ("Newest     : {0}  {1}" -f $dumps[0].LastWriteTime, $dumps[0].Name) }
+
+    $log = Get-ChildItem $LogDir -Filter "${AppName}_*.log" -File -ErrorAction SilentlyContinue |
+           Sort-Object LastWriteTime -Descending | Select-Object -First 1
+    if ($log) {
+        Write-Host ("Latest log : {0}" -f $log.FullName)
+        Get-Content $log.FullName -Tail 10 -ErrorAction SilentlyContinue | ForEach-Object { Write-Host "   $_" -ForegroundColor DarkGray }
+    }
+}
+
+function Show-Menu {
+    while ($true) {
+        $installed = [bool](Get-MonitorTask)
+        Write-Host "`n========== $AppName ==========" -ForegroundColor Cyan
+        $iv = Get-ScriptVersionFromFile $InstalledScript
+        Write-Host ("This script: v{0}   Installed: {1}   Config: {2}" -f $ScriptVersion, (Format-Version $iv),
+                    $(if (Test-Path $ConfigFile) {$ConfigFile} else {'not created'}))
+        if ($iv -and $iv -lt [version]$ScriptVersion -and $PSCommandPath -ne $InstalledScript) {
+            Write-Host "   >> Update available: $(Format-Version $iv) -> $ScriptVersion  (choose U)" -ForegroundColor Green
+        }
+        Write-Host ' 1) Setup / edit configuration'
+        Write-Host ' 2) Install (download ProcDump, copy script, create scheduled task, start)'
+        Write-Host ' 3) Status'
+        Write-Host ' 4) Start monitor'
+        Write-Host ' 5) Stop monitor'
+        Write-Host ' 6) Run monitor in this window (testing, Ctrl+C to stop)'
+        Write-Host ' 7) Update ProcDump to latest'
+        Write-Host ' 8) Open dump folder'
+        Write-Host ' 9) Uninstall'
+        Write-Host ' U) Update installed copy from this script (version check, backup, keeps config)'
+        Write-Host ' Q) Quit'
+        switch ((Read-Host 'Select').Trim().ToUpper()) {
+            '1' { $null = Edit-Config (Read-Config) }
+            '2' { Invoke-Install }
+            '3' { Show-Status }
+            '4' { Start-MonitorTask }
+            '5' { Stop-MonitorTask (Read-Config) }
+            '6' { Invoke-Monitor; $script:LogPrefix = "$AppName-Setup"; New-LogFile }
+            '7' { $cfg = Read-Config; $was = $installed -and (Get-MonitorTask).State -eq 'Running'
+                  if ($was) { Stop-MonitorTask $cfg }
+                  $null = Install-ProcDump -Force
+                  if ($was) { Start-MonitorTask } }
+            '8' { $d = (Read-Config).DumpDir; if (Test-Path $d) { Start-Process explorer.exe $d } else { Write-Host 'Folder does not exist yet.' } }
+            '9' { if ((Read-Host 'Really uninstall? (y/N)') -eq 'y') { Invoke-Uninstall } }
+            'U' { Invoke-Update }
+            'Q' { return }
+            default { Write-Host 'Unknown choice.' -ForegroundColor Yellow }
+        }
+    }
+}
+
+# =============================== MONITOR =================================
+function Invoke-Monitor {
+    $script:LogPrefix = $AppName
+    New-LogFile
+
+    $mutex = New-Object System.Threading.Mutex($false, $MutexName)
+    $owned = $false
+    try { $owned = $mutex.WaitOne(0) } catch [System.Threading.AbandonedMutexException] { $owned = $true }
+    if (-not $owned) { Write-Log 'Another monitor instance is already running - exiting.' 'WARN'; $mutex.Dispose(); return }
+
+    $cfg = Read-Config
+    $script:LogMaxMB = $cfg.LogMaxMB
+    $monitors    = @{}
+    $stopRequested = $false
+    $lastCleanup = [datetime]::MinValue
+    $cfgStamp    = if (Test-Path $ConfigFile) { (Get-Item $ConfigFile).LastWriteTimeUtc } else { $null }
+
+    try {
+        Write-Log ('=' * 70)
+        Write-Log "Monitor v$ScriptVersion starting. User: $env:USERDOMAIN\$env:USERNAME  Session: $((Get-Process -Id $PID).SessionId)  PS: $($PSVersionTable.PSVersion)"
+        Write-Log "Apps: $($cfg.Apps -join ', ') | Args: $(Get-EffectiveArgs $cfg) | Keep $($cfg.KeepDumps) dumps | Check $($cfg.CheckSeconds)s | Cleanup $($cfg.CleanupSeconds)s | Cooldown $($cfg.CooldownSeconds)s | Duplicates: $($cfg.DuplicateAction)"
+
+        if (-not (Test-Path $ProcDumpExe) -and -not (Install-ProcDump)) {
+            Write-Log 'ProcDump missing and could not be installed - exiting.' 'ERROR'
+            $script:ExitCode = 1; return
+        }
+        if (-not $cfg.Apps) { Write-Log 'No apps configured - exiting.' 'ERROR'; $script:ExitCode = 1; return }
+        New-Item -ItemType Directory -Path $cfg.DumpDir -Force | Out-Null
+
+        Remove-Item $StopFile -Force -ErrorAction SilentlyContinue   # stale request from earlier
+        Stop-ProcDumpInstances $cfg      # detach orphans from a previous run (gracefully)
+        $monitors = Get-AdoptedMonitors $cfg   # any that refused to detach: keep, don't duplicate
+
+        $seenProcs = @{}                 # app -> comma list of running PIDs
+        $lastInfo  = @{}                 # app -> version lines of latest running instance(s)
+        $pending   = @{}                 # dump path -> size while it is being written
+        $recent    = @{}                 # app -> last primary dump (duplicate detection)
+        $cooldown  = @{}                 # app -> @{ Until; Pids } - don't re-arm on the same process yet
+        $known     = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
+        Get-ChildItem -Path $cfg.DumpDir -Filter *.dmp -File -ErrorAction SilentlyContinue |
+            ForEach-Object { [void]$known.Add($_.FullName) }   # existing dumps: not re-analysed
+
+        while ($true) {
+            if (Test-Path $StopFile) {
+                Write-Log 'Stop requested.'
+                $stopRequested = $true
+                Remove-Item $StopFile -Force -ErrorAction SilentlyContinue
+                break
+            }
+
+            # 0) Track exe versions of running apps; analyse finished dumps (reason, duplicates)
+            Update-AppVersions $cfg $seenProcs $lastInfo
+            Invoke-NewDumps $cfg $known $pending $recent $lastInfo
+
+            $pdArgs = Get-EffectiveArgs $cfg
+
+            # 1) Keep one ProcDump per app armed, and copy its output into the log
+            foreach ($app in $cfg.Apps) {
+                $st = $monitors[$app]
+                if ($st -and -not $st.Process.HasExited) { Read-ProcDumpOutput $st; continue }
+
+                $appName = [IO.Path]::GetFileNameWithoutExtension($app)
+                $pidsNow = (@(Get-Process -Name $appName -ErrorAction SilentlyContinue) | ForEach-Object { $_.Id } | Sort-Object) -join ','
+
+                if ($st) {
+                    Close-ProcDumpCapture $st
+                    $monitors.Remove($app)
+                    $code = try { $st.Process.ExitCode } catch { '?' }
+                    $made = @(Get-ChildItem -Path $cfg.DumpDir -Filter "$appName*.dmp" -File -ErrorAction SilentlyContinue |
+                              Where-Object { $_.CreationTime -ge $st.Started.AddSeconds(-2) })
+                    if ($made -and $pidsNow -and $cfg.CooldownSeconds -gt 0) {
+                        $cooldown[$app] = @{ Until = (Get-Date).AddSeconds($cfg.CooldownSeconds); Pids = $pidsNow }
+                        Write-Log "ProcDump for $app exited after writing a dump (code $code). $app is still running (PID $pidsNow) - re-arming in $($cfg.CooldownSeconds)s, or as soon as a new $app process starts."
+                    } else {
+                        Write-Log "ProcDump for $app exited (code $code). Re-arming."
+                    }
+                }
+
+                # cooldown: same process(es) still alive and time not up -> wait
+                $cd = $cooldown[$app]
+                if ($cd) {
+                    if ((Get-Date) -lt $cd.Until -and $pidsNow -eq $cd.Pids) { continue }
+                    $cooldown.Remove($app)
+                    Write-Log "Cooldown for $app over$(if ($pidsNow -ne $cd.Pids) { ' (process changed)' }) - re-arming ProcDump."
+                }
+
+                $argLine = "$pdArgs $app `"$($cfg.DumpDir)`""
+                try {
+                    $monitors[$app] = Start-ProcDumpCaptured $app $argLine
+                    Write-Log "Started ProcDump for $app (launcher PID $($monitors[$app].Process.Id)): $argLine"
+                } catch {
+                    Write-Log "Failed to start ProcDump for ${app}: $($_.Exception.Message)" 'ERROR'
+                }
+            }
+
+            # 2) Housekeeping on its own timer
+            if (((Get-Date) - $lastCleanup).TotalSeconds -ge $cfg.CleanupSeconds) {
+                $lastCleanup = Get-Date
+
+                Get-ChildItem -Path $cfg.DumpDir -Filter *.dmp -File -ErrorAction SilentlyContinue |
+                    Sort-Object LastWriteTime -Descending | Select-Object -Skip $cfg.KeepDumps |
+                    ForEach-Object {
+                        try {
+                            Remove-Item $_.FullName -Force -ErrorAction Stop
+                            Remove-Item ([IO.Path]::ChangeExtension($_.FullName, '.info.txt')) -Force -ErrorAction SilentlyContinue
+                            Write-Log "Deleted old dump $($_.Name)"
+                        }
+                        catch { Write-Log "Could not delete $($_.Name) (in use?), will retry." 'WARN' }
+                    }
+                # info/version files whose dump is gone (.versions.txt = older script version)
+                Get-ChildItem -Path $cfg.DumpDir -Filter *.txt -File -ErrorAction SilentlyContinue |
+                    Where-Object { $_.Name -match '\.(info|versions)\.txt$' -and
+                                   -not (Test-Path -LiteralPath ($_.FullName -replace '\.(info|versions)\.txt$', '.dmp')) } |
+                    Remove-Item -Force -ErrorAction SilentlyContinue
+
+                Update-LogRoll
+                Remove-OldLogs $cfg.LogKeep
+                Remove-OldProcDumpLogs $cfg.LogKeep @($monitors.Values | ForEach-Object { $_.File })
+                Remove-Item (Join-Path $LogDir 'ProcDumpOutput') -Recurse -Force -ErrorAction SilentlyContinue   # folder from older version
+
+                # Pick up config changes without reinstalling
+                $stamp = if (Test-Path $ConfigFile) { (Get-Item $ConfigFile).LastWriteTimeUtc } else { $null }
+                if ($stamp -ne $cfgStamp) {
+                    Write-Log 'Config file changed - reloading and restarting ProcDump instances.'
+                    $cfgStamp = $stamp
+                    Stop-ProcDumpInstances $cfg
+                    $monitors.Values | ForEach-Object { Close-ProcDumpCapture $_ }
+                    $cfg = Read-Config
+                    $script:LogMaxMB = $cfg.LogMaxMB
+                    $monitors = Get-AdoptedMonitors $cfg
+                    $seenProcs = @{}
+                    $cooldown  = @{}
+                    New-Item -ItemType Directory -Path $cfg.DumpDir -Force | Out-Null
+                    $lastCleanup = [datetime]::MinValue
+                    continue
+                }
+            }
+
+            Start-Sleep -Seconds $cfg.CheckSeconds
+        }
+    }
+    catch {
+        Write-Log "Fatal error, monitor stopped: $($_.Exception.Message) (line $($_.InvocationInfo.ScriptLineNumber))" 'ERROR'
+    }
+    finally {
+        Write-Log 'Monitor stopping.'
+        # Requested stop or foreground test run: detach every ProcDump gracefully before exiting.
+        # (On a crash of the monitor itself, ProcDump keeps running and is taken over at next start.)
+        if ($stopRequested -or $script:EchoLog) {
+            Stop-ProcDumpInstances $cfg
+            $monitors.Values | ForEach-Object { Close-ProcDumpCapture $_ }
+        } else {
+            $monitors.Values | ForEach-Object { Read-ProcDumpOutput $_ -Final }
+        }
+        try { $mutex.ReleaseMutex() } catch { }
+        $mutex.Dispose()
+    }
+}
+
+# =============================== ENTRY POINT =============================
+if ($Monitor) {
+    Invoke-Monitor
+    exit $script:ExitCode
+}
+
+if (-not (Test-Admin)) {
+    $sw = if ($Install) { ' -Install' } elseif ($Update) { ' -Update' } elseif ($Uninstall) { ' -Uninstall' } else { '' }
+    if ($Force) { $sw += ' -Force' }
+    Write-Host 'Administrator rights required - relaunching elevated...'
+    Start-Process powershell.exe -Verb RunAs -ArgumentList "-NoProfile -ExecutionPolicy Bypass -File `"$PSCommandPath`"$sw"
+    exit
+}
+
+$script:LogPrefix = "$AppName-Setup"
+New-LogFile
+$script:EchoLog = -not ($Install -or $Update -or $Uninstall)   # menu mode prints to console; switches are silent
+Write-Log "Setup session (v$ScriptVersion) started by $env:USERDOMAIN\$env:USERNAME from $PSCommandPath"
+
+if     ($Install)   { Invoke-Install }
+elseif ($Update)    { Invoke-Update }
+elseif ($Uninstall) { Invoke-Uninstall }
+else                { Show-Menu }
