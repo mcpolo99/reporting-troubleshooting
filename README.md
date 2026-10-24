@@ -44,7 +44,7 @@ All source lives under `src/`; repo-level maintainer scripts under `scripts/`; t
 | `src/Get.ps1`, `src/run.bat` | bootstrap: download/version-check/install, then launch |
 | `src/ReportingToolkit.ps1` | main entry: sets paths, dot-sources components, opens GUI or `-CLI` menu |
 | `src/Schemas/` | `MainWindow.xaml`, `SharedStyles.xaml` (XAML lives here, not inside the scripts) |
-| `src/GUI/` | `Show-MainWindow.ps1`, `Set-WindowThemeResources.ps1` (light/dark), `Get-SystemUsesDarkMode.ps1` |
+| `src/GUI/` | `Show-MainWindow.ps1` (interactive window), `ToolRunspace.ps1` (per-tool background runspaces), `Set-WindowThemeResources.ps1` (light/dark), `Get-SystemUsesDarkMode.ps1` |
 | `src/CLI/` | `Show-CliMenu.ps1` |
 | `src/Helpers/` | `Start-Tool.ps1` |
 | `src/Common/` | `Logging.ps1`, `Common.ps1` - shared components dot-sourced by the tools |
@@ -58,8 +58,11 @@ All source lives under `src/`; repo-level maintainer scripts under `scripts/`; t
 | `ProcDump/ProcDumpMonitor.ps1` | Self-installing background monitor (scheduled task) that auto-captures crash / hang / exception dumps and keeps the newest N | Yes (scheduled task; also copies `Common/` next to its installed copy) |
 | `ProcDump/ProcDumpCase.ps1` | One-shot "capture a case": runs an app under ProcDump, collects dumps + evidence, zips it | No - temporary |
 
-Each tool can also be run directly and self-elevates; each keeps its own config/state under its own
-`%ProgramData%\<tool>` folder, and dot-sources the shared `Scripts/Common/` components.
+The launcher window drives these **in-process**: toggles, profile selection and actions (install,
+start/stop/abort, timed collect, monitor install/start/stop, case capture) run in a background runspace
+per tool - no console is spawned - with output streamed to the window. Each tool can still be run
+directly as a standalone script too; each keeps its own config/state under its own `%ProgramData%\<tool>`
+folder and dot-sources the shared `src/Common/` components.
 
 ## Versioning & releases
 
