@@ -3,26 +3,33 @@
 Scripts run on customer PCs to capture crash / hang / performance evidence for dump analysis. The dumps
 and traces produced here are analysed separately by the dumps-analysis-toolkit.
 
-## Quick start (no clone, no manual copying)
+There are two ways to start it - an online one-liner, and an offline local launcher.
 
-Run one of these in an elevated or normal PowerShell / terminal - it downloads, installs and opens the menu:
+### Online (no clone, no manual copying)
+
+Run this in a PowerShell / terminal - it downloads the latest release, installs it and opens the launcher:
 
 ```powershell
 & ([scriptblock]::Create((irm 'https://raw.githubusercontent.com/mcpolo99/reporting-troubleshooting/main/src/Get.ps1')))
 ```
 
-or double-click / run **`src\run.bat`**.
-
-The bootstrap (`Get.ps1`) elevates, checks the installed version against GitHub, and only downloads when
-there is a newer version. It installs to `%ProgramData%\ReportingTroubleshooting` and opens the launcher
-(a small WPF window by default; `-CLI` for a text menu, also used as the fallback where WPF is unavailable).
+The bootstrap (`src/Get.ps1`) elevates, checks the installed version against GitHub, downloads only when
+there is a newer version, installs to `%ProgramData%\ReportingTroubleshooting`, and opens the launcher.
 
 | Switch | Effect |
 |---|---|
 | `-Dev`   | install from the `main` branch head instead of the latest release |
 | `-Force` | reinstall even if already up to date |
 
-Example: `run.bat -Force`
+### Offline (download the source, run it as-is)
+
+Download / copy the `src/` folder to the target PC and double-click / run **`src\run.bat`**. It launches
+the local `ReportingToolkit.ps1` directly (elevated, via Windows Terminal if present) - no internet, no
+install step. The launcher opens as a small WPF window by default; `-CLI` gives a text menu, which is also
+the automatic fallback where WPF is unavailable.
+
+(Downloading a tool binary such as PerfView still needs internet the first time, but the launcher itself
+and the menu run fully offline.)
 
 ## Layout (mirrors Win11Debloat, slimmed)
 

@@ -1,9 +1,9 @@
 @echo off
 setlocal
 
-:: Launches the local Get.ps1 (next to this file) elevated - via Windows Terminal if present, else
-:: PowerShell. Get.ps1 then version-checks against GitHub, installs/updates, and opens the toolkit.
-:: (For a machine with no local copy, use the one-liner in README.md instead.)
+:: OFFLINE / local launcher. Runs the local ReportingToolkit.ps1 (next to this file) elevated - via
+:: Windows Terminal if present, else PowerShell - so a manually downloaded copy of src\ runs with no
+:: internet access. (The online, no-clone path is Get.ps1 / the one-liner in README.md.)
 
 set "wtDefaultPath=%LOCALAPPDATA%\Microsoft\WindowsApps\wt.exe"
 set "wtScoopPath=%USERPROFILE%\scoop\apps\windows-terminal\current\wt.exe"
@@ -24,14 +24,14 @@ if exist "%wtDefaultPath%" (
 
 :: Interpolated into a PS single-quoted string below;
 :: apostrophes escaped via %:'=''% and the -File arg uses [char]34 to avoid quote-parity bugs.
-set "SCRIPT_PATH=%~dp0Get.ps1"
+set "SCRIPT_PATH=%~dp0ReportingToolkit.ps1"
 
 if defined wtPath (
-    call :Log Launching Get.ps1 with Windows Terminal...
+    call :Log Launching ReportingToolkit.ps1 with Windows Terminal...
     PowerShell -NoProfile -ExecutionPolicy Bypass -Command "$p='%SCRIPT_PATH:'=''%'; $w='%wtPath:'=''%'; $q=[char]34; Start-Process -FilePath $w -ArgumentList ('PowerShell -NoProfile -ExecutionPolicy Bypass -File ' + $q + $p + $q) -Verb RunAs" >> "%logFile%" || call :Error "PowerShell command failed"
 ) else (
     echo Windows Terminal not found, using default PowerShell...
-    call :Log Windows Terminal not found. Using default PowerShell to launch Get.ps1...
+    call :Log Windows Terminal not found. Using default PowerShell to launch ReportingToolkit.ps1...
     PowerShell -NoProfile -ExecutionPolicy Bypass -Command "$p='%SCRIPT_PATH:'=''%'; $q=[char]34; Start-Process PowerShell -ArgumentList ('-NoProfile -ExecutionPolicy Bypass -File ' + $q + $p + $q) -Verb RunAs" >> "%logFile%" || call :Error "PowerShell command failed"
 )
 
