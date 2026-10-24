@@ -139,7 +139,8 @@ Info "Tagging $Tag at $commit..."
 git tag -a $Tag -m "Release $Tag"
 git push $Remote $Tag
 
-$ghArgs = @('release', 'create', $Tag, '--title', $Tag, '--notes', $Notes, '--target', $commit)
+# Tag is already pushed above, so the release binds to it; no --target (a short SHA there is rejected).
+$ghArgs = @('release', 'create', $Tag, '--title', $Tag, '--notes', $Notes)
 if ($Draft)      { $ghArgs += '--draft' }
 if ($PreRelease) { $ghArgs += '--prerelease' }
 Info 'Creating GitHub release...'
