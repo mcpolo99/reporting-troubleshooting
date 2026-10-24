@@ -73,67 +73,25 @@ $script:LogPrefix  = $AppName
 $script:EchoLog    = $false        # also print log lines to the console (interactive use)
 $script:LogMaxMB   = 10
 
-# =============================== LOGGING =================================
-# Log name: <prefix>_<launch datetime>.log  ->  rolled parts: <prefix>_<launch datetime>_part2.log, _part3 ...
-function New-LogFile {
-    $script:LogBase = '{0}_{1:yyyyMMdd_HHmmss}' -f $script:LogPrefix, (Get-Date)
-    $script:LogPart = 1
-    $script:LogFile = Join-Path $LogDir "$($script:LogBase).log"
-}
-
-# Non-locking: open, append, close for every line; others may read/write/delete meanwhile.
-function Write-Log {
-    param([string]$Message, [ValidateSet('INFO','WARN','ERROR')][string]$Level = 'INFO')
-    $line = '{0:yyyy-MM-dd HH:mm:ss.fff} [{1,-5}] [PID {2}] {3}' -f (Get-Date), $Level, $PID, $Message
-
-    if ($script:EchoLog) {
-        switch ($Level) {
-            'ERROR' { Write-Host $Message -ForegroundColor Red }
-            'WARN'  { Write-Host $Message -ForegroundColor Yellow }
-            default { Write-Host $Message }
-        }
+# =============================== SHARED COMPONENTS ======================
+# Dot-sourced so they run in this script's scope and use the $script: logging state + $LogDir/$AppName
+# above. Resolves Common\ in the repo layout (..\Common) or next to the installed copy (.\Common - the
+# installer copies it there so the detached scheduled task can load it). Provides:
+#   New-LogFile/Write-Log/Update-LogRoll/Remove-OldLogs, Test-Admin, Get-ConsoleUser,
+#   Test-MicrosoftSignature, Read-Value/Read-Int/Read-Bool, Get-ScriptVersionFromFile, Format-Version.
+$MonScriptDir = if ($PSScriptRoot) { $PSScriptRoot } elseif ($PSCommandPath) { Split-Path -Parent $PSCommandPath } else { (Get-Location).Path }
+$CommonDir = $null; $__probe = $MonScriptDir
+for ($__i = 0; $__i -lt 6 -and -not $CommonDir; $__i++) {
+    foreach ($__c in @((Join-Path $__probe 'Common'), (Join-Path $__probe 'Scripts\Common'))) {
+        if (Test-Path (Join-Path $__c 'Common.ps1')) { $CommonDir = $__c; break }
     }
-    if (-not $script:LogFile) { return }
-
-    # Check size every 200 lines too, so a burst of logging can't outgrow the limit between cleanups
-    $script:LogCount++
-    if ($script:LogCount % 200 -eq 0) { Update-LogRoll }
-
-    try { if (-not (Test-Path $LogDir)) { New-Item -ItemType Directory -Path $LogDir -Force | Out-Null } } catch { return }
-
-    $bytes = [System.Text.Encoding]::UTF8.GetBytes($line + [Environment]::NewLine)
-    $share = [System.IO.FileShare]::ReadWrite -bor [System.IO.FileShare]::Delete
-    for ($i = 0; $i -lt 5; $i++) {
-        try {
-            $fs = New-Object System.IO.FileStream($script:LogFile, [System.IO.FileMode]::Append,
-                                                  [System.IO.FileAccess]::Write, $share)
-            try { $fs.Write($bytes, 0, $bytes.Length) } finally { $fs.Dispose() }
-            return
-        } catch { Start-Sleep -Milliseconds 100 }
-    }
+    $__parent = Split-Path $__probe -Parent
+    if (-not $__parent -or $__parent -eq $__probe) { break }
+    $__probe = $__parent
 }
-
-# Size rotation: when the current log exceeds LogMaxMB, continue in <base>_partN.log.
-# Old files (all parts and launches) are pruned by Remove-OldLogs to LogKeep files.
-function Update-LogRoll {
-    try {
-        if ($script:LogFile -and (Test-Path $script:LogFile) -and
-            (Get-Item $script:LogFile).Length -ge ($script:LogMaxMB * 1MB)) {
-            $old = Split-Path $script:LogFile -Leaf
-            $script:LogPart++
-            $script:LogFile = Join-Path $LogDir ('{0}_part{1}.log' -f $script:LogBase, $script:LogPart)
-            Write-Log "Log continued from $old (size limit $($script:LogMaxMB) MB)."
-        }
-    } catch { }
-}
-
-function Remove-OldLogs([int]$Keep) {
-    Get-ChildItem -Path $LogDir -Filter "$AppName*.log" -File -ErrorAction SilentlyContinue |
-        Where-Object { $_.FullName -ne $script:LogFile } |
-        Sort-Object LastWriteTime -Descending |
-        Select-Object -Skip ([Math]::Max($Keep - 1, 0)) |
-        ForEach-Object { try { Remove-Item $_.FullName -Force -ErrorAction Stop } catch { } }
-}
+if (-not $CommonDir) { throw "Shared components (Common\) not found from $MonScriptDir upward." }
+. (Join-Path $CommonDir 'Logging.ps1')
+. (Join-Path $CommonDir 'Common.ps1')
 
 # =============================== CONFIG ==================================
 function Get-DefaultConfig {
@@ -178,24 +136,21 @@ function Save-Config($cfg) {
 }
 
 # =============================== HELPERS =================================
-function Test-Admin {
-    ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()
-    ).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
-}
+# Test-Admin, Get-ConsoleUser and Test-MicrosoftSignature come from the shared Common component.
 
-function Get-ConsoleUser {
-    try { $u = (Get-CimInstance Win32_ComputerSystem -ErrorAction Stop).UserName } catch { $u = $null }
-    if ($u) { $u } else { "$env:USERDOMAIN\$env:USERNAME" }
-}
-
-function Test-ProcDumpSignature([string]$Path) {
-    $sig = Get-AuthenticodeSignature -FilePath $Path
-    return ($sig.Status -eq 'Valid' -and $sig.SignerCertificate.Subject -match 'O=Microsoft Corporation')
+# Ship Common\ next to the installed script so the detached scheduled-task copy can dot-source it.
+function Install-CommonComponents {
+    if (-not $CommonDir) { return }
+    $dst = Join-Path $BaseDir 'Common'
+    if ((Resolve-Path $CommonDir).Path -ieq $dst) { return }   # already the installed copy
+    New-Item -ItemType Directory -Path $dst -Force | Out-Null
+    Copy-Item (Join-Path $CommonDir '*.ps1') $dst -Force
+    Write-Log "Shared components copied to $dst"
 }
 
 function Install-ProcDump([switch]$Force) {
     if ((Test-Path $ProcDumpExe) -and -not $Force) {
-        if (Test-ProcDumpSignature $ProcDumpExe) { Write-Log "ProcDump present: $ProcDumpExe"; return $true }
+        if (Test-MicrosoftSignature $ProcDumpExe) { Write-Log "ProcDump present: $ProcDumpExe"; return $true }
         Write-Log "Existing ProcDump failed signature check, re-downloading." 'WARN'
     }
     New-Item -ItemType Directory -Path $ToolsDir -Force | Out-Null
@@ -225,7 +180,7 @@ function Install-ProcDump([switch]$Force) {
                 Copy-Item -Destination $ToolsDir -Force
         }
         if (-not (Test-Path $ProcDumpExe)) { throw "$ProcDumpExeName not found after extraction." }
-        if (-not (Test-ProcDumpSignature $ProcDumpExe)) {
+        if (-not (Test-MicrosoftSignature $ProcDumpExe)) {
             Remove-Item $ProcDumpExe -Force
             throw 'Signature check failed (not a valid Microsoft-signed binary). File removed.'
         }
@@ -663,17 +618,7 @@ function Start-MonitorTask {
 }
 
 # =============================== VERSION / UPDATE ========================
-# Reads $ScriptVersion from a script file. Copies from before versioning return 0.0.0; $null = no file.
-function Get-ScriptVersionFromFile([string]$Path) {
-    if (-not $Path -or -not (Test-Path -LiteralPath $Path)) { return $null }
-    $m = Select-String -LiteralPath $Path -Pattern '^\$ScriptVersion\s*=\s*''([\d\.]+)''' -List -ErrorAction SilentlyContinue
-    if ($m) { [version]$m.Matches[0].Groups[1].Value } else { [version]'0.0.0' }
-}
-
-function Format-Version($v) {
-    if ($null -eq $v) { 'not installed' } elseif ($v -eq [version]'0.0.0') { 'unversioned (pre-2.0.0)' } else { "$v" }
-}
-
+# Get-ScriptVersionFromFile and Format-Version come from the shared Common component.
 function Confirm-Step([string]$Question) {
     if (-not $script:EchoLog) { return [bool]$Force }       # unattended: only with -Force
     (Read-Host "$Question (y/N)") -eq 'y'
@@ -726,6 +671,7 @@ function Invoke-Update {
     try {
         Copy-Item -Path $PSCommandPath -Destination $InstalledScript -Force -ErrorAction Stop
         Unblock-File -Path $InstalledScript -ErrorAction SilentlyContinue
+        Install-CommonComponents
     } catch {
         Write-Log "Copy failed: $($_.Exception.Message) - restarting the previous version." 'ERROR'
         Start-MonitorTask; return
@@ -759,6 +705,7 @@ function Invoke-Install {
     if ($PSCommandPath -and ($PSCommandPath -ne $InstalledScript)) {
         Copy-Item -Path $PSCommandPath -Destination $InstalledScript -Force
         Unblock-File -Path $InstalledScript -ErrorAction SilentlyContinue
+        Install-CommonComponents
         Write-Log "Script copied to $InstalledScript"
     }
 
@@ -791,20 +738,7 @@ function Invoke-Uninstall {
 }
 
 # =============================== INTERACTIVE =============================
-function Read-Value([string]$Prompt, $Current) {
-    $v = Read-Host "$Prompt [$Current]"
-    if ([string]::IsNullOrWhiteSpace($v)) { $Current } else { $v.Trim() }
-}
-
-function Read-Int([string]$Prompt, [int]$Current, [int]$Min = 1) {
-    while ($true) {
-        $v = Read-Value $Prompt $Current
-        $n = 0
-        if ([int]::TryParse("$v", [ref]$n) -and $n -ge $Min) { return $n }
-        Write-Host "Enter a whole number >= $Min." -ForegroundColor Yellow
-    }
-}
-
+# Read-Value and Read-Int come from the shared Common component.
 function Edit-Config($cfg) {
     Write-Host "`n--- Setup (Enter keeps the current value) ---" -ForegroundColor Cyan
     $apps = Read-Value 'Apps to monitor, comma separated' ($cfg.Apps -join ', ')
