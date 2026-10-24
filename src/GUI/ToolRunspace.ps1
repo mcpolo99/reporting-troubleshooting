@@ -76,3 +76,13 @@ function Update-ToolJobs {
 
 # True while any job is still running (used to keep the poll timer alive / guard re-entrancy).
 function Test-ToolJobsBusy { return ($script:ToolJobs.Count -gt 0) }
+
+# Runs a scriptblock synchronously in a runspace and returns its output. For reading config/profiles to
+# populate the editors - call only when that runspace is idle (no in-flight job for the tool).
+function Invoke-ToolSync {
+    param([System.Management.Automation.Runspaces.Runspace]$Runspace, [scriptblock]$Script, [object[]]$ArgList = @())
+    $ps = [powershell]::Create(); $ps.Runspace = $Runspace
+    [void]$ps.AddScript($Script)
+    foreach ($a in $ArgList) { [void]$ps.AddArgument($a) }
+    try { return $ps.Invoke() } finally { $ps.Dispose() }
+}
