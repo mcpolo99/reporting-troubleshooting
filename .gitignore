@@ -1,0 +1,30 @@
+# reporting-troubleshooting - captured on customer PCs. Track the scripts; never the tools or captures.
+
+# Tooling binaries (resolved/downloaded + signature-verified at runtime by the scripts, not committed)
+PerfView.exe
+procdump*.exe
+*.exe
+
+# PerfView / ProcDump run artifacts produced when the scripts run from this folder
+PerfViewData*.etl
+PerfViewData*.etl.zip
+*.etl
+*.etl.zip
+PerfView*.log
+*.log.txt
+Dumps/
+*.dmp
+*.info.txt
+
+# Local logs / config / state written next to the scripts during testing
+Logs/
+config.json
+active.json
+Backup/
+
+# Build output - never committed
+build/
+
+# Scratch
+.temp/
+*.tmp

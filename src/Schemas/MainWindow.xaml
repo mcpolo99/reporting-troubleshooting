@@ -1,0 +1,179 @@
+<Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Reporting &amp; Troubleshooting toolset" Height="720" Width="700"
+        WindowStartupLocation="CenterScreen" Background="{DynamicResource AppBgColor}" FontFamily="Segoe UI">
+  <Grid Margin="12">
+    <Grid.RowDefinitions>
+      <RowDefinition Height="*"/>
+      <RowDefinition Height="Auto"/>
+      <RowDefinition Height="150"/>
+      <RowDefinition Height="Auto"/>
+    </Grid.RowDefinitions>
+
+    <TabControl x:Name="Tabs" Grid.Row="0" Background="{DynamicResource CardBgColor}">
+
+      <!-- ============ PerfView ============ -->
+      <TabItem Header="PerfView">
+        <ScrollViewer VerticalScrollBarVisibility="Auto">
+          <StackPanel Margin="14">
+            <TextBlock Text="Performance tracing (ETW/ETL) with size-capped profiles." Foreground="{DynamicResource AppIdColor}" Margin="0,0,0,10"/>
+            <Button x:Name="BtnPvInstall" Content="Install / verify PerfView" Height="30" HorizontalAlignment="Left" MinWidth="200" Margin="0,0,0,10"/>
+            <StackPanel Orientation="Horizontal" Margin="0,0,0,8">
+              <TextBlock Text="Profile:" Foreground="{DynamicResource AppFgColor}" VerticalAlignment="Center" Width="60"/>
+              <ComboBox x:Name="CmbPvProfile" Width="170" VerticalAlignment="Center"/>
+              <TextBlock Text="Label:" Foreground="{DynamicResource AppFgColor}" VerticalAlignment="Center" Width="50" Margin="16,0,0,0"/>
+              <TextBox x:Name="TxtPvLabel" Width="150" VerticalAlignment="Center"/>
+            </StackPanel>
+            <StackPanel Orientation="Horizontal" Margin="0,0,0,8">
+              <Button x:Name="BtnPvStart" Content="Start trace" Height="30" MinWidth="110" Margin="0,0,8,0"/>
+              <Button x:Name="BtnPvStop"  Content="Stop trace"  Height="30" MinWidth="110" Margin="0,0,8,0"/>
+              <Button x:Name="BtnPvAbort" Content="Abort"        Height="30" MinWidth="80"/>
+            </StackPanel>
+            <StackPanel Orientation="Horizontal" Margin="0,0,0,8">
+              <TextBlock Text="Timed (sec):" Foreground="{DynamicResource AppFgColor}" VerticalAlignment="Center" Width="80"/>
+              <TextBox x:Name="TxtPvSeconds" Text="600" Width="70" VerticalAlignment="Center" Margin="0,0,8,0"/>
+              <Button x:Name="BtnPvCollect" Content="Timed collect" Height="30" MinWidth="120"/>
+            </StackPanel>
+            <StackPanel Orientation="Horizontal" Margin="0,0,0,10">
+              <Button x:Name="BtnPvOpen"   Content="Open output folder" Height="30" MinWidth="150" Margin="0,0,8,0"/>
+              <Button x:Name="BtnPvStatus" Content="Refresh status"     Height="30" MinWidth="120"/>
+            </StackPanel>
+            <TextBlock x:Name="LblPvStatus" Foreground="{DynamicResource AppIdColor}" TextWrapping="Wrap" Margin="0,0,0,12"/>
+
+            <Border BorderBrush="{DynamicResource AppIdColor}" BorderThickness="0,1,0,0" Margin="0,0,0,10"/>
+            <TextBlock Text="Profile / logging settings" Foreground="{DynamicResource AppFgColor}" FontWeight="SemiBold" Margin="0,0,0,8"/>
+            <StackPanel Margin="0,0,0,8">
+              <StackPanel Orientation="Horizontal" Margin="0,2">
+                <TextBlock Text="Name" Foreground="{DynamicResource AppFgColor}" VerticalAlignment="Center" Width="110"/>
+                <TextBox x:Name="TxtPvProfName" Width="300"/>
+              </StackPanel>
+
+              <TextBlock Text="Kernel events" Foreground="{DynamicResource AppFgColor}" Margin="0,8,0,2"/>
+              <WrapPanel x:Name="PnlPvKernel" Margin="0,0,0,4"/>
+
+              <StackPanel Orientation="Horizontal" Margin="0,4">
+                <TextBlock Text="CLR events" Foreground="{DynamicResource AppFgColor}" VerticalAlignment="Center" Width="110"/>
+                <ComboBox x:Name="CmbPvClr" Width="180" IsEditable="True"/>
+              </StackPanel>
+
+              <TextBlock Text="Providers" Foreground="{DynamicResource AppFgColor}" Margin="0,8,0,2"/>
+              <WrapPanel x:Name="PnlPvProviders" Margin="0,0,0,4"/>
+              <StackPanel Orientation="Horizontal" Margin="0,2">
+                <TextBlock Text="Other providers" Foreground="{DynamicResource AppFgColor}" VerticalAlignment="Center" Width="110"/>
+                <TextBox x:Name="TxtPvProvOther" Width="300"/>
+              </StackPanel>
+
+              <StackPanel Orientation="Horizontal" Margin="0,8,0,2">
+                <TextBlock Text="Extra args" Foreground="{DynamicResource AppFgColor}" VerticalAlignment="Center" Width="110"/>
+                <TextBox x:Name="TxtPvExtra" Width="300"/>
+              </StackPanel>
+              <StackPanel Orientation="Horizontal" Margin="0,4,0,0">
+                <TextBlock Text="Circular MB" Foreground="{DynamicResource AppFgColor}" VerticalAlignment="Center" Width="110"/>
+                <TextBox x:Name="TxtPvCircular" Width="70" Margin="0,0,16,0"/>
+                <TextBlock Text="Buffer MB" Foreground="{DynamicResource AppFgColor}" VerticalAlignment="Center" Margin="0,0,6,0"/>
+                <TextBox x:Name="TxtPvBuffer" Width="70"/>
+              </StackPanel>
+            </StackPanel>
+            <StackPanel Orientation="Horizontal" Margin="0,0,0,12">
+              <Button x:Name="BtnPvProfSave"    Content="Save profile" Height="28" MinWidth="100" Margin="0,0,8,0"/>
+              <Button x:Name="BtnPvProfDelete"  Content="Delete"       Height="28" MinWidth="70"  Margin="0,0,8,0"/>
+              <Button x:Name="BtnPvProfDefault" Content="Set default"  Height="28" MinWidth="90"/>
+            </StackPanel>
+
+            <TextBlock Text="Global settings" Foreground="{DynamicResource AppFgColor}" FontWeight="SemiBold" Margin="0,0,0,8"/>
+            <Grid Margin="0,0,0,8">
+              <Grid.ColumnDefinitions><ColumnDefinition Width="110"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+              <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
+              <TextBlock Grid.Row="0" Grid.Column="0" Text="OutputDir"  Foreground="{DynamicResource AppFgColor}" VerticalAlignment="Center" Margin="0,2"/>
+              <TextBox   Grid.Row="0" Grid.Column="1" x:Name="TxtPvOutput" Margin="0,2"/>
+              <TextBlock Grid.Row="1" Grid.Column="0" Text="SymbolPath" Foreground="{DynamicResource AppFgColor}" VerticalAlignment="Center" Margin="0,2"/>
+              <TextBox   Grid.Row="1" Grid.Column="1" x:Name="TxtPvSym" Margin="0,2"/>
+              <StackPanel Grid.Row="2" Grid.Column="1" Orientation="Horizontal" Margin="0,4,0,0">
+                <CheckBox x:Name="ChkPvMerge" Content="Merge on stop" Foreground="{DynamicResource AppFgColor}" Margin="0,0,16,0"/>
+                <CheckBox x:Name="ChkPvZip"   Content="Zip on stop"   Foreground="{DynamicResource AppFgColor}"/>
+              </StackPanel>
+            </Grid>
+            <Button x:Name="BtnPvSettingsSave" Content="Save settings" Height="28" MinWidth="110" HorizontalAlignment="Left"/>
+          </StackPanel>
+        </ScrollViewer>
+      </TabItem>
+
+      <!-- ============ ProcDump Monitor ============ -->
+      <TabItem Header="ProcDump Monitor">
+        <ScrollViewer VerticalScrollBarVisibility="Auto">
+          <StackPanel Margin="14">
+            <TextBlock Text="Background monitor (scheduled task) that auto-captures crash/hang dumps." Foreground="{DynamicResource AppIdColor}" Margin="0,0,0,10"/>
+            <StackPanel Orientation="Horizontal" Margin="0,0,0,10">
+              <Button x:Name="BtnMonInstall"   Content="Install"   Height="30" MinWidth="90" Margin="0,0,8,0"/>
+              <Button x:Name="BtnMonStart"     Content="Start"     Height="30" MinWidth="80" Margin="0,0,8,0"/>
+              <Button x:Name="BtnMonStop"      Content="Stop"      Height="30" MinWidth="80" Margin="0,0,8,0"/>
+              <Button x:Name="BtnMonStatus"    Content="Status"    Height="30" MinWidth="80" Margin="0,0,8,0"/>
+              <Button x:Name="BtnMonUninstall" Content="Uninstall" Height="30" MinWidth="90"/>
+            </StackPanel>
+            <TextBlock x:Name="LblMonStatus" Foreground="{DynamicResource AppIdColor}" TextWrapping="Wrap" Margin="0,0,0,12"/>
+
+            <Border BorderBrush="{DynamicResource AppIdColor}" BorderThickness="0,1,0,0" Margin="0,0,0,10"/>
+            <TextBlock Text="Configuration (live editor)" Foreground="{DynamicResource AppFgColor}" FontWeight="SemiBold" Margin="0,0,0,8"/>
+            <StackPanel x:Name="PnlMonConfig" Margin="0,0,0,8"/>
+            <StackPanel Orientation="Horizontal">
+              <Button x:Name="BtnMonSave"   Content="Save config" Height="28" MinWidth="110" Margin="0,0,8,0"/>
+              <Button x:Name="BtnMonReload" Content="Reload"      Height="28" MinWidth="80"/>
+            </StackPanel>
+
+            <Border BorderBrush="{DynamicResource AppIdColor}" BorderThickness="0,1,0,0" Margin="0,12,0,10"/>
+            <DockPanel Margin="0,0,0,4">
+              <TextBlock DockPanel.Dock="Left" Text="Monitor log (live)" Foreground="{DynamicResource AppFgColor}" FontWeight="SemiBold" VerticalAlignment="Center"/>
+              <CheckBox x:Name="ChkMonTail" DockPanel.Dock="Right" Content="Live tail" IsChecked="True" Foreground="{DynamicResource AppFgColor}" VerticalAlignment="Center"/>
+            </DockPanel>
+            <TextBox x:Name="TxtMonLog" Height="130" IsReadOnly="True" VerticalScrollBarVisibility="Auto"
+                     TextWrapping="NoWrap" HorizontalScrollBarVisibility="Auto" FontFamily="Consolas" FontSize="11"
+                     Background="{DynamicResource CardBgColor}" Foreground="{DynamicResource AppFgColor}"/>
+          </StackPanel>
+        </ScrollViewer>
+      </TabItem>
+
+      <!-- ============ ProcDump Case ============ -->
+      <TabItem Header="ProcDump Case">
+        <ScrollViewer VerticalScrollBarVisibility="Auto">
+          <StackPanel Margin="14">
+            <TextBlock Text="One-shot capture: run an app under ProcDump, collect dumps + evidence (no install)." Foreground="{DynamicResource AppIdColor}" Margin="0,0,0,10"/>
+            <StackPanel Orientation="Horizontal" Margin="0,0,0,8">
+              <TextBlock Text="Exe:" Foreground="{DynamicResource AppFgColor}" VerticalAlignment="Center" Width="40"/>
+              <TextBox x:Name="TxtCaseExe" Width="430" VerticalAlignment="Center" Margin="0,0,8,0"/>
+              <Button x:Name="BtnCaseBrowse" Content="Browse..." Height="28" MinWidth="80"/>
+            </StackPanel>
+            <StackPanel Orientation="Horizontal" Margin="0,0,0,8">
+              <TextBlock Text="Capture mode:" Foreground="{DynamicResource AppFgColor}" VerticalAlignment="Center" Width="90"/>
+              <ComboBox x:Name="CmbCaseMode" Width="220" VerticalAlignment="Center">
+                <ComboBoxItem Content="Auto (crash, exit or hang)" IsSelected="True"/>
+                <ComboBoxItem Content="Crash only (unhandled)"/>
+                <ComboBoxItem Content="Hang only"/>
+                <ComboBoxItem Content="Silent exit"/>
+              </ComboBox>
+            </StackPanel>
+            <StackPanel Orientation="Horizontal" Margin="0,0,0,8">
+              <CheckBox x:Name="ChkCaseFusion"    Content="Assembly binding log (.NET)" Foreground="{DynamicResource AppFgColor}" Margin="0,0,16,0"/>
+              <CheckBox x:Name="ChkCaseAppConfig" Content="Include .config files"        Foreground="{DynamicResource AppFgColor}"/>
+            </StackPanel>
+            <StackPanel Orientation="Horizontal" Margin="0,0,0,10">
+              <TextBlock Text="Timeout (sec):" Foreground="{DynamicResource AppFgColor}" VerticalAlignment="Center" Width="90"/>
+              <TextBox x:Name="TxtCaseTimeout" Text="300" Width="70" VerticalAlignment="Center" Margin="0,0,8,0"/>
+              <Button x:Name="BtnCaseRun" Content="Run capture" Height="30" MinWidth="120"/>
+            </StackPanel>
+            <TextBlock x:Name="LblCaseStatus" Foreground="{DynamicResource AppIdColor}" TextWrapping="Wrap"/>
+          </StackPanel>
+        </ScrollViewer>
+      </TabItem>
+    </TabControl>
+
+    <TextBlock Grid.Row="1" Text="Output" Foreground="{DynamicResource AppIdColor}" Margin="2,10,0,4"/>
+    <TextBox x:Name="TxtOutput" Grid.Row="2" IsReadOnly="True" VerticalScrollBarVisibility="Auto"
+             TextWrapping="Wrap" FontFamily="Consolas" FontSize="12"
+             Background="{DynamicResource CardBgColor}" Foreground="{DynamicResource AppFgColor}"/>
+
+    <DockPanel Grid.Row="3" Margin="0,8,0,0">
+      <TextBlock x:Name="LblBusy" DockPanel.Dock="Left" Text="Ready" Foreground="{DynamicResource AppIdColor}" VerticalAlignment="Center"/>
+      <TextBlock x:Name="LblVersion" DockPanel.Dock="Right" Foreground="{DynamicResource AppIdColor}" VerticalAlignment="Center"/>
+    </DockPanel>
+  </Grid>
+</Window>
