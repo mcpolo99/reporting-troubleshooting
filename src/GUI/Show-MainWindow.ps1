@@ -18,10 +18,10 @@ function Show-MainWindow {
 
     foreach ($n in 'TxtOutput','LblBusy','LblVersion',
                    'BtnPvInstall','CmbPvProfile','TxtPvLabel','BtnPvStart','BtnPvStop','BtnPvAbort','TxtPvSeconds','BtnPvCollect','BtnPvOpen','BtnPvStatus','LblPvStatus',
-                   'TxtPvProfName','TxtPvKernel','TxtPvClr','TxtPvProviders','TxtPvExtra','TxtPvCircular','TxtPvBuffer','BtnPvProfSave','BtnPvProfDelete','BtnPvProfDefault',
+                   'TxtPvProfName','PnlPvKernel','CmbPvClr','PnlPvProviders','TxtPvProvOther','TxtPvExtra','TxtPvCircular','TxtPvBuffer','BtnPvProfSave','BtnPvProfDelete','BtnPvProfDefault',
                    'TxtPvOutput','TxtPvSym','ChkPvMerge','ChkPvZip','BtnPvSettingsSave',
                    'BtnMonInstall','BtnMonStart','BtnMonStop','BtnMonStatus','BtnMonUninstall','LblMonStatus','PnlMonConfig','BtnMonSave','BtnMonReload',
-                   'TxtCaseExe','BtnCaseBrowse','ChkCaseHang','ChkCaseFusion','ChkCaseAppConfig','TxtCaseTimeout','BtnCaseRun','LblCaseStatus') {
+                   'TxtCaseExe','BtnCaseBrowse','CmbCaseMode','ChkCaseFusion','ChkCaseAppConfig','TxtCaseTimeout','BtnCaseRun','LblCaseStatus') {
         Set-Variable -Name $n -Scope script -Value $w.FindName($n)
     }
     $script:LblVersion.Text = "v$ScriptVersion"
@@ -32,6 +32,29 @@ function Show-MainWindow {
     $script:PvProfiles = @()
     $script:PvLoading  = $false
     $script:MonCtls    = @{}
+
+    # known PerfView toggles (rendered as checkboxes / dropdown instead of free text)
+    $script:PvKernelKeywords  = @('Default','ThreadTime','FileIOInit','FileIO','DiskIO','MemoryHardFaults','VirtualAlloc','NetworkTCPIP','Registry','ImageLoad')
+    $script:PvProviderPresets = @('Microsoft-Windows-Kernel-Memory','Microsoft-Windows-TCPIP')
+    $script:PvClrPresets      = @('Default','None','Verbose')
+    # dropdown options for Monitor config fields (anything not listed falls back to checkbox/text by type)
+    $script:MonFieldMeta = @{ DuplicateAction = @('Delete','Keep'); RunMode = @('Logon','Startup') }
+
+    function script:Build-PvToggles {
+        $script:PvKernelChecks = [ordered]@{}
+        foreach ($k in $script:PvKernelKeywords) {
+            $cb = New-Object System.Windows.Controls.CheckBox
+            $cb.Content = $k; $cb.Margin = '0,0,12,4'; $cb.Foreground = $script:FgBrush
+            [void]$script:PnlPvKernel.Children.Add($cb); $script:PvKernelChecks[$k] = $cb
+        }
+        $script:PvProviderChecks = [ordered]@{}
+        foreach ($p in $script:PvProviderPresets) {
+            $cb = New-Object System.Windows.Controls.CheckBox
+            $cb.Content = $p; $cb.Margin = '0,0,12,4'; $cb.Foreground = $script:FgBrush
+            [void]$script:PnlPvProviders.Children.Add($cb); $script:PvProviderChecks[$p] = $cb
+        }
+        foreach ($c in $script:PvClrPresets) { [void]$script:CmbPvClr.Items.Add($c) }
+    }
 
     $script:Append = {
         param($t)
@@ -67,13 +90,16 @@ function Show-MainWindow {
     function script:Load-PvProfileFields([string]$name) {
         $p = $script:PvProfiles | Where-Object { $_.Name -ieq $name } | Select-Object -First 1
         if (-not $p) { return }
-        $script:TxtPvProfName.Text  = [string]$p.Name
-        $script:TxtPvKernel.Text    = [string]$p.KernelEvents
-        $script:TxtPvClr.Text       = [string]$p.ClrEvents
-        $script:TxtPvProviders.Text = [string]$p.Providers
-        $script:TxtPvExtra.Text     = [string]$p.ExtraArgs
-        $script:TxtPvCircular.Text  = "$($p.CircularMB)"
-        $script:TxtPvBuffer.Text    = "$($p.BufferSizeMB)"
+        $script:TxtPvProfName.Text = [string]$p.Name
+        $kset = @(($p.KernelEvents -split ',') | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+        foreach ($k in $script:PvKernelKeywords) { $script:PvKernelChecks[$k].IsChecked = ($kset -contains $k) }
+        $script:CmbPvClr.Text = [string]$p.ClrEvents
+        $pset = @(($p.Providers -split ',') | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+        foreach ($pr in $script:PvProviderPresets) { $script:PvProviderChecks[$pr].IsChecked = ($pset -contains $pr) }
+        $script:TxtPvProvOther.Text = (@($pset | Where-Object { $script:PvProviderPresets -notcontains $_ }) -join ', ')
+        $script:TxtPvExtra.Text    = [string]$p.ExtraArgs
+        $script:TxtPvCircular.Text = "$($p.CircularMB)"
+        $script:TxtPvBuffer.Text   = "$($p.BufferSizeMB)"
     }
     function script:Load-PvAll {
         if ($script:Busy['Pv']) { return }
@@ -114,7 +140,11 @@ function Show-MainWindow {
 
     $reloadPv = { script:Load-PvAll }
     $script:BtnPvProfSave.Add_Click({
-        $vals = @($script:TxtPvProfName.Text, $script:TxtPvKernel.Text, $script:TxtPvClr.Text, $script:TxtPvProviders.Text, $script:TxtPvExtra.Text, $script:TxtPvCircular.Text, $script:TxtPvBuffer.Text)
+        $kernel = (@($script:PvKernelKeywords | Where-Object { $script:PvKernelChecks[$_].IsChecked }) -join ',')
+        $provChecked = @($script:PvProviderPresets | Where-Object { $script:PvProviderChecks[$_].IsChecked })
+        $provOther   = @(($script:TxtPvProvOther.Text -split ',') | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+        $providers = (@($provChecked + $provOther) -join ',')
+        $vals = @($script:TxtPvProfName.Text, $kernel, $script:CmbPvClr.Text, $providers, $script:TxtPvExtra.Text, $script:TxtPvCircular.Text, $script:TxtPvBuffer.Text)
         if (-not $vals[0]) { & $script:Append 'Enter a profile name first.'; return }
         & $script:Append "PerfView: save profile '$($vals[0])'..."
         script:Invoke-Action 'Pv' $script:RsPv {
@@ -161,13 +191,17 @@ function Show-MainWindow {
     })
 
     # ---------- Monitor: live config editor ----------
-    function script:New-ConfigRow($name, $value) {
+    function script:New-ConfigRow($name, $value, $options) {
         $row = New-Object System.Windows.Controls.DockPanel; $row.Margin = '0,0,0,6'
         $lbl = New-Object System.Windows.Controls.TextBlock
         $lbl.Text = $name; $lbl.Width = 180; $lbl.VerticalAlignment = 'Center'; $lbl.Foreground = $script:FgBrush
         [System.Windows.Controls.DockPanel]::SetDock($lbl, 'Left')
         [void]$row.Children.Add($lbl)
-        if ($value -is [bool]) {
+        if ($options) {
+            $ctl = New-Object System.Windows.Controls.ComboBox; $ctl.Width = 200; $ctl.HorizontalAlignment = 'Left'
+            foreach ($o in $options) { [void]$ctl.Items.Add($o) }
+            $ctl.SelectedItem = "$value"; if ($ctl.SelectedIndex -lt 0) { $ctl.IsEditable = $true; $ctl.Text = "$value" }
+        } elseif ($value -is [bool]) {
             $ctl = New-Object System.Windows.Controls.CheckBox; $ctl.IsChecked = [bool]$value; $ctl.VerticalAlignment = 'Center'
         } else {
             $ctl = New-Object System.Windows.Controls.TextBox
@@ -182,7 +216,7 @@ function Show-MainWindow {
         if (-not $cfg) { return }
         $script:PnlMonConfig.Children.Clear(); $script:MonCtls = @{}
         foreach ($prop in $cfg.PSObject.Properties) {
-            $r = script:New-ConfigRow $prop.Name $prop.Value
+            $r = script:New-ConfigRow $prop.Name $prop.Value $script:MonFieldMeta[$prop.Name]
             [void]$script:PnlMonConfig.Children.Add($r.Row)
             $script:MonCtls[$prop.Name] = $r.Ctl
         }
@@ -199,7 +233,9 @@ function Show-MainWindow {
         $kv = @{}
         foreach ($k in $script:MonCtls.Keys) {
             $c = $script:MonCtls[$k]
-            $kv[$k] = if ($c -is [System.Windows.Controls.CheckBox]) { if ($c.IsChecked) { 'true' } else { 'false' } } else { $c.Text }
+            $kv[$k] = if ($c -is [System.Windows.Controls.CheckBox]) { if ($c.IsChecked) { 'true' } else { 'false' } }
+                      elseif ($c -is [System.Windows.Controls.ComboBox]) { if ($null -ne $c.SelectedItem) { [string]$c.SelectedItem } else { [string]$c.Text } }
+                      else { $c.Text }
         }
         & $script:Append 'Monitor: save config...'
         $doneMon = { script:Build-MonEditor; & $script:RefreshMon }
@@ -228,27 +264,34 @@ function Show-MainWindow {
         $exe = $script:TxtCaseExe.Text
         if (-not $exe -or -not (Test-Path $exe)) { & $script:Append 'Case: enter a valid exe path first.'; return }
         if ($script:Busy['Case']) { & $script:Append 'Case: a capture is already running.'; return }
-        $hang = [bool]$script:ChkCaseHang.IsChecked; $fusion = [bool]$script:ChkCaseFusion.IsChecked
+        $mode = switch ($script:CmbCaseMode.SelectedIndex) { 1 { 'crash' } 2 { 'hang' } 3 { 'exit' } default { 'auto' } }
+        $fusion = [bool]$script:ChkCaseFusion.IsChecked
         $appcfg = [bool]$script:ChkCaseAppConfig.IsChecked; $to = 0
         [void][int]::TryParse($script:TxtCaseTimeout.Text, [ref]$to); if ($to -lt 1) { $to = 300 }
         $casePath = $script:ToolCasePath
         $script:Busy['Case'] = $true
         $script:LblCaseStatus.Text = 'capturing...'
-        & $script:Append "Case: starting capture of $exe ..."
+        & $script:Append "Case: starting capture of $exe (mode: $mode) ..."
         $script:RsCaseLast = New-ToolRunspace -ToolPath $casePath
         $sb = {
-            param($casePath, $exe, $hang, $fusion, $appcfg, $to)
+            param($casePath, $exe, $mode, $fusion, $appcfg, $to)
             $a = @{ ExePath = $exe; NoElevate = $true; AllowDownload = $true; TimeoutSeconds = [int]$to }
-            if ($hang)   { $a.Hang = $true }
+            switch ($mode) {
+                'crash' { $a.Unhandled  = $true }
+                'hang'  { $a.Hang       = $true }
+                'exit'  { $a.DumpOnExit = $true }
+                default { $a.Auto       = $true }
+            }
             if ($fusion) { $a.FusionLog = $true }
             if ($appcfg) { $a.IncludeAppConfig = $true }
             & $casePath @a
         }
         $done = { $script:Busy['Case'] = $false; $script:LblCaseStatus.Text = 'capture finished'; try { $script:RsCaseLast.Close() } catch {} }
-        Start-ToolJob -Runspace $script:RsCaseLast -Script $sb -ArgList @($casePath, $exe, $hang, $fusion, $appcfg, $to) -OnText $script:Append -OnDone $done | Out-Null
+        Start-ToolJob -Runspace $script:RsCaseLast -Script $sb -ArgList @($casePath, $exe, $mode, $fusion, $appcfg, $to) -OnText $script:Append -OnDone $done | Out-Null
     })
 
     # ---------- initial load ----------
+    script:Build-PvToggles
     try { script:Load-PvAll } catch { & $script:Append "PerfView config load failed: $($_.Exception.Message)" }
     try { script:Build-MonEditor } catch { & $script:Append "Monitor config load failed: $($_.Exception.Message)" }
     & $script:RefreshPv; & $script:RefreshMon

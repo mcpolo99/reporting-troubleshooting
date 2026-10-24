@@ -42,29 +42,38 @@
 
             <Border BorderBrush="{DynamicResource AppIdColor}" BorderThickness="0,1,0,0" Margin="0,0,0,10"/>
             <TextBlock Text="Profile / logging settings" Foreground="{DynamicResource AppFgColor}" FontWeight="SemiBold" Margin="0,0,0,8"/>
-            <Grid Margin="0,0,0,8">
-              <Grid.ColumnDefinitions><ColumnDefinition Width="110"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
-              <Grid.RowDefinitions>
-                <RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/>
-                <RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/>
-              </Grid.RowDefinitions>
-              <TextBlock Grid.Row="0" Grid.Column="0" Text="Name"         Foreground="{DynamicResource AppFgColor}" VerticalAlignment="Center" Margin="0,2"/>
-              <TextBox   Grid.Row="0" Grid.Column="1" x:Name="TxtPvProfName" Margin="0,2"/>
-              <TextBlock Grid.Row="1" Grid.Column="0" Text="KernelEvents" Foreground="{DynamicResource AppFgColor}" VerticalAlignment="Center" Margin="0,2"/>
-              <TextBox   Grid.Row="1" Grid.Column="1" x:Name="TxtPvKernel" Margin="0,2"/>
-              <TextBlock Grid.Row="2" Grid.Column="0" Text="ClrEvents"    Foreground="{DynamicResource AppFgColor}" VerticalAlignment="Center" Margin="0,2"/>
-              <TextBox   Grid.Row="2" Grid.Column="1" x:Name="TxtPvClr" Margin="0,2"/>
-              <TextBlock Grid.Row="3" Grid.Column="0" Text="Providers"    Foreground="{DynamicResource AppFgColor}" VerticalAlignment="Center" Margin="0,2"/>
-              <TextBox   Grid.Row="3" Grid.Column="1" x:Name="TxtPvProviders" Margin="0,2"/>
-              <TextBlock Grid.Row="4" Grid.Column="0" Text="ExtraArgs"    Foreground="{DynamicResource AppFgColor}" VerticalAlignment="Center" Margin="0,2"/>
-              <TextBox   Grid.Row="4" Grid.Column="1" x:Name="TxtPvExtra" Margin="0,2"/>
-              <StackPanel Grid.Row="5" Grid.Column="1" Orientation="Horizontal" Margin="0,4,0,0">
-                <TextBlock Text="CircularMB" Foreground="{DynamicResource AppFgColor}" VerticalAlignment="Center" Margin="0,0,6,0"/>
+            <StackPanel Margin="0,0,0,8">
+              <StackPanel Orientation="Horizontal" Margin="0,2">
+                <TextBlock Text="Name" Foreground="{DynamicResource AppFgColor}" VerticalAlignment="Center" Width="110"/>
+                <TextBox x:Name="TxtPvProfName" Width="300"/>
+              </StackPanel>
+
+              <TextBlock Text="Kernel events" Foreground="{DynamicResource AppFgColor}" Margin="0,8,0,2"/>
+              <WrapPanel x:Name="PnlPvKernel" Margin="0,0,0,4"/>
+
+              <StackPanel Orientation="Horizontal" Margin="0,4">
+                <TextBlock Text="CLR events" Foreground="{DynamicResource AppFgColor}" VerticalAlignment="Center" Width="110"/>
+                <ComboBox x:Name="CmbPvClr" Width="180" IsEditable="True"/>
+              </StackPanel>
+
+              <TextBlock Text="Providers" Foreground="{DynamicResource AppFgColor}" Margin="0,8,0,2"/>
+              <WrapPanel x:Name="PnlPvProviders" Margin="0,0,0,4"/>
+              <StackPanel Orientation="Horizontal" Margin="0,2">
+                <TextBlock Text="Other providers" Foreground="{DynamicResource AppFgColor}" VerticalAlignment="Center" Width="110"/>
+                <TextBox x:Name="TxtPvProvOther" Width="300"/>
+              </StackPanel>
+
+              <StackPanel Orientation="Horizontal" Margin="0,8,0,2">
+                <TextBlock Text="Extra args" Foreground="{DynamicResource AppFgColor}" VerticalAlignment="Center" Width="110"/>
+                <TextBox x:Name="TxtPvExtra" Width="300"/>
+              </StackPanel>
+              <StackPanel Orientation="Horizontal" Margin="0,4,0,0">
+                <TextBlock Text="Circular MB" Foreground="{DynamicResource AppFgColor}" VerticalAlignment="Center" Width="110"/>
                 <TextBox x:Name="TxtPvCircular" Width="70" Margin="0,0,16,0"/>
-                <TextBlock Text="BufferSizeMB" Foreground="{DynamicResource AppFgColor}" VerticalAlignment="Center" Margin="0,0,6,0"/>
+                <TextBlock Text="Buffer MB" Foreground="{DynamicResource AppFgColor}" VerticalAlignment="Center" Margin="0,0,6,0"/>
                 <TextBox x:Name="TxtPvBuffer" Width="70"/>
               </StackPanel>
-            </Grid>
+            </StackPanel>
             <StackPanel Orientation="Horizontal" Margin="0,0,0,12">
               <Button x:Name="BtnPvProfSave"    Content="Save profile" Height="28" MinWidth="100" Margin="0,0,8,0"/>
               <Button x:Name="BtnPvProfDelete"  Content="Delete"       Height="28" MinWidth="70"  Margin="0,0,8,0"/>
@@ -125,9 +134,17 @@
               <Button x:Name="BtnCaseBrowse" Content="Browse..." Height="28" MinWidth="80"/>
             </StackPanel>
             <StackPanel Orientation="Horizontal" Margin="0,0,0,8">
-              <CheckBox x:Name="ChkCaseHang"      Content="Hang"           Foreground="{DynamicResource AppFgColor}" Margin="0,0,16,0"/>
-              <CheckBox x:Name="ChkCaseFusion"    Content="FusionLog"      Foreground="{DynamicResource AppFgColor}" Margin="0,0,16,0"/>
-              <CheckBox x:Name="ChkCaseAppConfig" Content="Include .config" Foreground="{DynamicResource AppFgColor}"/>
+              <TextBlock Text="Capture mode:" Foreground="{DynamicResource AppFgColor}" VerticalAlignment="Center" Width="90"/>
+              <ComboBox x:Name="CmbCaseMode" Width="220" VerticalAlignment="Center">
+                <ComboBoxItem Content="Auto (crash, exit or hang)" IsSelected="True"/>
+                <ComboBoxItem Content="Crash only (unhandled)"/>
+                <ComboBoxItem Content="Hang only"/>
+                <ComboBoxItem Content="Silent exit"/>
+              </ComboBox>
+            </StackPanel>
+            <StackPanel Orientation="Horizontal" Margin="0,0,0,8">
+              <CheckBox x:Name="ChkCaseFusion"    Content="Assembly binding log (.NET)" Foreground="{DynamicResource AppFgColor}" Margin="0,0,16,0"/>
+              <CheckBox x:Name="ChkCaseAppConfig" Content="Include .config files"        Foreground="{DynamicResource AppFgColor}"/>
             </StackPanel>
             <StackPanel Orientation="Horizontal" Margin="0,0,0,10">
               <TextBlock Text="Timeout (sec):" Foreground="{DynamicResource AppFgColor}" VerticalAlignment="Center" Width="90"/>
