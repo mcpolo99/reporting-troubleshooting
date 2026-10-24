@@ -1013,6 +1013,9 @@ function Invoke-Monitor {
 }
 
 # =============================== ENTRY POINT =============================
+# Loaded as a library (RT_LIBRARY=1, e.g. the GUI runspace): expose functions only, no auto-run.
+if ($env:RT_LIBRARY -eq '1') { return }
+
 if ($Monitor) {
     Invoke-Monitor
     exit $script:ExitCode

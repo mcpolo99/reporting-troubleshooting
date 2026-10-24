@@ -563,6 +563,10 @@ function Invoke-Uninstall {
 }
 
 # =============================== ENTRY POINT ============================
+# When loaded as a library (RT_LIBRARY=1, e.g. the GUI's background runspace) expose the functions only:
+# no elevation, no logging session, no dispatch. The caller drives the functions directly.
+if ($env:RT_LIBRARY -eq '1') { return }
+
 # Starting / stopping / aborting a kernel ETW session, and installing, need admin. Status and the
 # stop-event helper do not, so don't force elevation just to read state.
 $needsAdmin = -not ($Status -or $SendStopEvent)

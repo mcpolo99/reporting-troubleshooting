@@ -1,39 +1,102 @@
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        Title="Reporting &amp; Troubleshooting toolset" SizeToContent="Height"
-        Width="520" WindowStartupLocation="CenterScreen" ResizeMode="NoResize"
-        Background="{DynamicResource AppBgColor}" FontFamily="Segoe UI">
-  <Border Padding="20">
-    <StackPanel>
-      <TextBlock Text="Reporting &amp; Troubleshooting toolset" Foreground="{DynamicResource AppFgColor}" FontSize="18" FontWeight="SemiBold"/>
-      <TextBlock Text="Capture crash, hang and performance evidence for dump analysis. Each tool opens in its own window."
-                 Foreground="{DynamicResource AppIdColor}" FontSize="12" TextWrapping="Wrap" Margin="0,4,0,16"/>
+        Title="Reporting &amp; Troubleshooting toolset" Height="600" Width="660"
+        WindowStartupLocation="CenterScreen" Background="{DynamicResource AppBgColor}" FontFamily="Segoe UI">
+  <Grid Margin="12">
+    <Grid.RowDefinitions>
+      <RowDefinition Height="*"/>
+      <RowDefinition Height="Auto"/>
+      <RowDefinition Height="170"/>
+      <RowDefinition Height="Auto"/>
+    </Grid.RowDefinitions>
 
-      <Button x:Name="BtnPerfView" Style="{DynamicResource ToolCardButtonStyle}">
-        <StackPanel>
-          <TextBlock Text="PerfView performance tracing" FontSize="14" FontWeight="SemiBold" Foreground="{DynamicResource AppFgColor}"/>
-          <TextBlock Text="Install PerfView; start/stop ETL traces with size-capped profiles" FontSize="11" Foreground="{DynamicResource AppIdColor}"/>
+    <TabControl x:Name="Tabs" Grid.Row="0" Background="{DynamicResource CardBgColor}">
+
+      <!-- ============ PerfView ============ -->
+      <TabItem Header="PerfView">
+        <StackPanel Margin="14">
+          <TextBlock Text="Performance tracing (ETW/ETL) with size-capped profiles." Foreground="{DynamicResource AppIdColor}" Margin="0,0,0,10"/>
+          <Button x:Name="BtnPvInstall" Content="Install / verify PerfView" Height="30" HorizontalAlignment="Left" MinWidth="200" Margin="0,0,0,10"/>
+          <StackPanel Orientation="Horizontal" Margin="0,0,0,8">
+            <TextBlock Text="Profile:" Foreground="{DynamicResource AppFgColor}" VerticalAlignment="Center" Width="60"/>
+            <ComboBox x:Name="CmbPvProfile" Width="170" VerticalAlignment="Center"/>
+            <TextBlock Text="Label:" Foreground="{DynamicResource AppFgColor}" VerticalAlignment="Center" Width="50" Margin="16,0,0,0"/>
+            <TextBox x:Name="TxtPvLabel" Width="150" VerticalAlignment="Center"/>
+          </StackPanel>
+          <StackPanel Orientation="Horizontal" Margin="0,0,0,8">
+            <Button x:Name="BtnPvStart" Content="Start trace" Height="30" MinWidth="110" Margin="0,0,8,0"/>
+            <Button x:Name="BtnPvStop"  Content="Stop trace"  Height="30" MinWidth="110" Margin="0,0,8,0"/>
+            <Button x:Name="BtnPvAbort" Content="Abort"        Height="30" MinWidth="80"/>
+          </StackPanel>
+          <StackPanel Orientation="Horizontal" Margin="0,0,0,8">
+            <TextBlock Text="Timed (sec):" Foreground="{DynamicResource AppFgColor}" VerticalAlignment="Center" Width="80"/>
+            <TextBox x:Name="TxtPvSeconds" Text="600" Width="70" VerticalAlignment="Center" Margin="0,0,8,0"/>
+            <Button x:Name="BtnPvCollect" Content="Timed collect" Height="30" MinWidth="120"/>
+          </StackPanel>
+          <StackPanel Orientation="Horizontal" Margin="0,0,0,10">
+            <Button x:Name="BtnPvOpen"   Content="Open output folder" Height="30" MinWidth="150" Margin="0,0,8,0"/>
+            <Button x:Name="BtnPvStatus" Content="Refresh status"     Height="30" MinWidth="120"/>
+          </StackPanel>
+          <TextBlock x:Name="LblPvStatus" Foreground="{DynamicResource AppIdColor}" TextWrapping="Wrap"/>
         </StackPanel>
-      </Button>
+      </TabItem>
 
-      <Button x:Name="BtnMonitor" Style="{DynamicResource ToolCardButtonStyle}">
-        <StackPanel>
-          <TextBlock Text="ProcDump monitor (background)" FontSize="14" FontWeight="SemiBold" Foreground="{DynamicResource AppFgColor}"/>
-          <TextBlock Text="Self-installing scheduled task; auto-captures crash/hang dumps" FontSize="11" Foreground="{DynamicResource AppIdColor}"/>
+      <!-- ============ ProcDump Monitor ============ -->
+      <TabItem Header="ProcDump Monitor">
+        <StackPanel Margin="14">
+          <TextBlock Text="Background monitor (scheduled task) that auto-captures crash/hang dumps." Foreground="{DynamicResource AppIdColor}" Margin="0,0,0,10"/>
+          <StackPanel Orientation="Horizontal" Margin="0,0,0,8">
+            <TextBlock Text="Apps (comma):" Foreground="{DynamicResource AppFgColor}" VerticalAlignment="Center" Width="90"/>
+            <TextBox x:Name="TxtMonApps" Width="300" VerticalAlignment="Center"/>
+          </StackPanel>
+          <StackPanel Orientation="Horizontal" Margin="0,0,0,10">
+            <TextBlock Text="Keep dumps:" Foreground="{DynamicResource AppFgColor}" VerticalAlignment="Center" Width="90"/>
+            <TextBox x:Name="TxtMonKeep" Text="15" Width="60" VerticalAlignment="Center" Margin="0,0,8,0"/>
+            <Button x:Name="BtnMonSave" Content="Save config" Height="30" MinWidth="110"/>
+          </StackPanel>
+          <StackPanel Orientation="Horizontal" Margin="0,0,0,10">
+            <Button x:Name="BtnMonInstall"   Content="Install"   Height="30" MinWidth="90" Margin="0,0,8,0"/>
+            <Button x:Name="BtnMonStart"     Content="Start"     Height="30" MinWidth="80" Margin="0,0,8,0"/>
+            <Button x:Name="BtnMonStop"      Content="Stop"      Height="30" MinWidth="80" Margin="0,0,8,0"/>
+            <Button x:Name="BtnMonStatus"    Content="Status"    Height="30" MinWidth="80" Margin="0,0,8,0"/>
+            <Button x:Name="BtnMonUninstall" Content="Uninstall" Height="30" MinWidth="90"/>
+          </StackPanel>
+          <TextBlock x:Name="LblMonStatus" Foreground="{DynamicResource AppIdColor}" TextWrapping="Wrap"/>
         </StackPanel>
-      </Button>
+      </TabItem>
 
-      <Button x:Name="BtnCase" Style="{DynamicResource ToolCardButtonStyle}">
-        <StackPanel>
-          <TextBlock Text="One-shot process dump capture" FontSize="14" FontWeight="SemiBold" Foreground="{DynamicResource AppFgColor}"/>
-          <TextBlock Text="Temporary capture + evidence zip (nothing installed)" FontSize="11" Foreground="{DynamicResource AppIdColor}"/>
+      <!-- ============ ProcDump Case ============ -->
+      <TabItem Header="ProcDump Case">
+        <StackPanel Margin="14">
+          <TextBlock Text="One-shot capture: run an app under ProcDump, collect dumps + evidence (no install)." Foreground="{DynamicResource AppIdColor}" Margin="0,0,0,10"/>
+          <StackPanel Orientation="Horizontal" Margin="0,0,0,8">
+            <TextBlock Text="Exe:" Foreground="{DynamicResource AppFgColor}" VerticalAlignment="Center" Width="40"/>
+            <TextBox x:Name="TxtCaseExe" Width="400" VerticalAlignment="Center" Margin="0,0,8,0"/>
+            <Button x:Name="BtnCaseBrowse" Content="Browse..." Height="28" MinWidth="80"/>
+          </StackPanel>
+          <StackPanel Orientation="Horizontal" Margin="0,0,0,8">
+            <CheckBox x:Name="ChkCaseHang"      Content="Hang"           Foreground="{DynamicResource AppFgColor}" Margin="0,0,16,0"/>
+            <CheckBox x:Name="ChkCaseFusion"    Content="FusionLog"      Foreground="{DynamicResource AppFgColor}" Margin="0,0,16,0"/>
+            <CheckBox x:Name="ChkCaseAppConfig" Content="Include .config" Foreground="{DynamicResource AppFgColor}"/>
+          </StackPanel>
+          <StackPanel Orientation="Horizontal" Margin="0,0,0,10">
+            <TextBlock Text="Timeout (sec):" Foreground="{DynamicResource AppFgColor}" VerticalAlignment="Center" Width="90"/>
+            <TextBox x:Name="TxtCaseTimeout" Text="300" Width="70" VerticalAlignment="Center" Margin="0,0,8,0"/>
+            <Button x:Name="BtnCaseRun" Content="Run capture" Height="30" MinWidth="120"/>
+          </StackPanel>
+          <TextBlock x:Name="LblCaseStatus" Foreground="{DynamicResource AppIdColor}" TextWrapping="Wrap"/>
         </StackPanel>
-      </Button>
+      </TabItem>
+    </TabControl>
 
-      <DockPanel Margin="0,8,0,0">
-        <TextBlock x:Name="LblVersion" DockPanel.Dock="Left" Foreground="{DynamicResource AppIdColor}" FontSize="11" VerticalAlignment="Center"/>
-        <Button x:Name="BtnClose" DockPanel.Dock="Right" Content="Close" Style="{DynamicResource SecondaryButtonStyle}"/>
-      </DockPanel>
-    </StackPanel>
-  </Border>
+    <TextBlock Grid.Row="1" Text="Output" Foreground="{DynamicResource AppIdColor}" Margin="2,10,0,4"/>
+    <TextBox x:Name="TxtOutput" Grid.Row="2" IsReadOnly="True" VerticalScrollBarVisibility="Auto"
+             TextWrapping="Wrap" FontFamily="Consolas" FontSize="12"
+             Background="{DynamicResource CardBgColor}" Foreground="{DynamicResource AppFgColor}"/>
+
+    <DockPanel Grid.Row="3" Margin="0,8,0,0">
+      <TextBlock x:Name="LblBusy" DockPanel.Dock="Left" Text="Ready" Foreground="{DynamicResource AppIdColor}" VerticalAlignment="Center"/>
+      <TextBlock x:Name="LblVersion" DockPanel.Dock="Right" Foreground="{DynamicResource AppIdColor}" VerticalAlignment="Center"/>
+    </DockPanel>
+  </Grid>
 </Window>
