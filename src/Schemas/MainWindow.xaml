@@ -119,6 +119,15 @@
               <Button x:Name="BtnMonSave"   Content="Save config" Height="28" MinWidth="110" Margin="0,0,8,0"/>
               <Button x:Name="BtnMonReload" Content="Reload"      Height="28" MinWidth="80"/>
             </StackPanel>
+
+            <Border BorderBrush="{DynamicResource AppIdColor}" BorderThickness="0,1,0,0" Margin="0,12,0,10"/>
+            <DockPanel Margin="0,0,0,4">
+              <TextBlock DockPanel.Dock="Left" Text="Monitor log (live)" Foreground="{DynamicResource AppFgColor}" FontWeight="SemiBold" VerticalAlignment="Center"/>
+              <CheckBox x:Name="ChkMonTail" DockPanel.Dock="Right" Content="Live tail" IsChecked="True" Foreground="{DynamicResource AppFgColor}" VerticalAlignment="Center"/>
+            </DockPanel>
+            <TextBox x:Name="TxtMonLog" Height="130" IsReadOnly="True" VerticalScrollBarVisibility="Auto"
+                     TextWrapping="NoWrap" HorizontalScrollBarVisibility="Auto" FontFamily="Consolas" FontSize="11"
+                     Background="{DynamicResource CardBgColor}" Foreground="{DynamicResource AppFgColor}"/>
           </StackPanel>
         </ScrollViewer>
       </TabItem>

@@ -20,7 +20,7 @@ function Show-MainWindow {
                    'BtnPvInstall','CmbPvProfile','TxtPvLabel','BtnPvStart','BtnPvStop','BtnPvAbort','TxtPvSeconds','BtnPvCollect','BtnPvOpen','BtnPvStatus','LblPvStatus',
                    'TxtPvProfName','PnlPvKernel','CmbPvClr','PnlPvProviders','TxtPvProvOther','TxtPvExtra','TxtPvCircular','TxtPvBuffer','BtnPvProfSave','BtnPvProfDelete','BtnPvProfDefault',
                    'TxtPvOutput','TxtPvSym','ChkPvMerge','ChkPvZip','BtnPvSettingsSave',
-                   'BtnMonInstall','BtnMonStart','BtnMonStop','BtnMonStatus','BtnMonUninstall','LblMonStatus','PnlMonConfig','BtnMonSave','BtnMonReload',
+                   'BtnMonInstall','BtnMonStart','BtnMonStop','BtnMonStatus','BtnMonUninstall','LblMonStatus','PnlMonConfig','BtnMonSave','BtnMonReload','ChkMonTail','TxtMonLog',
                    'TxtCaseExe','BtnCaseBrowse','CmbCaseMode','ChkCaseFusion','ChkCaseAppConfig','TxtCaseTimeout','BtnCaseRun','LblCaseStatus') {
         Set-Variable -Name $n -Scope script -Value $w.FindName($n)
     }
@@ -39,6 +39,39 @@ function Show-MainWindow {
     $script:PvClrPresets      = @('Default','None','Verbose')
     # dropdown options for Monitor config fields (anything not listed falls back to checkbox/text by type)
     $script:MonFieldMeta = @{ DuplicateAction = @('Delete','Keep'); RunMode = @('Logon','Startup') }
+
+    # PerfView safety: an ETW session started with 'PerfView start' keeps running after PerfView.exe exits,
+    # so if this app closes/crashes mid-trace we must abort the session. These OS/file paths let us do that
+    # without the runspace (which may be gone on a crash). active.json presence = a trace is live.
+    $script:PvExe        = Join-Path $env:ProgramData 'PerfViewCapture\Tools\PerfView.exe'
+    $script:PvActiveFile = Join-Path $env:ProgramData 'PerfViewCapture\active.json'
+    $script:PvSession    = 'PerfViewCapture'
+    function script:Stop-PerfViewHard {
+        if (-not (Test-Path $script:PvActiveFile)) { return }   # no live trace; also prevents double-abort
+        try {
+            if (Test-Path $script:PvExe) {
+                Start-Process -FilePath $script:PvExe -ArgumentList '/AcceptEULA', "/SessionName:$($script:PvSession)", 'abort' -NoNewWindow -Wait -ErrorAction SilentlyContinue
+            }
+        } catch {}
+        Remove-Item $script:PvActiveFile -Force -ErrorAction SilentlyContinue
+    }
+
+    # live tail of the background monitor's newest log
+    $script:MonLogDir = Join-Path $env:ProgramData 'ProcDumpMonitor\Logs'
+    $script:MonLogCur = ''; $script:MonLogLen = -1; $script:TailCounter = 0
+    function script:Update-MonTail {
+        if (-not $script:ChkMonTail.IsChecked) { return }
+        try {
+            $f = Get-ChildItem $script:MonLogDir -Filter 'ProcDumpMonitor_*.log' -File -ErrorAction SilentlyContinue |
+                 Sort-Object LastWriteTime -Descending | Select-Object -First 1
+            if (-not $f) { return }
+            if ($f.FullName -eq $script:MonLogCur -and $f.Length -eq $script:MonLogLen) { return }
+            $script:MonLogCur = $f.FullName; $script:MonLogLen = $f.Length
+            $lines = Get-Content -LiteralPath $f.FullName -Tail 40 -ErrorAction SilentlyContinue
+            $script:TxtMonLog.Text = ($lines -join "`r`n")
+            $script:TxtMonLog.ScrollToEnd()
+        } catch {}
+    }
 
     function script:Build-PvToggles {
         $script:PvKernelChecks = [ordered]@{}
@@ -292,18 +325,37 @@ function Show-MainWindow {
 
     # ---------- initial load ----------
     script:Build-PvToggles
+    # crash recovery: a trace left active by a previous (crashed/killed) session is aborted now
+    if (Test-Path $script:PvActiveFile) { & $script:Append 'Found an orphaned PerfView trace from a previous session - aborting it.'; script:Stop-PerfViewHard }
     try { script:Load-PvAll } catch { & $script:Append "PerfView config load failed: $($_.Exception.Message)" }
     try { script:Build-MonEditor } catch { & $script:Append "Monitor config load failed: $($_.Exception.Message)" }
     & $script:RefreshPv; & $script:RefreshMon
 
-    # ---------- output pump ----------
+    # ---------- output pump + log tail ----------
     $timer = New-Object System.Windows.Threading.DispatcherTimer
     $timer.Interval = [TimeSpan]::FromMilliseconds(200)
-    $timer.Add_Tick({ Update-ToolJobs; $script:LblBusy.Text = if (Test-ToolJobsBusy) { 'Working...' } else { 'Ready' } })
+    $timer.Add_Tick({
+        Update-ToolJobs
+        $script:LblBusy.Text = if (Test-ToolJobsBusy) { 'Working...' } else { 'Ready' }
+        $script:TailCounter++
+        if ($script:TailCounter % 5 -eq 0) { script:Update-MonTail }   # ~1s cadence
+    })
     $timer.Start()
+
+    # ---------- terminate an active PerfView trace on close / crash ----------
+    # Graceful close saves the trace (Stop-Trace); a crash aborts it (Stop-PerfViewHard). A hard kill that
+    # bypasses these is recovered on next startup (orphan cleanup above). active.json is the live-trace flag.
+    [System.AppDomain]::CurrentDomain.add_UnhandledException({ script:Stop-PerfViewHard })
+    [System.AppDomain]::CurrentDomain.add_ProcessExit({ script:Stop-PerfViewHard })
 
     $w.Add_Closed({
         $timer.Stop()
+        try {
+            if (Test-Path $script:PvActiveFile) {
+                if (-not $script:Busy['Pv']) { Invoke-ToolSync -Runspace $script:RsPv -Script { Stop-Trace } | Out-Null }
+                else { script:Stop-PerfViewHard }
+            }
+        } catch { script:Stop-PerfViewHard }
         foreach ($rs in @($script:RsPv, $script:RsMon)) { try { $rs.Close() } catch {} }
     })
 
