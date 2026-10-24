@@ -95,7 +95,8 @@ $willBump = ($newVersion -ne $current)
 # ---- notes ----
 if ($NotesFile) { if (-not (Test-Path $NotesFile)) { Fail "NotesFile not found: $NotesFile" }; $Notes = Get-Content -LiteralPath $NotesFile -Raw }
 if (-not $Notes) {
-    $lastTag = (git describe --tags --abbrev=0 2>$null)
+    $lastTag = $null
+    try { $lastTag = (& git describe --tags --abbrev=0 2>$null) } catch { $lastTag = $null }
     $range = if ($lastTag) { "$lastTag..HEAD" } else { 'HEAD' }
     $log = git log $range --pretty=format:'- %s (%h)'
     $Notes = if ($log) { ($log -join "`n") } else { "Release $Tag" }
