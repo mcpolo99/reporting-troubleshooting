@@ -115,7 +115,7 @@ function Get-DefaultConfig {
         LogKeep          = 20
         LogMaxMB         = 10
         RunMode          = 'Logon'      # Logon = as user at logon (GUI apps, hang detection) | Startup = SYSTEM at boot
-        TaskUser         = ''           # Logon mode: DOMAIN\user (empty = console user at install time)
+        TaskUser         = (Get-ConsoleUser)   # Logon mode: DOMAIN\user; defaults to the current console user (editable)
         HeadlessLauncher = $true        # Logon mode: start via 'conhost --headless' so no window flashes
     }
 }
@@ -912,7 +912,8 @@ function Invoke-Monitor {
                 $argLine = "$pdArgs $app `"$dumpTemplate`""
                 try {
                     $monitors[$app] = Start-ProcDumpCaptured $app $argLine
-                    Write-Log "Started ProcDump for $app (launcher PID $($monitors[$app].Process.Id)): $argLine"
+                    $attach = if ($pidsNow) { "attaching to running $app (PID $pidsNow)" } else { "watching for $app to start (none running yet)" }
+                    Write-Log "ProcDump armed - $attach. Launcher PID $($monitors[$app].Process.Id)."
                 } catch {
                     Write-Log "Failed to start ProcDump for ${app}: $($_.Exception.Message)" 'ERROR'
                 }
