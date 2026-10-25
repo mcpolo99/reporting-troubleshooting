@@ -124,6 +124,9 @@ function Read-Config {
         }
     }
     $cfg.Apps = @($cfg.Apps | Where-Object { $_ } | ForEach-Object { "$_".Trim() })
+    # A saved empty TaskUser must not stick as empty: the Logon task needs a user, so fall back to the
+    # current console user (same default as Get-DefaultConfig).
+    if (-not "$($cfg.TaskUser)".Trim()) { $cfg.TaskUser = (Get-ConsoleUser) }
     return $cfg
 }
 

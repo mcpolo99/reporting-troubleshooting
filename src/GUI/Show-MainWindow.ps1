@@ -308,13 +308,29 @@ function Show-MainWindow {
         return @{ Panel = $wrap; Getter = $getter }
     }
 
+    # Candidate users for the TaskUser picker: who is running the GUI, the interactive console user, and the
+    # enabled local accounts. Editable so a domain account not listed can still be typed.
+    function script:Get-TaskUserCandidates {
+        $c = @("$env:USERDOMAIN\$env:USERNAME")
+        try { $c += (Get-CimInstance Win32_ComputerSystem -ErrorAction Stop).UserName } catch {}
+        try { $c += (Get-LocalUser -ErrorAction Stop | Where-Object Enabled | ForEach-Object { '{0}\{1}' -f $env:COMPUTERNAME, $_.Name }) } catch {}
+        @($c | Where-Object { "$_".Trim() } | Select-Object -Unique)
+    }
+
     function script:New-ConfigRow($name, $value, $options) {
         $row = New-Object System.Windows.Controls.DockPanel; $row.Margin = '0,0,0,6'
         $lbl = New-Object System.Windows.Controls.TextBlock
         $lbl.Text = $name; $lbl.Width = 180; $lbl.VerticalAlignment = 'Center'; $lbl.Foreground = $script:FgBrush
         [System.Windows.Controls.DockPanel]::SetDock($lbl, 'Left')
         [void]$row.Children.Add($lbl)
-        if ($options) {
+        if ($name -eq 'TaskUser') {
+            # Editable dropdown of discovered users, defaulting to the current value or, if empty, the current user.
+            $ctl = New-Object System.Windows.Controls.ComboBox
+            $ctl.Width = 260; $ctl.HorizontalAlignment = 'Left'; $ctl.IsEditable = $true
+            $cands = script:Get-TaskUserCandidates
+            foreach ($u in $cands) { [void]$ctl.Items.Add($u) }
+            $ctl.Text = if ("$value".Trim()) { "$value".Trim() } elseif ($cands.Count) { $cands[0] } else { "$env:USERDOMAIN\$env:USERNAME" }
+        } elseif ($options) {
             $ctl = New-Object System.Windows.Controls.ComboBox; $ctl.Width = 200; $ctl.HorizontalAlignment = 'Left'
             foreach ($o in $options) { [void]$ctl.Items.Add($o) }
             $ctl.SelectedItem = "$value"; if ($ctl.SelectedIndex -lt 0) { $ctl.IsEditable = $true; $ctl.Text = "$value" }
