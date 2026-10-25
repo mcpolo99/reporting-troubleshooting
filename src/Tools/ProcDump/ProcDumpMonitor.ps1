@@ -12,29 +12,11 @@
       powershell -ExecutionPolicy Bypass -File .\ProcDumpMonitor.ps1 -Update   [-Force]
       powershell -ExecutionPolicy Bypass -File .\ProcDumpMonitor.ps1 -Uninstall
   -Update only installs if this script is NEWER than the installed copy. -Force also allows
-  same-version reinstall, downgrade, and updating a pre-2.0.0 install whose stop isn't graceful.
+  same-version reinstall, downgrade, and updating an old install whose stop handling isn't graceful.
 
 .VERSION
-  Version is in $ScriptVersion below - bump it for every change you deploy.
-
-.CHANGELOG
-  2.5.0  Uninstall removes ONLY the scheduled task; it no longer deletes BaseDir, so config and logs are
-         preserved for a later reinstall (and the GUI-runspace Read-Host prompts are gone).
-  2.4.0  Start is self-verifying: refuses when the installed script is missing (a stale task would launch
-         nothing - no process, no log), warns when the task points at a different script, and after starting
-         confirms the task reached Running or reports its real exit code instead of claiming success.
-  2.3.0  Stop is status-aware and no longer silent: reports task state + active ProcDump count, logs progress
-         while waiting, says plainly when nothing is running/attached, and defaults TaskUser to the current
-         console user. Clearer arm/attach logging (attaching vs waiting).
-  2.2.0  Install/resolve ProcDump through the shared package engine (Common\Packages.ps1) in the shared
-         store %ProgramData%\ReportingTroubleshooting\Packages\sysinternals (one source of truth, reused
-         by every tool and the GUI Packages tab). Uninstall no longer removes the shared tools.
-  2.1.0  Install the full Sysinternals Suite into Tools\ (not just ProcDump) so further Sysinternals
-         monitors can be added over time; ProcDump stays the signature-gated binary.
-  2.0.0  First versioned release. Menu/setup, self-install, scheduled task, non-locking logs,
-         graceful ProcDump detach on stop, ProcDump output capture, exe versions, dump reason
-         (.info.txt), duplicate-capture detection, cooldown, configurable -n, Update with version check.
-  (unversioned)  Earlier copies - treated as version 0.0.0 by the update check.
+  $ScriptVersion is stamped automatically from the repo VERSION by scripts\New-Release.ps1 at release time -
+  NEVER edit it by hand. Release history lives in CHANGELOG.md and the GitHub releases.
   Monitor mode (what the scheduled task runs - not meant to be started by hand):
       ... -File "%ProgramData%\ReportingTroubleshooting\Monitor\ProcDumpMonitor.ps1" -Monitor
 
@@ -59,7 +41,8 @@ param(
 )
 
 # =============================== VERSION =================================
-$ScriptVersion = '2.5.0'
+# Stamped automatically by scripts\New-Release.ps1 from the repo VERSION - do not edit by hand.
+$ScriptVersion = '1.0.19'
 $GracefulStopSince = [version]'2.0.0'   # installed copies older than this may kill apps when stopped
 
 # =============================== CONSTANTS ===============================

@@ -90,6 +90,20 @@ if ((Read-Host "Create and publish $Tag? (y/N)") -ne 'y') { Info 'Cancelled.'; r
 if ($willBump) {
     Info "Writing VERSION $newVersion and updating CHANGELOG..."
     Set-Content -LiteralPath $VersionFile -Value $newVersion -NoNewline -Encoding ASCII
+
+    # Single source of truth for the version: stamp $newVersion into every tool script's $ScriptVersion
+    # literal so it is NEVER maintained by hand. ReportingToolkit.ps1 reads VERSION at runtime (not a
+    # quoted literal) so the pattern deliberately does not match it.
+    $srcDir = Join-Path $RepoRoot 'src'
+    $rx  = [regex]'(?m)^(\s*\$ScriptVersion\s*=\s*'')\d+\.\d+\.\d+('')'
+    $enc = New-Object System.Text.UTF8Encoding($false)
+    $stamped = @()
+    Get-ChildItem -LiteralPath $srcDir -Recurse -Filter *.ps1 | ForEach-Object {
+        $txt = [IO.File]::ReadAllText($_.FullName)
+        $out = $rx.Replace($txt, "`${1}$newVersion`${2}")
+        if ($out -ne $txt) { [IO.File]::WriteAllText($_.FullName, $out, $enc); $stamped += $_.FullName }
+    }
+    if ($stamped) { Info ("Stamped v$newVersion into {0} tool script(s)." -f $stamped.Count); git add -- $stamped }
     if (Test-Path $ChangelogFile) {
         $entry = "## [$Tag] - {0}`n{1}`n" -f (Get-Date -Format 'yyyy-MM-dd'), $Notes
         $cl = Get-Content -LiteralPath $ChangelogFile -Raw

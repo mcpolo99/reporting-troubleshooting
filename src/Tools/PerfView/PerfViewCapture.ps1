@@ -25,12 +25,8 @@
   Timed collect blocks for -Seconds (or until the stop event) - use it for unattended capture.
 
 .VERSION
-  Version is in $ScriptVersion below - bump it for every change you deploy.
-
-.CHANGELOG
-  1.0.0  First release. Install/verify PerfView, profile-driven start/stop (background) and timed
-         collect, abort, status, stop-event helper, config with editable collection profiles,
-         menu + unattended switches, delegates temporary procdump to ProcDumpCase.ps1.
+  $ScriptVersion is stamped automatically from the repo VERSION by scripts\New-Release.ps1 at release time -
+  NEVER edit it by hand. Release history lives in CHANGELOG.md and the GitHub releases.
 
 .FILES
   App data under the one app root %ProgramData%\ReportingTroubleshooting\PerfView\ :
@@ -61,7 +57,8 @@ param(
 )
 
 # =============================== VERSION =================================
-$ScriptVersion = '1.1.0'
+# Stamped automatically by scripts\New-Release.ps1 from the repo VERSION - do not edit by hand.
+$ScriptVersion = '1.0.19'
 
 # =============================== CONSTANTS ===============================
 $AppName     = 'PerfViewCapture'
