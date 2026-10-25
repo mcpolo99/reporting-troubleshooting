@@ -33,13 +33,14 @@
          menu + unattended switches, delegates temporary procdump to ProcDumpCase.ps1.
 
 .FILES
-  %ProgramData%\ReportingTroubleshooting\PerfView\        (all under the one app root)
+  App data under the one app root %ProgramData%\ReportingTroubleshooting\PerfView\ :
       config.json                              settings + collection profiles
       active.json                              state of the current background trace
-      Output\PerfViewData_<profile>_<label>_<datetime>.etl(.zip)   the trace (default OutputDir)
       Logs\PerfViewCapture_<datetime>.log      one per menu/op session
       Logs\PerfView_<datetime>.log             PerfView's own output, one per start/stop/collect
-  PerfView.exe itself lives in the shared store %ProgramData%\ReportingTroubleshooting\Packages\perfview\
+  PerfView.exe lives in the shared store %ProgramData%\ReportingTroubleshooting\Packages\perfview\
+  Trace OUTPUT (not app data) goes to the configured OutputDir (default C:\dumps\PerfView):
+      PerfViewData_<computer>_<profile>_<label>_<datetime>.etl(.zip)
 #>
 [CmdletBinding()]
 param(
@@ -145,7 +146,7 @@ function Get-DefaultProfiles {
 
 function Get-DefaultConfig {
     [pscustomobject]@{
-        OutputDir      = (Join-Path $BaseDir 'Output')
+        OutputDir      = 'C:\dumps\PerfView'
         DefaultProfile = 'Balanced'
         Merge          = $true
         Zip            = $true
@@ -244,7 +245,8 @@ function Invoke-PerfView([string[]]$PerfViewArgs, [string]$What) {
 function Get-OutFile($cfg, $p, [string]$Label) {
     $safeProfile = ($p.Name -replace '[^\w\-]', '_')
     $safeLabel   = if ($Label) { '_' + ($Label -replace '[^\w\-\.]', '_') } else { '' }
-    $name = 'PerfViewData_{0}{1}_{2:yyyyMMdd_HHmmss}.etl' -f $safeProfile, $safeLabel, (Get-Date)
+    # Prefix with the computer name so a trace's origin is obvious once collected from several machines.
+    $name = 'PerfViewData_{0}_{1}{2}_{3:yyyyMMdd_HHmmss}.etl' -f $env:COMPUTERNAME, $safeProfile, $safeLabel, (Get-Date)
     Join-Path $cfg.OutputDir $name
 }
 

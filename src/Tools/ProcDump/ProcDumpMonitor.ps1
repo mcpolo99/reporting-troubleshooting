@@ -31,15 +31,15 @@
       ... -File "%ProgramData%\ReportingTroubleshooting\Monitor\ProcDumpMonitor.ps1" -Monitor
 
 .FILES
-  %ProgramData%\ReportingTroubleshooting\Monitor\        (all under the one app root)
+  App data under the one app root %ProgramData%\ReportingTroubleshooting\Monitor\ :
       ProcDumpMonitor.ps1                 installed copy of this script
       config.json                         settings
-      Dumps\                              captured dumps (default DumpDir)
       Logs\ProcDumpMonitor_<datetime>.log         one per monitor launch
       Logs\ProcDumpMonitor-Setup_<datetime>.log   one per setup/menu session
       Logs\ProcDump_<app>_<datetime>.log          ProcDump's own output, one per ProcDump session
-  <DumpDir>\<dump>.dmp + <dump>.info.txt          dump + reason, exception, PID, exe versions
-  ProcDump itself lives in the shared store %ProgramData%\ReportingTroubleshooting\Packages\sysinternals\
+  ProcDump lives in the shared store %ProgramData%\ReportingTroubleshooting\Packages\sysinternals\
+  Dump OUTPUT (not app data) goes to the configured DumpDir (default C:\dumps):
+      <proc>_<computer>_<YYMMDD>_<HHMMSS>.dmp + <same>.info.txt   dump + reason, exception, PID, exe versions
 #>
 [CmdletBinding()]
 param(
@@ -104,7 +104,7 @@ $ProcDumpExe     = Join-Path $ToolsDir $ProcDumpExeName
 function Get-DefaultConfig {
     [pscustomobject]@{
         Apps             = @('AppA.exe')
-        DumpDir          = (Join-Path $BaseDir 'Dumps')
+        DumpDir          = 'C:\dumps'
         KeepDumps        = 15
         CheckSeconds     = 5
         CleanupSeconds   = 300
@@ -906,7 +906,10 @@ function Invoke-Monitor {
                     Write-Log "Cooldown for $app over$(if ($pidsNow -ne $cd.Pids) { ' (process changed)' }) - re-arming ProcDump."
                 }
 
-                $argLine = "$pdArgs $app `"$($cfg.DumpDir)`""
+                # Dump filename template: ProcDump substitutes PROCESSNAME/YYMMDD/HHMMSS; we add the computer
+                # name so a dump's origin is obvious. Keeps PROCESSNAME first so "$appName*.dmp" matching holds.
+                $dumpTemplate = Join-Path $cfg.DumpDir ('PROCESSNAME_{0}_YYMMDD_HHMMSS.dmp' -f $env:COMPUTERNAME)
+                $argLine = "$pdArgs $app `"$dumpTemplate`""
                 try {
                     $monitors[$app] = Start-ProcDumpCaptured $app $argLine
                     Write-Log "Started ProcDump for $app (launcher PID $($monitors[$app].Process.Id)): $argLine"

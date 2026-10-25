@@ -27,7 +27,7 @@
 
   While capturing: press Q to stop (a snapshot dump is taken, ProcDump detaches, the app keeps running).
 
-.WHAT IS COLLECTED  (<OutputRoot>\<exe>_<datetime>\ and <same>.zip)
+.WHAT IS COLLECTED  (<OutputRoot>\<computer>_<exe>_<datetime>\ and <same>.zip)
   Dumps\        ProcDump dumps (+ snapshot dump on timeout / Q)
   Logs\         procdump_output.txt, collect.log
   Events\       .evtx exports (Application, System, CodeIntegrity, AppLocker, Defender) for the last
@@ -38,7 +38,7 @@
   system_info.txt, SUMMARY.txt   (findings, e.g. Code Integrity / Smart App Control blocks)
 
 .NOTES
-  Output goes under the one app root by default: %ProgramData%\ReportingTroubleshooting\Case\<exe>_<datetime>\.
+  Dump/evidence output (not app data) goes to C:\dumps\Cases\<computer>_<exe>_<datetime>\ by default.
   ProcDump lookup order: -ProcDumpPath, PATH (incl. WinGet links), script folder (+ \Tools), the shared
   package store %ProgramData%\ReportingTroubleshooting\Packages\sysinternals, common Sysinternals folders,
   WinGet packages. Every candidate must be validly Microsoft-signed. Only then the shared package engine
@@ -51,7 +51,7 @@ param(
     [string]$ExePath,
     [string]$Arguments = '',
     [string]$WorkingDirectory,
-    [string]$OutputRoot = (Join-Path $env:ProgramData 'ReportingTroubleshooting\Case'),   # under the one app root
+    [string]$OutputRoot = 'C:\dumps\Cases',   # dump/evidence output (not app data)
     [switch]$Auto,                        # agnostic default: catch a crash, a silent exit OR a hang in one run
     [string[]]$ExceptionFilter = @(),     # e.g. FileLoadException, E0434352, C0000005 -> first-chance dumps
     [switch]$FirstChance,                 # dump on ALL first-chance exceptions (noisy, limited by -MaxDumps)
@@ -420,7 +420,8 @@ $ModeDesc = if ($useFirstChance -and $ExceptionFilter.Count) { "first-chance of:
 
 # ---- case folder ----
 $stamp    = Get-Date -Format 'yyyyMMdd_HHmmss'
-$CaseDir  = Join-Path $OutputRoot "${BaseName}_$stamp"
+# Prefix the case folder with the computer name so its origin is obvious once collected from many machines.
+$CaseDir  = Join-Path $OutputRoot "${env:COMPUTERNAME}_${BaseName}_$stamp"
 $DumpDir  = Join-Path $CaseDir 'Dumps'
 $LogsDir  = Join-Path $CaseDir 'Logs'
 $EventDir = Join-Path $CaseDir 'Events'
