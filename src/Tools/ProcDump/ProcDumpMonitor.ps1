@@ -18,6 +18,8 @@
   Version is in $ScriptVersion below - bump it for every change you deploy.
 
 .CHANGELOG
+  2.5.0  Uninstall removes ONLY the scheduled task; it no longer deletes BaseDir, so config and logs are
+         preserved for a later reinstall (and the GUI-runspace Read-Host prompts are gone).
   2.4.0  Start is self-verifying: refuses when the installed script is missing (a stale task would launch
          nothing - no process, no log), warns when the task points at a different script, and after starting
          confirms the task reached Running or reports its real exit code instead of claiming success.
@@ -57,7 +59,7 @@ param(
 )
 
 # =============================== VERSION =================================
-$ScriptVersion = '2.4.0'
+$ScriptVersion = '2.5.0'
 $GracefulStopSince = [version]'2.0.0'   # installed copies older than this may kill apps when stopped
 
 # =============================== CONSTANTS ===============================
@@ -731,25 +733,15 @@ function Invoke-Install {
 }
 
 function Invoke-Uninstall {
+    # Uninstall removes ONLY the scheduled task. Config, logs and the installed script are kept so a later
+    # reinstall reuses the same configuration - uninstall must never clear config. Dumps live in C:\dumps
+    # (outside BaseDir) and are untouched regardless.
     $cfg = Read-Config
     Stop-MonitorTask $cfg
     if (Get-MonitorTask) { Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false; Write-Log 'Scheduled task removed.' }
-
-    $delDumps = $false; $delAll = $true
-    if ($script:EchoLog) {
-        $delDumps = (Read-Host "Delete dumps in $($cfg.DumpDir)? (y/N)") -eq 'y'
-        $delAll   = (Read-Host "Delete $BaseDir (config, logs, ProcDump)? (Y/n)") -ne 'n'
-    }
-    if ($delDumps) {
-        Get-ChildItem $cfg.DumpDir -Filter *.dmp -File -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue
-        Write-Log 'Dumps deleted.'
-    }
-    if ($delAll) {
-        Write-Log "Removing $BaseDir"
-        $script:LogFile = $null
-        Remove-Item $BaseDir -Recurse -Force -ErrorAction SilentlyContinue
-    }
-    Write-Host 'Uninstall complete.'
+    else { Write-Log 'No scheduled task to remove.' }
+    Write-Log "Configuration preserved at $ConfigFile. Uninstall removes only the scheduled task; delete $BaseDir by hand if you want config/logs gone."
+    Write-Host 'Uninstall complete - scheduled task removed; configuration preserved.'
 }
 
 # =============================== INTERACTIVE =============================
