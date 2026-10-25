@@ -18,6 +18,9 @@
   Version is in $ScriptVersion below - bump it for every change you deploy.
 
 .CHANGELOG
+  2.4.0  Start is self-verifying: refuses when the installed script is missing (a stale task would launch
+         nothing - no process, no log), warns when the task points at a different script, and after starting
+         confirms the task reached Running or reports its real exit code instead of claiming success.
   2.3.0  Stop is status-aware and no longer silent: reports task state + active ProcDump count, logs progress
          while waiting, says plainly when nothing is running/attached, and defaults TaskUser to the current
          console user. Clearer arm/attach logging (attaching vs waiting).
@@ -54,7 +57,7 @@ param(
 )
 
 # =============================== VERSION =================================
-$ScriptVersion = '2.3.0'
+$ScriptVersion = '2.4.0'
 $GracefulStopSince = [version]'2.0.0'   # installed copies older than this may kill apps when stopped
 
 # =============================== CONSTANTS ===============================
@@ -595,8 +598,38 @@ function Stop-MonitorTask($cfg, [int]$TimeoutSec = 60) {
 }
 
 function Start-MonitorTask {
-    if (Get-MonitorTask) { Start-ScheduledTask -TaskName $TaskName; Write-Log 'Monitor task started.' }
-    else { Write-Log 'Not installed - nothing to start.' 'WARN' }
+    $task = Get-MonitorTask
+    if (-not $task) { Write-Log 'Monitor is not installed - click Install first (that registers the task and copies the script).' 'WARN'; return }
+
+    # The task action launches "powershell.exe -File <InstalledScript>". If that script is missing (task left
+    # over from an older install at a different path, never reinstalled here) the process exits instantly with
+    # no window and no log - which looks exactly like "started but nothing is running". Catch it up front.
+    if (-not (Test-Path -LiteralPath $InstalledScript)) {
+        Write-Log "Monitor script not found at $InstalledScript - the task would launch nothing. Click Install (or Uninstall then Install) to (re)deploy it." 'ERROR'
+        return
+    }
+    $acts = @($task.Actions)
+    $pointsHere = $acts | Where-Object { "$($_.Arguments)" -like "*$InstalledScript*" }
+    if (-not $pointsHere) {
+        Write-Log "The installed task does not point at $InstalledScript (it is a stale registration). Click Uninstall then Install to re-register it." 'WARN'
+    }
+
+    Start-ScheduledTask -TaskName $TaskName
+
+    # Verify it actually came up: a healthy monitor reaches Running and writes its startup banner within a few
+    # seconds. If the launched process died immediately, report the task's real exit code instead of claiming success.
+    $deadline = (Get-Date).AddSeconds(6); $running = $false
+    while ((Get-Date) -lt $deadline) {
+        Start-Sleep -Milliseconds 400
+        if ((Get-MonitorTask).State -eq 'Running') { $running = $true; break }
+    }
+    if ($running) {
+        Write-Log 'Monitor task started and is running. Live attach/dump activity will appear in the monitor log.'
+    } else {
+        $info = Get-MonitorTask | Get-ScheduledTaskInfo
+        Write-Log ("Monitor task was triggered but is not running (state: $((Get-MonitorTask).State), last result: 0x{0:X8}). " -f [int64]$info.LastTaskResult +
+                   'The launched process exited immediately. Reinstall the monitor (Uninstall then Install); if it persists, check that the task user can run elevated at logon.') 'ERROR'
+    }
 }
 
 # =============================== VERSION / UPDATE ========================
