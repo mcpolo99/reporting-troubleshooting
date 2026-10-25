@@ -5,6 +5,13 @@ truth; each release is tagged `vX.Y.Z` and published as a GitHub release by `scr
 
 <!-- NEW RELEASES INSERTED BELOW -->
 
+## [v1.0.31] - 2026-10-25
+Changes since v1.0.30:
+
+### Fixes
+- detach many ProcDump instances concurrently so Stop isn't slow (6825da6)
+
+
 ## [v1.0.30] - 2026-10-25
 Changes since v1.0.29:
 
@@ -200,6 +207,7 @@ Changes since v1.0.0:
 - WPF/XAML launcher (GUI default, `-CLI` text menu) with shared light/dark theme.
 - Shared components (logging, admin/signature/prompt/version helpers) under `src/Common`.
 - Bootstrap installer (`src/Get.ps1` + `src/run.bat`) with version check against GitHub.
+
 
 
 
