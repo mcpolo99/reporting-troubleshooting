@@ -68,9 +68,33 @@ if (-not $Notes) {
     $lastTag = $null
     try { $lastTag = (& git describe --tags --abbrev=0 2>$null) } catch { $lastTag = $null }
     $range = if ($lastTag) { "$lastTag..HEAD" } else { 'HEAD' }
-    $log = git log $range --pretty=format:'- %s (%h)'
-    $Notes = if ($log) { ($log -join "`n") } else { "Release $Tag" }
-    if ($lastTag) { $Notes = "Changes since $lastTag`:`n`n$Notes" }
+    # Group commits by their conventional-commit type prefix so the changelog reads by section instead of a
+    # flat list. Unprefixed commits fall under "Other". Hash + the release commit itself are kept out.
+    $commits = @(git log $range --no-merges --pretty=format:'%h%x1f%s' | Where-Object { $_ })
+    $typeToHeading = @{
+        feat = 'Features'; feature = 'Features'; add = 'Features'
+        fix = 'Fixes'; hotfix = 'Fixes'; bug = 'Fixes'
+        perf = 'Performance'; refactor = 'Refactoring'; style = 'Refactoring'
+        docs = 'Documentation'; test = 'Tests'; build = 'Build'; ci = 'Build'
+        chore = 'Chores'; deps = 'Chores'
+    }
+    $order = 'Features', 'Fixes', 'Performance', 'Refactoring', 'Documentation', 'Tests', 'Build', 'Chores', 'Other'
+    $groups = @{}
+    foreach ($c in $commits) {
+        $h, $s = $c -split "`u{1f}", 2
+        if ($s -match '^chore:\s*release\s') { continue }   # drop the previous release's own commit
+        if ($s -match '^(?<t>\w+)(\([^)]*\))?!?:\s*(?<d>.+)$') {
+            $heading = $typeToHeading[$matches.t.ToLower()]; if (-not $heading) { $heading = 'Other' }
+            $desc = $matches.d
+        } else { $heading = 'Other'; $desc = $s }
+        if (-not $groups.ContainsKey($heading)) { $groups[$heading] = @() }
+        $groups[$heading] += ('- {0} ({1})' -f $desc, $h)
+    }
+    if ($groups.Count) {
+        $sections = foreach ($h in $order) { if ($groups.ContainsKey($h)) { "### $h`n$($groups[$h] -join "`n")" } }
+        $Notes = $sections -join "`n`n"
+        if ($lastTag) { $Notes = "Changes since $lastTag`:`n`n$Notes" }
+    } else { $Notes = "Release $Tag" }
 }
 
 # ---- plan ----
