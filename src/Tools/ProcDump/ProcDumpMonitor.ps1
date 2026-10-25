@@ -512,11 +512,20 @@ function Read-ProcDumpOutput($state, [switch]$Final) {
 
     $text = $state.Partial
     if ($n -gt 0) {
-        if (-not $state.Enc) {   # ProcDump may write ANSI/OEM or UTF-16 depending on version
-            $state.Enc = if ($n -ge 2 -and $buf[1] -eq 0) { [Text.Encoding]::Unicode }
-                         else { [Text.Encoding]::GetEncoding([Globalization.CultureInfo]::CurrentCulture.TextInfo.OEMCodePage) }
+        # ProcDump writes UTF-16 (usually with a FF FE BOM), or ANSI/OEM on some versions. Detect by BOM
+        # first - the old "$buf[1] -eq 0" test failed on the BOM (2nd byte 0xFE), so UTF-16 was decoded as
+        # single-byte and every character came out spaced ("W a i t i n g").
+        $enc = $state.Enc
+        if (-not $enc -and $n -ge 2) {
+            $enc = if     ($buf[0] -eq 0xFF -and $buf[1] -eq 0xFE) { [Text.Encoding]::Unicode }
+                   elseif ($buf[0] -eq 0xFE -and $buf[1] -eq 0xFF) { [Text.Encoding]::BigEndianUnicode }
+                   elseif ($n -ge 3 -and $buf[0] -eq 0xEF -and $buf[1] -eq 0xBB -and $buf[2] -eq 0xBF) { [Text.Encoding]::UTF8 }
+                   elseif ($buf[1] -eq 0) { [Text.Encoding]::Unicode }
+                   else   { [Text.Encoding]::GetEncoding([Globalization.CultureInfo]::CurrentCulture.TextInfo.OEMCodePage) }
+            $state.Enc = $enc
         }
-        $text += $state.Enc.GetString($buf, 0, $n)
+        if (-not $enc) { $enc = [Text.Encoding]::GetEncoding([Globalization.CultureInfo]::CurrentCulture.TextInfo.OEMCodePage) }
+        $text += $enc.GetString($buf, 0, $n)
     }
 
     $lines = @($text -split "`r?`n")
@@ -526,8 +535,14 @@ function Read-ProcDumpOutput($state, [switch]$Final) {
     foreach ($l in $lines) {
         $l = $l.Trim([char]0, [char]0xFEFF, ' ', "`t")
         if (-not $l) { continue }
-        if ($l -match '^(ProcDump v|Copyright \(C\)|Sysinternals - )') { continue }   # banner
-        $lvl = if ($l -match 'error|failed|unable|denied') { 'WARN' } else { 'INFO' }
+        # Forward only the ProcDump lines that matter: attach/wait state, dump lifecycle, errors, and the
+        # "monitoring" confirmation. ProcDump's per-first-chance-exception lines ("[hh:mm:ss] Exception: ..")
+        # and its 25-line settings block per arm are pure noise - busy .NET apps emit thousands of them.
+        $keep = ($l -match '^(Process:|Waiting for process|Dump \d|Dump count)') -or
+                ($l -match '(?i)monitoring without terminating') -or
+                ($l -match '(?i)error|failed|unable|denied')
+        if (-not $keep) { continue }
+        $lvl = if ($l -match '(?i)error|failed|unable|denied') { 'WARN' } else { 'INFO' }
         Write-Log "[ProcDump $($state.App)] $l" $lvl
     }
 }
