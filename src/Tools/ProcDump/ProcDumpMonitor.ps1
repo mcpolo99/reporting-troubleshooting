@@ -189,7 +189,9 @@ function Test-AppRunning([string]$App) {
 }
 
 # Sends Ctrl+C to a console process from a separate hidden helper (so our own console is untouched).
-# For ProcDump, Ctrl+C = "end monitoring without terminating the process".
+# For ProcDump, Ctrl+C = "end monitoring without terminating the process". Returns the helper process
+# (PassThru, NOT -Wait) so the caller can fire one per instance concurrently and wait for them together -
+# waiting on each in turn is far too slow when a dozen-plus instances are attached.
 function Send-CtrlC([int]$ProcessId) {
     $code = @"
 Add-Type -Namespace W -Name K -MemberDefinition '
@@ -207,8 +209,8 @@ if ([W.K]::AttachConsole($ProcessId)) {
     $enc = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($code))
     try {
         Start-Process powershell.exe -ArgumentList "-NoProfile -NonInteractive -WindowStyle Hidden -EncodedCommand $enc" `
-                      -WindowStyle Hidden -Wait -ErrorAction Stop
-    } catch { Write-Log "Ctrl+C helper failed for PID ${ProcessId}: $($_.Exception.Message)" 'WARN' }
+                      -WindowStyle Hidden -PassThru -ErrorAction Stop
+    } catch { Write-Log "Ctrl+C helper failed for PID ${ProcessId}: $($_.Exception.Message)" 'WARN'; $null }
 }
 
 function Stop-ProcDumpInstances($cfg, [int]$TimeoutSec = 30) {
@@ -224,8 +226,14 @@ function Stop-ProcDumpInstances($cfg, [int]$TimeoutSec = 30) {
     }
     Write-Log "Stopping $($pds.Count) ProcDump instance(s) gracefully (detaching any attached, quitting any still waiting)..."
 
-    # 1) Ctrl+C every instance (detaches if attached, quits if waiting)
-    foreach ($pd in $pds) { Send-CtrlC $pd.ProcessId }
+    # 1) Ctrl+C every instance CONCURRENTLY (detaches if attached, quits if waiting). Fire all helpers,
+    # then wait for them together - serial -Wait on each is ~1s/instance and crawls with 17 attached.
+    $helpers = @($pds | ForEach-Object { Send-CtrlC $_.ProcessId } | Where-Object { $_ })
+    $hdeadline = (Get-Date).AddSeconds(15)
+    while ((Get-Date) -lt $hdeadline -and @($helpers | Where-Object { -not $_.HasExited }).Count -gt 0) {
+        Start-Sleep -Milliseconds 150
+    }
+    foreach ($h in @($helpers | Where-Object { -not $_.HasExited })) { try { $h.Kill() } catch {} }
 
     # 2) Also use ProcDump's own -cancel for apps that are running (ProcDump 10+)
     Start-Sleep -Seconds 2
