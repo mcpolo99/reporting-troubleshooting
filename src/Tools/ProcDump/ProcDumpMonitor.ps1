@@ -229,8 +229,17 @@ function Stop-ProcDumpInstances($cfg, [int]$TimeoutSec = 30) {
         if ($app -and -not (Test-AppRunning $app)) {
             Invoke-CimMethod -InputObject $pd -MethodName Terminate | Out-Null
             Write-Log "Ended waiting ProcDump PID $($pd.ProcessId) ($app not running, nothing attached)."
-        } else {
+        } elseif ($app) {
             Write-Log "ProcDump PID $($pd.ProcessId) ($app) did not detach - LEFT RUNNING so $app is not terminated." 'WARN'
+        } else {
+            # No configured app matched its command line - it is an orphan from an earlier monitor session
+            # (often one started by another user/session, whose command line we cannot read from here). We
+            # can't send it Ctrl+C across sessions and can't tell what it may be attached to, so leave it be.
+            $owner = $null
+            try { $o = Invoke-CimMethod -InputObject $pd -MethodName GetOwner; if ($o.ReturnValue -eq 0) { $owner = ("{0}\{1}" -f $o.Domain, $o.User) } } catch {}
+            Write-Log ("ProcDump PID $($pd.ProcessId) is an orphan from an earlier monitor session" +
+                       $(if ($owner) { " (started by $owner)" } else { '' }) +
+                       " - LEFT RUNNING so whatever it may be attached to is not terminated. End it manually or reboot if it is stale.") 'WARN'
         }
     }
     $n = @(Get-OurProcDumps).Count
