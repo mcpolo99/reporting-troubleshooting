@@ -494,16 +494,31 @@ function Show-MainWindow {
     $w.Dispatcher.add_UnhandledException({
         param($src, $de)
         try {
-            # Collapse identical consecutive recoveries (a render-target hiccup fires one per
-            # WM_WINDOWPOSCHANGED) so one transient fault doesn't flood the output with copies.
-            $msg = "$($de.Exception.Message)"
+            $ex  = $de.Exception
+            $txt = "$ex"
+            # Known-harmless and self-recovering: WPF cannot (re)create the composition render target during
+            # the window's show/resize messages on a constrained desktop (Win32 1816 "Not enough quota",
+            # thrown from HwndTarget.UpdateWindowSettings). The window still opens and works; SoftwareOnly
+            # doesn't avoid it because the DUCE/DWM channel is the limited resource. Note it ONCE as a benign
+            # warning and never write a stack file for it - it is not an app fault.
+            $benignRender = ($ex -is [System.ComponentModel.Win32Exception] -or $txt -match 'Win32Exception') -and
+                            ($txt -match 'HwndTarget\.UpdateWindowSettings' -or $txt -match 'Not enough quota')
+            if ($benignRender) {
+                if (-not $script:RenderWarnShown) {
+                    $script:RenderWarnShown = $true
+                    & $script:Append 'Note: a harmless display-render warning occurred on first show (recovered); the window works normally.'
+                }
+                $de.Handled = $true; return
+            }
+            # Collapse identical consecutive recoveries so one transient fault doesn't flood the output.
+            $msg = "$($ex.Message)"
             if ($msg -ne $script:LastUiError) {
                 $script:LastUiError = $msg
                 & $script:Append "UI error (recovered): $msg"
             }
             $logDir = Join-Path $env:ProgramData 'ReportingTroubleshooting\Logs'
             New-Item -ItemType Directory -Path $logDir -Force -ErrorAction SilentlyContinue | Out-Null
-            $de.Exception.ToString() | Set-Content -LiteralPath (Join-Path $logDir ('ui_error_{0:yyyyMMdd_HHmmss}.log' -f (Get-Date))) -Encoding UTF8 -ErrorAction SilentlyContinue
+            $txt | Set-Content -LiteralPath (Join-Path $logDir ('ui_error_{0:yyyyMMdd_HHmmss}.log' -f (Get-Date))) -Encoding UTF8 -ErrorAction SilentlyContinue
         } catch {}
         $de.Handled = $true
     })
