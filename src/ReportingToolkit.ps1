@@ -29,13 +29,19 @@ $script:SharedStylesSchema = Join-Path $schemasPath 'SharedStyles.xaml'
 $script:ToolPerfView = 'Tools\PerfView\PerfViewCapture.ps1'
 $script:ToolMonitor  = 'Tools\ProcDump\ProcDumpMonitor.ps1'
 $script:ToolCase     = 'Tools\ProcDump\ProcDumpCase.ps1'
+$script:ToolPackages = 'Tools\Packages\PackagesTool.ps1'
 $script:ToolPerfViewPath = Join-Path $PSScriptRoot $script:ToolPerfView
 $script:ToolMonitorPath  = Join-Path $PSScriptRoot $script:ToolMonitor
 $script:ToolCasePath     = Join-Path $PSScriptRoot $script:ToolCase
+$script:ToolPackagesPath = Join-Path $PSScriptRoot $script:ToolPackages
 
 # -------- components (dot-sourced) --------
 . (Join-Path $PSScriptRoot 'Helpers\Start-Tool.ps1')
 . (Join-Path $PSScriptRoot 'Helpers\Install-Shortcut.ps1')
+# Shared package engine (single source of truth for installs). Used by the CLI 'P' option; the GUI runs
+# installs off the UI thread in its own runspace (via Tools\Packages\PackagesTool.ps1).
+. (Join-Path $PSScriptRoot 'Common\Common.ps1')
+. (Join-Path $PSScriptRoot 'Common\Packages.ps1')
 . (Join-Path $PSScriptRoot 'CLI\Show-CliMenu.ps1')
 . (Join-Path $PSScriptRoot 'GUI\Get-SystemUsesDarkMode.ps1')
 . (Join-Path $PSScriptRoot 'GUI\Set-WindowThemeResources.ps1')

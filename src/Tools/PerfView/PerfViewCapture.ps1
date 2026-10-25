@@ -60,20 +60,18 @@ param(
 )
 
 # =============================== VERSION =================================
-$ScriptVersion = '1.0.0'
+$ScriptVersion = '1.1.0'
 
 # =============================== CONSTANTS ===============================
 $AppName     = 'PerfViewCapture'
 $BaseDir     = Join-Path $env:ProgramData $AppName
 $ConfigFile  = Join-Path $BaseDir 'config.json'
 $ActiveFile  = Join-Path $BaseDir 'active.json'
-$ToolsDir    = Join-Path $BaseDir 'Tools'
 $LogDir      = Join-Path $BaseDir 'Logs'
-$PerfViewExe = Join-Path $ToolsDir 'PerfView.exe'
 $SessionName = 'PerfViewCapture'                     # fixed ETW session name for start/stop/abort pairing
 $StopEventSource = 'PerfViewStop'
 $StopEventText   = 'PERFVIEW_STOP_NOW'
-$PerfViewUrl = 'https://github.com/microsoft/perfview/releases/latest/download/PerfView.exe'
+# $ToolsDir / $PerfViewExe are set from the shared package store after Packages.ps1 is dot-sourced below.
 $ScriptDir   = if ($PSCommandPath) { Split-Path -Parent $PSCommandPath } else { (Get-Location).Path }
 
 $script:LogFile   = $null
@@ -101,6 +99,11 @@ for ($__i = 0; $__i -lt 6 -and -not $CommonDir; $__i++) {
 if (-not $CommonDir) { throw "Shared components (Common\) not found from $ScriptDir upward." }
 . (Join-Path $CommonDir 'Logging.ps1')
 . (Join-Path $CommonDir 'Common.ps1')
+. (Join-Path $CommonDir 'Packages.ps1')
+
+# PerfView binary lives in the shared package store - single source of truth: Common\Packages.ps1.
+$ToolsDir    = Get-PackageDir 'perfview'
+$PerfViewExe = Join-Path $ToolsDir 'PerfView.exe'
 
 # =============================== CONFIG ==================================
 # Shipped collection profiles, smallest-first. CircularMB caps the trace size (the "it gets HUGE" fix):
@@ -198,65 +201,14 @@ function Read-ActiveState {
 function Clear-ActiveState { Remove-Item $ActiveFile -Force -ErrorAction SilentlyContinue }
 
 # =============================== INSTALL PERFVIEW =======================
-# Resolve a PerfView.exe we trust, verify its Microsoft signature, park it in the Tools folder.
-# Only when none can be resolved locally do we download the latest from the official GitHub release.
+# Delegates to the shared package engine (Common\Packages.ps1). Local PerfView.exe candidates (an explicit
+# -PerfViewPath, one next to this script, or one on PATH) are preferred over downloading - offered to the
+# engine as local sources; it verifies the Microsoft signature either way.
 function Install-PerfView([switch]$Force) {
-    if ((Test-Path $PerfViewExe) -and -not $Force) {
-        if (Test-MicrosoftSignature $PerfViewExe) {
-            Write-Log "PerfView present: $PerfViewExe ($((Get-Item $PerfViewExe).VersionInfo.FileVersion))"; return $true
-        }
-        Write-Log 'Existing PerfView failed signature check, re-acquiring.' 'WARN'
-    }
-    New-Item -ItemType Directory -Path $ToolsDir -Force | Out-Null
-
-    # Local sources, in order of preference.
     $candidates = @()
-    if ($PerfViewPath)                    { $candidates += $PerfViewPath }
+    if ($PerfViewPath) { $candidates += $PerfViewPath }
     $candidates += (Join-Path $ScriptDir 'PerfView.exe')
-    $g = Get-Command 'PerfView.exe' -ErrorAction SilentlyContinue
-    if ($g) { $candidates += $g.Source }
-
-    foreach ($c in $candidates) {
-        if ($c -and (Test-Path -LiteralPath $c)) {
-            if (-not (Test-MicrosoftSignature $c)) { Write-Log "Skipping unsigned/invalid source: $c" 'WARN'; continue }
-            try {
-                Copy-Item -LiteralPath $c -Destination $PerfViewExe -Force -ErrorAction Stop
-                Unblock-File -LiteralPath $PerfViewExe -ErrorAction SilentlyContinue
-                if (Test-MicrosoftSignature $PerfViewExe) {
-                    Write-Log "PerfView installed from $c -> $PerfViewExe ($((Get-Item $PerfViewExe).VersionInfo.FileVersion))"
-                    return $true
-                }
-            } catch { Write-Log "Copy from $c failed: $($_.Exception.Message)" 'WARN' }
-        }
-    }
-
-    # Download the latest official release as a last resort.
-    $tmp = Join-Path $env:TEMP "PerfView_$PID.exe"
-    try {
-        [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
-        $ProgressPreference = 'SilentlyContinue'
-        Write-Log "Downloading PerfView from $PerfViewUrl"
-        Invoke-WebRequest -Uri $PerfViewUrl -OutFile $tmp -UseBasicParsing -ErrorAction Stop
-    } catch {
-        Write-Log "Download failed: $($_.Exception.Message)" 'ERROR'
-        if (-not $script:EchoLog) { return $false }
-        $p = Read-Host 'Path to a local PerfView.exe (Enter to cancel)'
-        if ([string]::IsNullOrWhiteSpace($p) -or -not (Test-Path $p)) { return $false }
-        Copy-Item -LiteralPath $p -Destination $tmp -Force
-    }
-    try {
-        if (-not (Test-MicrosoftSignature $tmp)) { throw 'Downloaded PerfView is not validly Microsoft-signed.' }
-        Copy-Item -LiteralPath $tmp -Destination $PerfViewExe -Force
-        Unblock-File -LiteralPath $PerfViewExe -ErrorAction SilentlyContinue
-        Write-Log "PerfView installed and verified: $PerfViewExe ($((Get-Item $PerfViewExe).VersionInfo.FileVersion))"
-        return $true
-    } catch {
-        Write-Log "PerfView install failed: $($_.Exception.Message)" 'ERROR'
-        Remove-Item $PerfViewExe -Force -ErrorAction SilentlyContinue
-        return $false
-    } finally {
-        Remove-Item $tmp -Force -ErrorAction SilentlyContinue
-    }
+    return (Install-Package 'perfview' -Force:$Force -LocalSource $candidates)
 }
 
 # =============================== PERFVIEW RUN ============================

@@ -8,11 +8,18 @@ function Show-CliMenu {
     while ($true) {
         Write-Host "`n========== Reporting & Troubleshooting toolset (v$ScriptVersion) ==========" -ForegroundColor Cyan
         for ($i = 0; $i -lt $items.Count; $i++) { Write-Host (" {0}) {1}" -f ($i + 1), $items[$i].Name) }
+        Write-Host ' P) Install / verify tool packages'
         Write-Host ' S) Install desktop shortcut'
         Write-Host ' Q) Quit'
         try { $sel = (Read-Host 'Select').Trim().ToUpper() }
         catch { Write-Host 'No interactive input available.' -ForegroundColor Yellow; return }
         if ($sel -eq 'Q') { return }
+        if ($sel -eq 'P') {
+            Write-Host 'Installing / verifying packages...' -ForegroundColor Cyan
+            if (Install-AllPackages) { Write-Host 'All packages installed and verified.' -ForegroundColor Green }
+            else { Write-Host 'One or more packages failed - see messages above.' -ForegroundColor Yellow }
+            continue
+        }
         if ($sel -eq 'S') {
             try { $lnk = Install-DesktopShortcut -TargetBat (Join-Path $script:ToolkitRoot 'run.bat'); Write-Host "Desktop shortcut created: $lnk" -ForegroundColor Green }
             catch { Write-Host "Shortcut install failed: $($_.Exception.Message)" -ForegroundColor Yellow }

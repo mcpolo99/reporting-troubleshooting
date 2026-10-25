@@ -71,10 +71,9 @@ param(
     [string]$ParamFile                    # internal: used when relaunching elevated
 )
 
-$ScriptVersion = '1.1.0'
+$ScriptVersion = '1.2.0'
 $ErrorActionPreference = 'Continue'
-$ToolsDir    = Join-Path $env:ProgramData 'ProcDumpCase\Tools'
-$ProcDumpUrl = 'https://download.sysinternals.com/files/Procdump.zip'
+# $ToolsDir points at the shared package store; set after Packages.ps1 is dot-sourced below.
 
 # ============================ RELAUNCH / ELEVATION ============================
 $script:Relaunched = $false
@@ -100,6 +99,10 @@ for ($__i = 0; $__i -lt 6 -and -not $CommonDir; $__i++) {
 }
 if (-not $CommonDir) { throw "Shared components (Common\) not found from $CaseScriptDir upward." }
 . (Join-Path $CommonDir 'Common.ps1')
+. (Join-Path $CommonDir 'Packages.ps1')
+
+# ProcDump lives in the shared package store - single source of truth: Common\Packages.ps1.
+$ToolsDir = Get-PackageDir 'sysinternals'
 
 if (-not (Test-Admin) -and -not $NoElevate -and -not $script:Relaunched) {
     $h = @{}
@@ -206,30 +209,12 @@ function Find-ProcDump {
     return $null
 }
 
+# Ensures the Sysinternals package is installed in the shared store and returns the ProcDump path (or
+# $null). Download/extract/signature logic lives once in the shared engine (Common\Packages.ps1).
 function Install-ProcDump {
-    New-Item -ItemType Directory -Path $ToolsDir -Force | Out-Null
-    $zip = Join-Path $env:TEMP "Procdump_$PID.zip"
-    $tmp = Join-Path $env:TEMP "Procdump_$PID"
-    try {
-        [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
-        $ProgressPreference = 'SilentlyContinue'
-        Write-Step "Downloading ProcDump from $ProcDumpUrl"
-        Invoke-WebRequest -Uri $ProcDumpUrl -OutFile $zip -UseBasicParsing -ErrorAction Stop
-        Expand-Archive -Path $zip -DestinationPath $tmp -Force
-        Get-ChildItem $tmp -File | Where-Object { $_.Name -like 'procdump*.exe' -or $_.Name -like 'Eula*' } |
-            Copy-Item -Destination $ToolsDir -Force
-        foreach ($n in (Get-ProcDumpNames)) {
-            $p = Join-Path $ToolsDir $n
-            if ((Test-Path -LiteralPath $p) -and (Test-MsSigned $p)) { return $p }
-        }
-        throw 'No validly signed ProcDump found in the download.'
-    } catch {
-        Write-Step "ProcDump download/install failed: $($_.Exception.Message)" 'ERROR'
-        return $null
-    } finally {
-        Remove-Item $zip -Force -ErrorAction SilentlyContinue
-        Remove-Item $tmp -Recurse -Force -ErrorAction SilentlyContinue
-    }
+    if (Install-Package 'sysinternals') { return (Resolve-PackageTool 'sysinternals' (Get-ProcDumpExeName)) }
+    Write-Step 'ProcDump install failed (see the package log).' 'ERROR'
+    return $null
 }
 
 function Get-FileVer([string]$Path) {

@@ -7,6 +7,7 @@ function Show-MainWindow {
     try { $w = [System.Windows.Markup.XamlReader]::Load($reader) } finally { $reader.Close() }
     Set-WindowThemeResources -window $w -usesDarkMode (Get-SystemUsesDarkMode)
     $script:FgBrush  = $w.Resources['AppFgColor']
+    $script:IdBrush  = $w.Resources['AppIdColor']
     $script:ChipBg   = $w.Resources['CardHoverColor']
 
     foreach ($n in 'TxtOutput','LblBusy','LblVersion',
@@ -15,6 +16,7 @@ function Show-MainWindow {
                    'TxtPvOutput','TxtPvSym','ChkPvMerge','ChkPvZip','BtnPvSettingsSave',
                    'BtnMonInstall','BtnMonStart','BtnMonStop','BtnMonStatus','BtnMonUninstall','LblMonStatus','PnlMonConfig','BtnMonSave','BtnMonReload','ChkMonTail','TxtMonLog',
                    'TxtCaseExe','BtnCaseBrowse','CmbCaseMode','ChkCaseFusion','ChkCaseAppConfig','TxtCaseTimeout','BtnCaseRun','LblCaseStatus',
+                   'BtnPkgInstallAll','BtnPkgRefresh','BtnPkgOpen','PnlPackages','LblPkgStatus',
                    'BtnShortcut') {
         Set-Variable -Name $n -Scope script -Value $w.FindName($n)
     }
@@ -22,7 +24,8 @@ function Show-MainWindow {
 
     $script:RsPv  = New-ToolRunspace -ToolPath $script:ToolPerfViewPath -Load
     $script:RsMon = New-ToolRunspace -ToolPath $script:ToolMonitorPath  -Load
-    $script:Busy  = @{ Pv = $false; Mon = $false; Case = $false }
+    $script:RsPkg = New-ToolRunspace -ToolPath $script:ToolPackagesPath -Load
+    $script:Busy  = @{ Pv = $false; Mon = $false; Case = $false; Pkg = $false }
     $script:PvProfiles = @()
     $script:PvLoading  = $false
     $script:MonCtls    = @{}
@@ -37,7 +40,7 @@ function Show-MainWindow {
     # PerfView safety: an ETW session started with 'PerfView start' keeps running after PerfView.exe exits,
     # so if this app closes/crashes mid-trace we must abort the session. These OS/file paths let us do that
     # without the runspace (which may be gone on a crash). active.json presence = a trace is live.
-    $script:PvExe        = Join-Path $env:ProgramData 'PerfViewCapture\Tools\PerfView.exe'
+    $script:PvExe        = Join-Path $env:ProgramData 'ReportingTroubleshooting\Packages\perfview\PerfView.exe'
     $script:PvActiveFile = Join-Path $env:ProgramData 'PerfViewCapture\active.json'
     $script:PvSession    = 'PerfViewCapture'
     function script:Stop-PerfViewHard {
@@ -357,6 +360,60 @@ function Show-MainWindow {
         } @($kv) $doneMon
     })
 
+    # ---------- Packages: one shared, verified tool store ----------
+    function script:Install-Pkg([string]$Id, [bool]$Force) {
+        if ($script:Busy['Pkg']) { & $script:Append 'Packages: an install is already running.'; return }
+        $script:Busy['Pkg'] = $true
+        $script:LblPkgStatus.Text = "Installing $Id..."
+        & $script:Append "Packages: install '$Id'$(if ($Force) { ' (reinstall)' } else { '' })..."
+        $done = { $script:Busy['Pkg'] = $false; $script:LblPkgStatus.Text = 'Done.'; script:Build-PkgEditor }
+        Start-ToolJob -Runspace $script:RsPkg -Script { param($i, $f) if ($f) { Install-Package $i -Force | Out-Null } else { Install-Package $i | Out-Null } } -ArgList @($Id, $Force) -OnText $script:Append -OnDone $done | Out-Null
+    }
+    function script:Build-PkgEditor {
+        if ($script:Busy['Pkg']) { & $script:Append 'Packages busy - cannot refresh now.'; return }
+        $stat = Invoke-ToolSync -Runspace $script:RsPkg -Script { Get-PackageRegistry | ForEach-Object { Get-PackageStatus $_.Id } }
+        $script:PnlPackages.Children.Clear()
+        foreach ($s in @($stat)) {
+            $card = New-Object System.Windows.Controls.Border
+            $card.Background = $script:ChipBg; $card.CornerRadius = New-Object System.Windows.CornerRadius(4)
+            $card.Padding = '10,8,10,8'; $card.Margin = '0,0,0,8'
+            $row = New-Object System.Windows.Controls.DockPanel
+
+            $btn = New-Object System.Windows.Controls.Button
+            $btn.Content = if ($s.Installed) { 'Reinstall' } else { 'Install' }
+            $btn.Height = 28; $btn.MinWidth = 90; $btn.VerticalAlignment = 'Center'; $btn.Margin = '8,0,0,0'
+            [System.Windows.Controls.DockPanel]::SetDock($btn, 'Right')
+            $id = [string]$s.Id; $force = [bool]$s.Installed
+            $btn.Add_Click({ script:Install-Pkg $id $force }.GetNewClosure())
+            [void]$row.Children.Add($btn)
+
+            $info = New-Object System.Windows.Controls.StackPanel
+            $t1 = New-Object System.Windows.Controls.TextBlock
+            $t1.Text = [string]$s.Name; $t1.FontWeight = 'SemiBold'; $t1.Foreground = $script:FgBrush
+            $t2 = New-Object System.Windows.Controls.TextBlock
+            $t2.Text = [string]$s.Description; $t2.Foreground = $script:IdBrush; $t2.TextWrapping = 'Wrap'
+            $t3 = New-Object System.Windows.Controls.TextBlock
+            $t3.Foreground = $script:IdBrush; $t3.Margin = '0,2,0,0'
+            $t3.Text = if ($s.Installed) { "Installed - $($s.ToolCount) tool(s); $($s.Primary) $([string]$s.Version)".Trim() } else { 'Not installed' }
+            [void]$info.Children.Add($t1); [void]$info.Children.Add($t2); [void]$info.Children.Add($t3)
+            [void]$row.Children.Add($info)
+
+            $card.Child = $row
+            [void]$script:PnlPackages.Children.Add($card)
+        }
+    }
+    $script:BtnPkgInstallAll.Add_Click({
+        if ($script:Busy['Pkg']) { & $script:Append 'Packages: an install is already running.'; return }
+        $script:Busy['Pkg'] = $true; $script:LblPkgStatus.Text = 'Installing all...'
+        & $script:Append 'Packages: install / verify all...'
+        $done = { $script:Busy['Pkg'] = $false; $script:LblPkgStatus.Text = 'Done.'; script:Build-PkgEditor }
+        Start-ToolJob -Runspace $script:RsPkg -Script { Install-AllPackages | Out-Null } -OnText $script:Append -OnDone $done | Out-Null
+    })
+    $script:BtnPkgRefresh.Add_Click({ script:Build-PkgEditor })
+    $script:BtnPkgOpen.Add_Click({
+        Start-ToolJob -Runspace $script:RsPkg -Script { $d = Get-PackageRoot; New-Item -ItemType Directory -Path $d -Force | Out-Null; Start-Process explorer.exe $d; "opened $d" } -OnText $script:Append | Out-Null
+    })
+
     # ---------- Case ----------
     $script:BtnCaseBrowse.Add_Click({
         $dlg = New-Object System.Windows.Forms.OpenFileDialog
@@ -408,6 +465,7 @@ function Show-MainWindow {
     if (Test-Path $script:PvActiveFile) { & $script:Append 'Found an orphaned PerfView trace from a previous session - aborting it.'; script:Stop-PerfViewHard }
     try { script:Load-PvAll } catch { & $script:Append "PerfView config load failed: $($_.Exception.Message)" }
     try { script:Build-MonEditor } catch { & $script:Append "Monitor config load failed: $($_.Exception.Message)" }
+    try { script:Build-PkgEditor } catch { & $script:Append "Package status load failed: $($_.Exception.Message)" }
     & $script:RefreshPv; & $script:RefreshMon
 
     # ---------- output pump + log tail ----------
@@ -435,7 +493,7 @@ function Show-MainWindow {
                 else { script:Stop-PerfViewHard }
             }
         } catch { script:Stop-PerfViewHard }
-        foreach ($rs in @($script:RsPv, $script:RsMon)) { try { $rs.Close() } catch {} }
+        foreach ($rs in @($script:RsPv, $script:RsMon, $script:RsPkg)) { try { $rs.Close() } catch {} }
     })
 
     [void]$w.ShowDialog()

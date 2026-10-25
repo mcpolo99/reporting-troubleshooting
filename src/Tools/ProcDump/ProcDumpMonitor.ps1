@@ -18,6 +18,9 @@
   Version is in $ScriptVersion below - bump it for every change you deploy.
 
 .CHANGELOG
+  2.2.0  Install/resolve ProcDump through the shared package engine (Common\Packages.ps1) in the shared
+         store %ProgramData%\ReportingTroubleshooting\Packages\sysinternals (one source of truth, reused
+         by every tool and the GUI Packages tab). Uninstall no longer removes the shared tools.
   2.1.0  Install the full Sysinternals Suite into Tools\ (not just ProcDump) so further Sysinternals
          monitors can be added over time; ProcDump stays the signature-gated binary.
   2.0.0  First versioned release. Menu/setup, self-install, scheduled task, non-locking logs,
@@ -47,7 +50,7 @@ param(
 )
 
 # =============================== VERSION =================================
-$ScriptVersion = '2.1.0'
+$ScriptVersion = '2.2.0'
 $GracefulStopSince = [version]'2.0.0'   # installed copies older than this may kill apps when stopped
 
 # =============================== CONSTANTS ===============================
@@ -55,17 +58,11 @@ $AppName         = 'ProcDumpMonitor'
 $TaskName        = 'ProcDumpMonitor'
 $BaseDir         = Join-Path $env:ProgramData $AppName
 $ConfigFile      = Join-Path $BaseDir 'config.json'
-$ToolsDir        = Join-Path $BaseDir 'Tools'
 $LogDir          = Join-Path $BaseDir 'Logs'
 $InstalledScript = Join-Path $BaseDir "$AppName.ps1"
-$SuiteUrl        = 'https://download.sysinternals.com/files/SysinternalsSuite.zip'   # full toolkit (adds room for more monitors)
-$ProcDumpUrl     = 'https://download.sysinternals.com/files/Procdump.zip'            # single-tool fallback
 $MutexName       = "Global\$AppName"
 $StopFile        = Join-Path $BaseDir 'stop.request'    # created to ask the running monitor to stop gracefully
-
-$arch = if ($env:PROCESSOR_ARCHITEW6432) { $env:PROCESSOR_ARCHITEW6432 } else { $env:PROCESSOR_ARCHITECTURE }
-$ProcDumpExeName = switch ($arch) { 'ARM64' { 'procdump64a.exe' } 'AMD64' { 'procdump64.exe' } default { 'procdump.exe' } }
-$ProcDumpExe     = Join-Path $ToolsDir $ProcDumpExeName
+# $ToolsDir / $ProcDumpExeName / $ProcDumpExe come from the shared package store, set after Packages.ps1 below.
 
 $script:LogFile    = $null
 $script:LogBase    = $null
@@ -95,6 +92,12 @@ for ($__i = 0; $__i -lt 6 -and -not $CommonDir; $__i++) {
 if (-not $CommonDir) { throw "Shared components (Common\) not found from $MonScriptDir upward." }
 . (Join-Path $CommonDir 'Logging.ps1')
 . (Join-Path $CommonDir 'Common.ps1')
+. (Join-Path $CommonDir 'Packages.ps1')
+
+# ProcDump lives in the shared package store - single source of truth: Common\Packages.ps1.
+$ToolsDir        = Get-PackageDir 'sysinternals'
+$ProcDumpExeName = Get-ProcDumpExeName
+$ProcDumpExe     = Join-Path $ToolsDir $ProcDumpExeName
 
 # =============================== CONFIG ==================================
 function Get-DefaultConfig {
@@ -151,56 +154,11 @@ function Install-CommonComponents {
     Write-Log "Shared components copied to $dst"
 }
 
-# Installs the full Sysinternals Suite into $ToolsDir (so further Sysinternals monitors can be wired up
-# over time). ProcDump is the only binary this tool runs today, so it is the one gated on signature - every
-# other tool is signature-verified at the point it is actually invoked.
+# Ensures the Sysinternals package (ProcDump + suite) is installed in the shared store. All download /
+# extract / signature logic lives in the shared engine (Common\Packages.ps1) so it is defined once;
+# ProcDump is the binary this monitor runs and is the one the engine gates on signature.
 function Install-Sysinternals([switch]$Force) {
-    if ((Test-Path $ProcDumpExe) -and -not $Force) {
-        if (Test-MicrosoftSignature $ProcDumpExe) { Write-Log "Sysinternals tools present: $ToolsDir"; return $true }
-        Write-Log "Existing ProcDump failed signature check, re-downloading the suite." 'WARN'
-    }
-    New-Item -ItemType Directory -Path $ToolsDir -Force | Out-Null
-    $zip = Join-Path $env:TEMP "Sysinternals_$PID.zip"
-    $tmp = Join-Path $env:TEMP "Sysinternals_$PID"
-    $localExe = $null
-
-    try {
-        [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
-        $ProgressPreference = 'SilentlyContinue'
-        Write-Log "Downloading Sysinternals Suite from $SuiteUrl"
-        Invoke-WebRequest -Uri $SuiteUrl -OutFile $zip -UseBasicParsing -ErrorAction Stop
-    } catch {
-        Write-Log "Download failed: $($_.Exception.Message)" 'ERROR'
-        if (-not $script:EchoLog) { return $false }
-        $p = Read-Host 'Path to a local SysinternalsSuite.zip / Procdump.zip or a procdump exe (Enter to cancel)'
-        if ([string]::IsNullOrWhiteSpace($p) -or -not (Test-Path $p)) { return $false }
-        if ($p -like '*.zip') { $zip = $p } else { $localExe = $p }
-    }
-
-    try {
-        if ($localExe) {
-            Copy-Item $localExe $ProcDumpExe -Force
-        } else {
-            Expand-Archive -Path $zip -DestinationPath $tmp -Force
-            # Suite zip is flat: copy every tool binary + licence/help into ToolsDir.
-            Get-ChildItem $tmp -File | Where-Object { $_.Extension -in '.exe', '.chm' -or $_.Name -like 'Eula*' } |
-                Copy-Item -Destination $ToolsDir -Force
-        }
-        if (-not (Test-Path $ProcDumpExe)) { throw "$ProcDumpExeName not found after extraction." }
-        if (-not (Test-MicrosoftSignature $ProcDumpExe)) {
-            Remove-Item $ProcDumpExe -Force
-            throw 'Signature check failed (not a valid Microsoft-signed binary). File removed.'
-        }
-        $n = @(Get-ChildItem $ToolsDir -Filter *.exe -File -ErrorAction SilentlyContinue).Count
-        Write-Log "Sysinternals Suite installed ($n tools in $ToolsDir); ProcDump verified ($((Get-Item $ProcDumpExe).VersionInfo.FileVersion))"
-        return $true
-    } catch {
-        Write-Log "Sysinternals install failed: $($_.Exception.Message)" 'ERROR'
-        return $false
-    } finally {
-        if (-not $localExe -and $zip -like "$env:TEMP*") { Remove-Item $zip -Force -ErrorAction SilentlyContinue }
-        Remove-Item $tmp -Recurse -Force -ErrorAction SilentlyContinue
-    }
+    return (Install-Package 'sysinternals' -Force:$Force)
 }
 
 # ---------- Safe ProcDump shutdown ----------

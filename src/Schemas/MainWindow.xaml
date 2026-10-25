@@ -12,6 +12,22 @@
 
     <TabControl x:Name="Tabs" Grid.Row="0" Background="{DynamicResource CardBgColor}">
 
+      <!-- ============ Packages ============ -->
+      <TabItem Header="Packages">
+        <ScrollViewer VerticalScrollBarVisibility="Auto">
+          <StackPanel Margin="14">
+            <TextBlock Text="External tools this toolset uses. Installed once into one shared, signature-verified location and reused by every tool." Foreground="{DynamicResource AppIdColor}" TextWrapping="Wrap" Margin="0,0,0,10"/>
+            <StackPanel Orientation="Horizontal" Margin="0,0,0,10">
+              <Button x:Name="BtnPkgInstallAll" Content="Install / verify all" Height="30" MinWidth="150" Margin="0,0,8,0"/>
+              <Button x:Name="BtnPkgRefresh"    Content="Refresh"             Height="30" MinWidth="90"  Margin="0,0,8,0"/>
+              <Button x:Name="BtnPkgOpen"       Content="Open folder"         Height="30" MinWidth="110"/>
+            </StackPanel>
+            <StackPanel x:Name="PnlPackages"/>
+            <TextBlock x:Name="LblPkgStatus" Foreground="{DynamicResource AppIdColor}" TextWrapping="Wrap" Margin="0,10,0,0"/>
+          </StackPanel>
+        </ScrollViewer>
+      </TabItem>
+
       <!-- ============ PerfView ============ -->
       <TabItem Header="PerfView">
         <ScrollViewer VerticalScrollBarVisibility="Auto">
