@@ -97,9 +97,11 @@ else {
         if (-not $root) { throw 'Unexpected archive layout (no top-level folder).' }
 
         New-Item -ItemType Directory -Path $InstallDir -Force | Out-Null
-        # Replace the installed scripts. The tools keep their runtime state under their own
-        # %ProgramData%\<tool> folders, so nothing in the install dir needs preserving.
-        Get-ChildItem $InstallDir -Force | Where-Object { $_.Name -ne '.version' } |
+        # Replace the installed scripts, but PRESERVE runtime data that lives under the install dir: the
+        # shared package store (installed tools) and logs. Wiping these made installed packages vanish on
+        # every update. (Other tools keep their own state under %ProgramData%\<tool>.)
+        $preserve = @('.version', 'Packages', 'Logs')
+        Get-ChildItem $InstallDir -Force | Where-Object { $preserve -notcontains $_.Name } |
             Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
         Get-ChildItem $root.FullName -Force | Copy-Item -Destination $InstallDir -Recurse -Force
         Get-ChildItem $InstallDir -Recurse -File -Include *.ps1, *.bat, *.cmd |
