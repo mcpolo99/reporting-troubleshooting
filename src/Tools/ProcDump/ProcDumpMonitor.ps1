@@ -42,7 +42,7 @@ param(
 
 # =============================== VERSION =================================
 # Stamped automatically by scripts\New-Release.ps1 from the repo VERSION - do not edit by hand.
-$ScriptVersion = '1.0.26'
+$ScriptVersion = '1.0.27'
 $GracefulStopSince = [version]'2.0.0'   # installed copies older than this may kill apps when stopped
 
 # =============================== CONSTANTS ===============================
