@@ -70,7 +70,9 @@ if (-not $Notes) {
     $range = if ($lastTag) { "$lastTag..HEAD" } else { 'HEAD' }
     # Group commits by their conventional-commit type prefix so the changelog reads by section instead of a
     # flat list. Unprefixed commits fall under "Other". Hash + the release commit itself are kept out.
-    $commits = @(git log $range --no-merges --pretty=format:'%h%x1f%s' | Where-Object { $_ })
+    # '%h %s' then split on the first space (a short hash never contains one) - robust on Windows PowerShell
+    # 5.1, which has no `u{..} escape for a control-char delimiter.
+    $commits = @(git log $range --no-merges --pretty=format:'%h %s' | Where-Object { $_ })
     $typeToHeading = @{
         feat = 'Features'; feature = 'Features'; add = 'Features'
         fix = 'Fixes'; hotfix = 'Fixes'; bug = 'Fixes'
@@ -81,7 +83,8 @@ if (-not $Notes) {
     $order = 'Features', 'Fixes', 'Performance', 'Refactoring', 'Documentation', 'Tests', 'Build', 'Chores', 'Other'
     $groups = @{}
     foreach ($c in $commits) {
-        $h, $s = $c -split "`u{1f}", 2
+        $sp = $c.IndexOf(' '); if ($sp -lt 1) { continue }
+        $h = $c.Substring(0, $sp); $s = $c.Substring($sp + 1)
         if ($s -match '^chore:\s*release\s') { continue }   # drop the previous release's own commit
         if ($s -match '^(?<t>\w+)(\([^)]*\))?!?:\s*(?<d>.+)$') {
             $heading = $typeToHeading[$matches.t.ToLower()]; if (-not $heading) { $heading = 'Other' }
