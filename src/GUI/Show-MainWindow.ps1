@@ -6,14 +6,16 @@ function Show-MainWindow {
     $reader = [System.Xml.XmlReader]::Create([System.IO.StringReader]::new($xaml))
     try { $w = [System.Windows.Markup.XamlReader]::Load($reader) } finally { $reader.Close() }
     Set-WindowThemeResources -window $w -usesDarkMode (Get-SystemUsesDarkMode)
-    $script:FgBrush = $w.Resources['AppFgColor']
+    $script:FgBrush  = $w.Resources['AppFgColor']
+    $script:ChipBg   = $w.Resources['CardHoverColor']
 
     foreach ($n in 'TxtOutput','LblBusy','LblVersion',
                    'BtnPvInstall','CmbPvProfile','TxtPvLabel','BtnPvStart','BtnPvStop','BtnPvAbort','TxtPvSeconds','BtnPvCollect','BtnPvOpen','BtnPvStatus','LblPvStatus',
                    'TxtPvProfName','PnlPvKernel','CmbPvClr','PnlPvProviders','TxtPvProvOther','TxtPvExtra','TxtPvCircular','TxtPvBuffer','BtnPvProfSave','BtnPvProfDelete','BtnPvProfDefault',
                    'TxtPvOutput','TxtPvSym','ChkPvMerge','ChkPvZip','BtnPvSettingsSave',
                    'BtnMonInstall','BtnMonStart','BtnMonStop','BtnMonStatus','BtnMonUninstall','LblMonStatus','PnlMonConfig','BtnMonSave','BtnMonReload','ChkMonTail','TxtMonLog',
-                   'TxtCaseExe','BtnCaseBrowse','CmbCaseMode','ChkCaseFusion','ChkCaseAppConfig','TxtCaseTimeout','BtnCaseRun','LblCaseStatus') {
+                   'TxtCaseExe','BtnCaseBrowse','CmbCaseMode','ChkCaseFusion','ChkCaseAppConfig','TxtCaseTimeout','BtnCaseRun','LblCaseStatus',
+                   'BtnShortcut') {
         Set-Variable -Name $n -Scope script -Value $w.FindName($n)
     }
     $script:LblVersion.Text = "v$ScriptVersion"
@@ -216,6 +218,74 @@ function Show-MainWindow {
     })
 
     # ---------- Monitor: live config editor ----------
+    # Restrict a TextBox to non-negative integers (typing, space and paste all filtered).
+    function script:Set-NumericOnly($tb) {
+        $tb.Add_PreviewTextInput({ param($s, $e) if ($e.Text -match '\D') { $e.Handled = $true } })
+        $tb.Add_PreviewKeyDown({ param($s, $e) if ($e.Key -eq [System.Windows.Input.Key]::Space) { $e.Handled = $true } })
+        [System.Windows.DataObject]::AddPastingHandler($tb, {
+            param($s, $e)
+            $t = [string]$e.DataObject.GetData([System.Windows.DataFormats]::Text)
+            if ($t -match '\D') { $e.CancelCommand() }
+        })
+    }
+
+    # Chip/tag editor (like mail recipients): type a value, Enter locks it as a removable chip and clears
+    # the box for the next one; Backspace on an empty box removes the last chip. Returns the panel + a getter.
+    function script:New-TagEditor($values) {
+        $wrap = New-Object System.Windows.Controls.WrapPanel
+        $wrap.HorizontalAlignment = 'Left'
+
+        $tb = New-Object System.Windows.Controls.TextBox
+        $tb.MinWidth = 120; $tb.Margin = '2'; $tb.VerticalAlignment = 'Center'
+        $tb.BorderThickness = New-Object System.Windows.Thickness(0)
+        $tb.Background = [System.Windows.Media.Brushes]::Transparent
+        $tb.Foreground = $script:FgBrush
+
+        $makeChip = {
+            param($text)
+            $text = "$text".Trim()
+            if (-not $text) { return }
+            $chip = New-Object System.Windows.Controls.Border
+            $chip.Background = $script:ChipBg; $chip.CornerRadius = New-Object System.Windows.CornerRadius(3)
+            $chip.Margin = '0,2,4,2'; $chip.Padding = '6,1,3,1'; $chip.Tag = $text
+            $sp = New-Object System.Windows.Controls.StackPanel; $sp.Orientation = 'Horizontal'
+            $lbl = New-Object System.Windows.Controls.TextBlock
+            $lbl.Text = $text; $lbl.Foreground = $script:FgBrush; $lbl.VerticalAlignment = 'Center'
+            $btn = New-Object System.Windows.Controls.Button
+            $btn.Content = [char]0x00D7; $btn.Margin = '4,0,0,0'; $btn.Padding = '3,0,3,0'
+            $btn.BorderThickness = New-Object System.Windows.Thickness(0); $btn.FontWeight = 'Bold'
+            $btn.Background = [System.Windows.Media.Brushes]::Transparent; $btn.Foreground = $script:FgBrush
+            $btn.Cursor = [System.Windows.Input.Cursors]::Hand; $btn.ToolTip = 'Remove'
+            $btn.Add_Click({ [void]$wrap.Children.Remove($chip) }.GetNewClosure())
+            [void]$sp.Children.Add($lbl); [void]$sp.Children.Add($btn); $chip.Child = $sp
+            $idx = $wrap.Children.IndexOf($tb); if ($idx -lt 0) { $idx = $wrap.Children.Count }
+            $wrap.Children.Insert($idx, $chip)
+        }.GetNewClosure()
+
+        $commit = { if ("$($tb.Text)".Trim()) { & $makeChip $tb.Text; $tb.Clear() } }.GetNewClosure()
+
+        $tb.Add_PreviewKeyDown({
+            param($s, $e)
+            if ($e.Key -eq [System.Windows.Input.Key]::Return) { & $commit; $e.Handled = $true }
+            elseif ($e.Key -eq [System.Windows.Input.Key]::Back -and [string]::IsNullOrEmpty($s.Text)) {
+                $i = $wrap.Children.IndexOf($tb); if ($i -gt 0) { $wrap.Children.RemoveAt($i - 1) }
+            }
+        }.GetNewClosure())
+        $tb.Add_LostFocus({ & $commit }.GetNewClosure())
+
+        foreach ($v in @($values)) { & $makeChip $v }
+        [void]$wrap.Children.Add($tb)
+
+        $getter = {
+            $vals = @()
+            foreach ($c in $wrap.Children) { if ($c -is [System.Windows.Controls.Border]) { $vals += [string]$c.Tag } }
+            if ("$($tb.Text)".Trim()) { $vals += "$($tb.Text)".Trim() }
+            ,$vals
+        }.GetNewClosure()
+
+        return @{ Panel = $wrap; Getter = $getter }
+    }
+
     function script:New-ConfigRow($name, $value, $options) {
         $row = New-Object System.Windows.Controls.DockPanel; $row.Margin = '0,0,0,6'
         $lbl = New-Object System.Windows.Controls.TextBlock
@@ -228,9 +298,16 @@ function Show-MainWindow {
             $ctl.SelectedItem = "$value"; if ($ctl.SelectedIndex -lt 0) { $ctl.IsEditable = $true; $ctl.Text = "$value" }
         } elseif ($value -is [bool]) {
             $ctl = New-Object System.Windows.Controls.CheckBox; $ctl.IsChecked = [bool]$value; $ctl.VerticalAlignment = 'Center'
+        } elseif ($value -is [System.Array]) {
+            $te = script:New-TagEditor $value
+            $ctl = $te.Panel; $ctl.Tag = $te.Getter        # getter read back in BtnMonSave
+        } elseif ($value -is [int] -or $value -is [long]) {
+            $ctl = New-Object System.Windows.Controls.TextBox
+            $ctl.Width = 200; $ctl.HorizontalAlignment = 'Left'; $ctl.Text = "$value"
+            script:Set-NumericOnly $ctl
         } else {
             $ctl = New-Object System.Windows.Controls.TextBox
-            $ctl.Text = if ($value -is [System.Array]) { ($value -join ', ') } else { "$value" }
+            $ctl.Text = "$value"
         }
         [void]$row.Children.Add($ctl)
         return @{ Row = $row; Ctl = $ctl }
@@ -260,6 +337,7 @@ function Show-MainWindow {
             $c = $script:MonCtls[$k]
             $kv[$k] = if ($c -is [System.Windows.Controls.CheckBox]) { if ($c.IsChecked) { 'true' } else { 'false' } }
                       elseif ($c -is [System.Windows.Controls.ComboBox]) { if ($null -ne $c.SelectedItem) { [string]$c.SelectedItem } else { [string]$c.Text } }
+                      elseif ($c -is [System.Windows.Controls.WrapPanel]) { (@(& $c.Tag) -join ',') }   # tag editor -> array split in the tool
                       else { $c.Text }
         }
         & $script:Append 'Monitor: save config...'
@@ -315,7 +393,16 @@ function Show-MainWindow {
         Start-ToolJob -Runspace $script:RsCaseLast -Script $sb -ArgList @($casePath, $exe, $mode, $fusion, $appcfg, $to) -OnText $script:Append -OnDone $done | Out-Null
     })
 
+    # ---------- desktop shortcut ----------
+    $script:BtnShortcut.Add_Click({
+        try {
+            $lnk = Install-DesktopShortcut -TargetBat (Join-Path $script:ToolkitRoot 'run.bat')
+            & $script:Append "Desktop shortcut created: $lnk"
+        } catch { & $script:Append "Shortcut install failed: $($_.Exception.Message)" }
+    })
+
     # ---------- initial load ----------
+    foreach ($nTb in @($script:TxtPvSeconds, $script:TxtPvCircular, $script:TxtPvBuffer, $script:TxtCaseTimeout)) { script:Set-NumericOnly $nTb }
     script:Build-PvToggles
     # crash recovery: a trace left active by a previous (crashed/killed) session is aborted now
     if (Test-Path $script:PvActiveFile) { & $script:Append 'Found an orphaned PerfView trace from a previous session - aborting it.'; script:Stop-PerfViewHard }

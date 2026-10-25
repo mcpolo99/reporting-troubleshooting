@@ -35,6 +35,7 @@ $script:ToolCasePath     = Join-Path $PSScriptRoot $script:ToolCase
 
 # -------- components (dot-sourced) --------
 . (Join-Path $PSScriptRoot 'Helpers\Start-Tool.ps1')
+. (Join-Path $PSScriptRoot 'Helpers\Install-Shortcut.ps1')
 . (Join-Path $PSScriptRoot 'CLI\Show-CliMenu.ps1')
 . (Join-Path $PSScriptRoot 'GUI\Get-SystemUsesDarkMode.ps1')
 . (Join-Path $PSScriptRoot 'GUI\Set-WindowThemeResources.ps1')

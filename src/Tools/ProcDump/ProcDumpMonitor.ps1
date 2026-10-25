@@ -18,6 +18,8 @@
   Version is in $ScriptVersion below - bump it for every change you deploy.
 
 .CHANGELOG
+  2.1.0  Install the full Sysinternals Suite into Tools\ (not just ProcDump) so further Sysinternals
+         monitors can be added over time; ProcDump stays the signature-gated binary.
   2.0.0  First versioned release. Menu/setup, self-install, scheduled task, non-locking logs,
          graceful ProcDump detach on stop, ProcDump output capture, exe versions, dump reason
          (.info.txt), duplicate-capture detection, cooldown, configurable -n, Update with version check.
@@ -29,7 +31,7 @@
   %ProgramData%\ProcDumpMonitor\
       ProcDumpMonitor.ps1                 installed copy of this script
       config.json                         settings
-      Tools\procdump*.exe                 downloaded + signature-verified ProcDump
+      Tools\                              Sysinternals Suite (downloaded); procdump*.exe is signature-verified
       Logs\ProcDumpMonitor_<datetime>.log         one per monitor launch
       Logs\ProcDumpMonitor-Setup_<datetime>.log   one per setup/menu session
       Logs\ProcDump_<app>_<datetime>.log          ProcDump's own output, one per ProcDump session
@@ -45,7 +47,7 @@ param(
 )
 
 # =============================== VERSION =================================
-$ScriptVersion = '2.0.0'
+$ScriptVersion = '2.1.0'
 $GracefulStopSince = [version]'2.0.0'   # installed copies older than this may kill apps when stopped
 
 # =============================== CONSTANTS ===============================
@@ -56,7 +58,8 @@ $ConfigFile      = Join-Path $BaseDir 'config.json'
 $ToolsDir        = Join-Path $BaseDir 'Tools'
 $LogDir          = Join-Path $BaseDir 'Logs'
 $InstalledScript = Join-Path $BaseDir "$AppName.ps1"
-$ProcDumpUrl     = 'https://download.sysinternals.com/files/Procdump.zip'
+$SuiteUrl        = 'https://download.sysinternals.com/files/SysinternalsSuite.zip'   # full toolkit (adds room for more monitors)
+$ProcDumpUrl     = 'https://download.sysinternals.com/files/Procdump.zip'            # single-tool fallback
 $MutexName       = "Global\$AppName"
 $StopFile        = Join-Path $BaseDir 'stop.request'    # created to ask the running monitor to stop gracefully
 
@@ -148,25 +151,28 @@ function Install-CommonComponents {
     Write-Log "Shared components copied to $dst"
 }
 
-function Install-ProcDump([switch]$Force) {
+# Installs the full Sysinternals Suite into $ToolsDir (so further Sysinternals monitors can be wired up
+# over time). ProcDump is the only binary this tool runs today, so it is the one gated on signature - every
+# other tool is signature-verified at the point it is actually invoked.
+function Install-Sysinternals([switch]$Force) {
     if ((Test-Path $ProcDumpExe) -and -not $Force) {
-        if (Test-MicrosoftSignature $ProcDumpExe) { Write-Log "ProcDump present: $ProcDumpExe"; return $true }
-        Write-Log "Existing ProcDump failed signature check, re-downloading." 'WARN'
+        if (Test-MicrosoftSignature $ProcDumpExe) { Write-Log "Sysinternals tools present: $ToolsDir"; return $true }
+        Write-Log "Existing ProcDump failed signature check, re-downloading the suite." 'WARN'
     }
     New-Item -ItemType Directory -Path $ToolsDir -Force | Out-Null
-    $zip = Join-Path $env:TEMP "Procdump_$PID.zip"
-    $tmp = Join-Path $env:TEMP "Procdump_$PID"
+    $zip = Join-Path $env:TEMP "Sysinternals_$PID.zip"
+    $tmp = Join-Path $env:TEMP "Sysinternals_$PID"
     $localExe = $null
 
     try {
         [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
         $ProgressPreference = 'SilentlyContinue'
-        Write-Log "Downloading ProcDump from $ProcDumpUrl"
-        Invoke-WebRequest -Uri $ProcDumpUrl -OutFile $zip -UseBasicParsing -ErrorAction Stop
+        Write-Log "Downloading Sysinternals Suite from $SuiteUrl"
+        Invoke-WebRequest -Uri $SuiteUrl -OutFile $zip -UseBasicParsing -ErrorAction Stop
     } catch {
         Write-Log "Download failed: $($_.Exception.Message)" 'ERROR'
         if (-not $script:EchoLog) { return $false }
-        $p = Read-Host 'Path to a local Procdump.zip or procdump exe (Enter to cancel)'
+        $p = Read-Host 'Path to a local SysinternalsSuite.zip / Procdump.zip or a procdump exe (Enter to cancel)'
         if ([string]::IsNullOrWhiteSpace($p) -or -not (Test-Path $p)) { return $false }
         if ($p -like '*.zip') { $zip = $p } else { $localExe = $p }
     }
@@ -176,7 +182,8 @@ function Install-ProcDump([switch]$Force) {
             Copy-Item $localExe $ProcDumpExe -Force
         } else {
             Expand-Archive -Path $zip -DestinationPath $tmp -Force
-            Get-ChildItem $tmp -File | Where-Object { $_.Name -like 'procdump*.exe' -or $_.Name -like 'Eula*' } |
+            # Suite zip is flat: copy every tool binary + licence/help into ToolsDir.
+            Get-ChildItem $tmp -File | Where-Object { $_.Extension -in '.exe', '.chm' -or $_.Name -like 'Eula*' } |
                 Copy-Item -Destination $ToolsDir -Force
         }
         if (-not (Test-Path $ProcDumpExe)) { throw "$ProcDumpExeName not found after extraction." }
@@ -184,10 +191,11 @@ function Install-ProcDump([switch]$Force) {
             Remove-Item $ProcDumpExe -Force
             throw 'Signature check failed (not a valid Microsoft-signed binary). File removed.'
         }
-        Write-Log "ProcDump installed and verified: $ProcDumpExe ($((Get-Item $ProcDumpExe).VersionInfo.FileVersion))"
+        $n = @(Get-ChildItem $ToolsDir -Filter *.exe -File -ErrorAction SilentlyContinue).Count
+        Write-Log "Sysinternals Suite installed ($n tools in $ToolsDir); ProcDump verified ($((Get-Item $ProcDumpExe).VersionInfo.FileVersion))"
         return $true
     } catch {
-        Write-Log "ProcDump install failed: $($_.Exception.Message)" 'ERROR'
+        Write-Log "Sysinternals install failed: $($_.Exception.Message)" 'ERROR'
         return $false
     } finally {
         if (-not $localExe -and $zip -like "$env:TEMP*") { Remove-Item $zip -Force -ErrorAction SilentlyContinue }
@@ -677,7 +685,7 @@ function Invoke-Update {
         Start-MonitorTask; return
     }
     Save-Config $cfg                        # writes new settings into config.json so they're visible/editable
-    if (-not (Install-ProcDump)) { Write-Log 'ProcDump missing and could not be downloaded.' 'WARN' }
+    if (-not (Install-Sysinternals)) { Write-Log 'Sysinternals tools missing and could not be downloaded.' 'WARN' }
     Register-MonitorTask $cfg               # task definition may have changed between versions
     Start-MonitorTask
 
@@ -700,7 +708,7 @@ function Invoke-Install {
     }
     foreach ($d in @($BaseDir, $ToolsDir, $LogDir, $cfg.DumpDir)) { New-Item -ItemType Directory -Path $d -Force | Out-Null }
 
-    if (-not (Install-ProcDump)) { Write-Log 'Install aborted: ProcDump not available.' 'ERROR'; return }
+    if (-not (Install-Sysinternals)) { Write-Log 'Install aborted: ProcDump not available.' 'ERROR'; return }
 
     if ($PSCommandPath -and ($PSCommandPath -ne $InstalledScript)) {
         Copy-Item -Path $PSCommandPath -Destination $InstalledScript -Force
@@ -828,7 +836,7 @@ function Show-Menu {
         Write-Host ' 4) Start monitor'
         Write-Host ' 5) Stop monitor'
         Write-Host ' 6) Run monitor in this window (testing, Ctrl+C to stop)'
-        Write-Host ' 7) Update ProcDump to latest'
+        Write-Host ' 7) Update Sysinternals Suite to latest'
         Write-Host ' 8) Open dump folder'
         Write-Host ' 9) Uninstall'
         Write-Host ' U) Update installed copy from this script (version check, backup, keeps config)'
@@ -842,7 +850,7 @@ function Show-Menu {
             '6' { Invoke-Monitor; $script:LogPrefix = "$AppName-Setup"; New-LogFile }
             '7' { $cfg = Read-Config; $was = $installed -and (Get-MonitorTask).State -eq 'Running'
                   if ($was) { Stop-MonitorTask $cfg }
-                  $null = Install-ProcDump -Force
+                  $null = Install-Sysinternals -Force
                   if ($was) { Start-MonitorTask } }
             '8' { $d = (Read-Config).DumpDir; if (Test-Path $d) { Start-Process explorer.exe $d } else { Write-Host 'Folder does not exist yet.' } }
             '9' { if ((Read-Host 'Really uninstall? (y/N)') -eq 'y') { Invoke-Uninstall } }
@@ -875,7 +883,7 @@ function Invoke-Monitor {
         Write-Log "Monitor v$ScriptVersion starting. User: $env:USERDOMAIN\$env:USERNAME  Session: $((Get-Process -Id $PID).SessionId)  PS: $($PSVersionTable.PSVersion)"
         Write-Log "Apps: $($cfg.Apps -join ', ') | Args: $(Get-EffectiveArgs $cfg) | Keep $($cfg.KeepDumps) dumps | Check $($cfg.CheckSeconds)s | Cleanup $($cfg.CleanupSeconds)s | Cooldown $($cfg.CooldownSeconds)s | Duplicates: $($cfg.DuplicateAction)"
 
-        if (-not (Test-Path $ProcDumpExe) -and -not (Install-ProcDump)) {
+        if (-not (Test-Path $ProcDumpExe) -and -not (Install-Sysinternals)) {
             Write-Log 'ProcDump missing and could not be installed - exiting.' 'ERROR'
             $script:ExitCode = 1; return
         }

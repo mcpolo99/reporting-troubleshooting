@@ -172,8 +172,9 @@
              Background="{DynamicResource CardBgColor}" Foreground="{DynamicResource AppFgColor}"/>
 
     <DockPanel Grid.Row="3" Margin="0,8,0,0">
-      <TextBlock x:Name="LblBusy" DockPanel.Dock="Left" Text="Ready" Foreground="{DynamicResource AppIdColor}" VerticalAlignment="Center"/>
-      <TextBlock x:Name="LblVersion" DockPanel.Dock="Right" Foreground="{DynamicResource AppIdColor}" VerticalAlignment="Center"/>
+      <TextBlock x:Name="LblVersion" DockPanel.Dock="Right" Foreground="{DynamicResource AppIdColor}" VerticalAlignment="Center" Margin="8,0,0,0"/>
+      <Button x:Name="BtnShortcut" DockPanel.Dock="Right" Content="Install desktop shortcut" Height="24" Padding="8,0" VerticalAlignment="Center"/>
+      <TextBlock x:Name="LblBusy" Text="Ready" Foreground="{DynamicResource AppIdColor}" VerticalAlignment="Center"/>
     </DockPanel>
   </Grid>
 </Window>
