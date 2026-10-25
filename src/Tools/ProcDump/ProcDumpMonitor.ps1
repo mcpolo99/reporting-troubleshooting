@@ -204,6 +204,14 @@ if ([W.K]::AttachConsole($ProcessId)) {
 function Stop-ProcDumpInstances($cfg, [int]$TimeoutSec = 30) {
     $pds = @(Get-OurProcDumps)
     if ($pds.Count -eq 0) { Write-Log 'No ProcDump instances running - nothing to detach.'; return }
+
+    # Instances whose command line we can't read are orphans from another session/user: we can neither
+    # Ctrl+C them (AttachConsole doesn't cross sessions) nor identify their target, so don't burn the detach
+    # timeout waiting for them to exit - they never will from here.
+    $orphanPids = @($pds | Where-Object { -not "$($_.CommandLine)".Trim() } | ForEach-Object { $_.ProcessId })
+    if ($orphanPids.Count) {
+        Write-Log "$($orphanPids.Count) orphaned ProcDump instance(s) (PID $($orphanPids -join ', ')) belong to another session and can't be managed from here - not waiting on them." 'WARN'
+    }
     Write-Log "Stopping $($pds.Count) ProcDump instance(s) gracefully (detaching any attached, quitting any still waiting)..."
 
     # 1) Ctrl+C every instance (detaches if attached, quits if waiting)
@@ -219,9 +227,13 @@ function Stop-ProcDumpInstances($cfg, [int]$TimeoutSec = 30) {
         }
     }
 
-    # 3) Wait for them to exit on their own
+    # 3) Wait for the manageable ones to exit on their own (ignore the orphans we can't signal)
     $deadline = (Get-Date).AddSeconds($TimeoutSec)
-    while ((Get-OurProcDumps) -and (Get-Date) -lt $deadline) { Start-Sleep -Milliseconds 500 }
+    while ((Get-Date) -lt $deadline) {
+        $left = @(Get-OurProcDumps | Where-Object { $orphanPids -notcontains $_.ProcessId })
+        if ($left.Count -eq 0) { break }
+        Start-Sleep -Milliseconds 500
+    }
 
     # 4) Leftovers: end only those whose app is NOT running (nothing attached -> safe)
     foreach ($pd in (Get-OurProcDumps)) {
