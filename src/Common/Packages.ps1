@@ -123,6 +123,12 @@ function Install-Package {
         if (Test-MicrosoftSignature $primary) { Write-PkgLog "$($pkg.Name) present: $dir"; return $true }
         Write-PkgLog "$($pkg.Name) failed signature check, re-acquiring." 'WARN'
     }
+    # Reinstall (-Force) is a clean wipe-and-reinstall so stale files from an older version don't linger.
+    # Best effort: an in-use binary stays locked and is overwritten in place below (or fails loudly there).
+    if ($Force -and (Test-Path -LiteralPath $dir)) {
+        Write-PkgLog "$($pkg.Name): removing the existing install for a clean reinstall"
+        Remove-Item -LiteralPath $dir -Recurse -Force -ErrorAction SilentlyContinue
+    }
     New-Item -ItemType Directory -Path $dir -Force | Out-Null
     [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
     $ProgressPreference = 'SilentlyContinue'
