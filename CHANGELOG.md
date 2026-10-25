@@ -5,6 +5,13 @@ truth; each release is tagged `vX.Y.Z` and published as a GitHub release by `scr
 
 <!-- NEW RELEASES INSERTED BELOW -->
 
+## [v1.0.29] - 2026-10-25
+Changes since v1.0.28:
+
+### Fixes
+- Stop/Uninstall actually kill the monitor loop so ProcDump stops respawning (e586829)
+
+
 ## [v1.0.28] - 2026-10-25
 Changes since v1.0.27:
 
@@ -186,6 +193,7 @@ Changes since v1.0.0:
 - WPF/XAML launcher (GUI default, `-CLI` text menu) with shared light/dark theme.
 - Shared components (logging, admin/signature/prompt/version helpers) under `src/Common`.
 - Bootstrap installer (`src/Get.ps1` + `src/run.bat`) with version check against GitHub.
+
 
 
 
