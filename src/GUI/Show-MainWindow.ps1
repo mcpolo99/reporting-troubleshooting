@@ -415,7 +415,7 @@ function Show-MainWindow {
             $t2.Text = [string]$s.Description; $t2.Foreground = $script:IdBrush; $t2.TextWrapping = 'Wrap'
             $t3 = New-Object System.Windows.Controls.TextBlock
             $t3.Foreground = $script:IdBrush; $t3.Margin = '0,2,0,0'
-            $t3.Text = if ($s.Installed) { "Installed - $($s.ToolCount) tool(s); $($s.Primary) $([string]$s.Version)".Trim() } else { 'Not installed' }
+            $t3.Text = if ($s.Installed) { "Installed - $($s.ToolCount) tool(s)" } else { 'Not installed' }
             [void]$info.Children.Add($t1); [void]$info.Children.Add($t2); [void]$info.Children.Add($t3)
             [void]$row.Children.Add($info)
 
