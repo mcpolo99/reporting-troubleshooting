@@ -127,6 +127,36 @@ function Get-PackageStatus([string]$Id) {
     }
 }
 
+# Stop any process running from a package's folder so its binaries can be overwritten/removed on
+# (re)install. A running ProcDump from the monitor keeps procdump64.exe locked; the copy then fails with
+# "the process cannot access the file ... because it is being used by another process". Graceful first
+# (CloseMainWindow for GUI tools, up to $TimeoutSec), then force-stop any straggler (console tools like
+# ProcDump have no window, so they are force-stopped - which only detaches ProcDump, the target is
+# unaffected). Needs the process path, which is readable for our own tools under this account.
+function Stop-PackageProcesses([string]$Id, [int]$TimeoutSec = 10) {
+    $dir = Get-PackageDir $Id
+    if (-not (Test-Path -LiteralPath $dir)) { return }
+    try { $dirFull = (Resolve-Path -LiteralPath $dir).Path } catch { $dirFull = $dir }
+    $procs = @(Get-Process -ErrorAction SilentlyContinue | Where-Object {
+        try { $_.Path -and $_.Path.StartsWith($dirFull, [System.StringComparison]::OrdinalIgnoreCase) } catch { $false }
+    })
+    if ($procs.Count -eq 0) { return }
+    foreach ($p in $procs) {
+        Write-PkgLog "Stopping $($p.ProcessName) (PID $($p.Id)) - it is using a file in this package"
+        try { [void]$p.CloseMainWindow() } catch {}
+    }
+    $deadline = (Get-Date).AddSeconds($TimeoutSec)
+    while ((Get-Date) -lt $deadline) {
+        foreach ($p in $procs) { try { $p.Refresh() } catch {} }
+        if (@($procs | Where-Object { -not $_.HasExited }).Count -eq 0) { break }
+        Start-Sleep -Milliseconds 300
+    }
+    foreach ($p in @($procs | Where-Object { -not $_.HasExited })) {
+        Write-PkgLog "Force-stopping $($p.ProcessName) (PID $($p.Id))" 'WARN'
+        try { Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue } catch {}
+    }
+}
+
 # Install (or re-verify) a package into its shared folder. $LocalSource = local exe(s)/zip to use instead
 # of downloading (offline). Returns $true when the Primary exe is present and validly Microsoft-signed.
 function Install-Package {
@@ -146,6 +176,11 @@ function Install-Package {
             Write-PkgLog "$($pkg.Name) present: $dir"; return $true
         }
     }
+    # We are about to overwrite/remove the package's binaries, so first stop anything running from the
+    # folder (e.g. a ProcDump armed by the monitor holding procdump64.exe open) - otherwise the copy/wipe
+    # fails with "being used by another process".
+    Stop-PackageProcesses $Id
+
     # Reinstall (-Force) is a clean wipe-and-reinstall so stale files from an older version don't linger.
     # Best effort: an in-use binary stays locked and is overwritten in place below (or fails loudly there).
     if ($Force -and (Test-Path -LiteralPath $dir)) {
