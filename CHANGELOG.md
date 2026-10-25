@@ -5,6 +5,12 @@ truth; each release is tagged `vX.Y.Z` and published as a GitHub release by `scr
 
 <!-- NEW RELEASES INSERTED BELOW -->
 
+## [v1.0.12] - 2026-10-25
+Changes since v1.0.11:
+
+- fix: a stray UI-thread error no longer kills the whole GUI (47ce54e)
+
+
 ## [v1.0.11] - 2026-10-25
 Changes since v1.0.10:
 
@@ -77,6 +83,7 @@ Changes since v1.0.0:
 - WPF/XAML launcher (GUI default, `-CLI` text menu) with shared light/dark theme.
 - Shared components (logging, admin/signature/prompt/version helpers) under `src/Common`.
 - Bootstrap installer (`src/Get.ps1` + `src/run.bat`) with version check against GitHub.
+
 
 
 
