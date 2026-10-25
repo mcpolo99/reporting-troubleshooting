@@ -18,6 +18,38 @@ function Write-PkgLog([string]$Message, [ValidateSet('INFO', 'WARN', 'ERROR', 'O
     }
 }
 
+# Streams a download to disk, reporting throttled progress (percent / MB) through Write-PkgLog so the GUI
+# output shows it live. Invoke-WebRequest -OutFile gives no progress we can surface in a runspace.
+function Save-UrlWithProgress([string]$Url, [string]$OutFile, [string]$Label) {
+    [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
+    $req = [System.Net.HttpWebRequest]::Create($Url)
+    $req.UserAgent = 'reporting-troubleshooting'
+    $req.AllowAutoRedirect = $true
+    $resp = $req.GetResponse()
+    try {
+        $total = [int64]$resp.ContentLength      # -1 when the server does not send a length
+        $in  = $resp.GetResponseStream()
+        $out = [System.IO.File]::Open($OutFile, [System.IO.FileMode]::Create, [System.IO.FileAccess]::Write)
+        try {
+            $buf = New-Object byte[] (128KB)
+            $read = 0L; $lastPct = -1; $lastTick = [Environment]::TickCount
+            while (($n = $in.Read($buf, 0, $buf.Length)) -gt 0) {
+                $out.Write($buf, 0, $n); $read += $n
+                $now = [Environment]::TickCount
+                if ($total -gt 0) {
+                    $pct = [int](($read * 100) / $total)
+                    if ($pct -ge $lastPct + 5 -or ($pct -ne $lastPct -and ($now - $lastTick) -ge 1000)) {
+                        Write-PkgLog ("  {0}: {1}%  ({2:n1}/{3:n1} MB)" -f $Label, $pct, ($read / 1MB), ($total / 1MB))
+                        $lastPct = $pct; $lastTick = $now
+                    }
+                } elseif (($now - $lastTick) -ge 1000) {
+                    Write-PkgLog ("  {0}: {1:n1} MB" -f $Label, ($read / 1MB)); $lastTick = $now
+                }
+            }
+        } finally { $out.Dispose() }
+    } finally { $resp.Dispose() }
+}
+
 # ProcDump ships per-architecture binaries; pick the one matching the real OS (honour WOW64).
 function Get-ProcDumpExeName {
     $arch = if ($env:PROCESSOR_ARCHITEW6432) { $env:PROCESSOR_ARCHITEW6432 } else { $env:PROCESSOR_ARCHITECTURE }
@@ -118,7 +150,7 @@ function Install-Package {
                     $tmp = Join-Path $env:TEMP ('{0}_{1}.exe' -f $Id, $PID)
                     try {
                         Write-PkgLog "Downloading $($pkg.Name) from $($pkg.Url)"
-                        Invoke-WebRequest -Uri $pkg.Url -OutFile $tmp -UseBasicParsing -ErrorAction Stop
+                        Save-UrlWithProgress $pkg.Url $tmp $pkg.Name
                         Copy-Item -LiteralPath $tmp -Destination $primary -Force
                         Unblock-File -LiteralPath $primary -ErrorAction SilentlyContinue
                     } finally { Remove-Item $tmp -Force -ErrorAction SilentlyContinue }
@@ -133,11 +165,11 @@ function Install-Package {
                     else {
                         try {
                             Write-PkgLog "Downloading $($pkg.Name) from $($pkg.Url)"
-                            Invoke-WebRequest -Uri $pkg.Url -OutFile $zip -UseBasicParsing -ErrorAction Stop
+                            Save-UrlWithProgress $pkg.Url $zip $pkg.Name
                         } catch {
                             if (-not $pkg.FallbackUrl) { throw }
                             Write-PkgLog "$($pkg.Name) download failed ($($_.Exception.Message)); trying fallback $($pkg.FallbackUrl)" 'WARN'
-                            Invoke-WebRequest -Uri $pkg.FallbackUrl -OutFile $zip -UseBasicParsing -ErrorAction Stop
+                            Save-UrlWithProgress $pkg.FallbackUrl $zip $pkg.Name
                         }
                     }
                     Expand-Archive -Path $zip -DestinationPath $ex -Force
@@ -157,9 +189,8 @@ function Install-Package {
             Remove-Item -LiteralPath $primary -Force -ErrorAction SilentlyContinue
             throw "signature check failed for $($pkg.Primary) (not a valid Microsoft-signed binary)."
         }
-        $v = try { (Get-Item -LiteralPath $primary).VersionInfo.FileVersion } catch { '' }
         $n = @(Get-ChildItem $dir -Filter *.exe -File -ErrorAction SilentlyContinue).Count
-        Write-PkgLog "$($pkg.Name) installed and verified in $dir ($n tool(s); primary $($pkg.Primary) $v)" 'OK'
+        Write-PkgLog "$($pkg.Name) installed and verified - $n tool(s) in $dir" 'OK'
         return $true
     } catch {
         Write-PkgLog "$($pkg.Name) install failed: $($_.Exception.Message)" 'ERROR'

@@ -11,7 +11,7 @@ function Show-MainWindow {
     $script:ChipBg   = $w.Resources['CardHoverColor']
 
     foreach ($n in 'TxtOutput','LblBusy','LblVersion',
-                   'BtnPvInstall','CmbPvProfile','TxtPvLabel','BtnPvStart','BtnPvStop','BtnPvAbort','TxtPvSeconds','BtnPvCollect','BtnPvOpen','BtnPvStatus','LblPvStatus',
+                   'CmbPvProfile','TxtPvLabel','BtnPvStart','BtnPvStop','BtnPvAbort','TxtPvSeconds','BtnPvCollect','BtnPvOpen','BtnPvStatus','LblPvStatus',
                    'TxtPvProfName','PnlPvKernel','CmbPvClr','PnlPvProviders','TxtPvProvOther','TxtPvExtra','TxtPvCircular','TxtPvBuffer','BtnPvProfSave','BtnPvProfDelete','BtnPvProfDefault',
                    'TxtPvOutput','TxtPvSym','ChkPvMerge','ChkPvZip','BtnPvSettingsSave',
                    'BtnMonInstall','BtnMonStart','BtnMonStop','BtnMonStatus','BtnMonUninstall','LblMonStatus','PnlMonConfig','BtnMonSave','BtnMonReload','ChkMonTail','TxtMonLog',
@@ -151,7 +151,6 @@ function Show-MainWindow {
 
     $script:CmbPvProfile.Add_SelectionChanged({ if (-not $script:PvLoading) { script:Load-PvProfileFields ([string]$script:CmbPvProfile.SelectedItem) } })
 
-    $script:BtnPvInstall.Add_Click({ & $script:Append 'PerfView: install / verify...'; script:Invoke-Action 'Pv' $script:RsPv { $null = Install-PerfView } @() $script:RefreshPv })
     $script:BtnPvStart.Add_Click({
         $p = [string]$script:CmbPvProfile.SelectedItem; $l = $script:TxtPvLabel.Text
         & $script:Append "PerfView: start trace (profile '$p')..."
