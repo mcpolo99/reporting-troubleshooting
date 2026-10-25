@@ -383,8 +383,10 @@ function Show-MainWindow {
             $btn.Content = if ($s.Installed) { 'Reinstall' } else { 'Install' }
             $btn.Height = 28; $btn.MinWidth = 90; $btn.VerticalAlignment = 'Center'; $btn.Margin = '8,0,0,0'
             [System.Windows.Controls.DockPanel]::SetDock($btn, 'Right')
-            $id = [string]$s.Id; $force = [bool]$s.Installed
-            $btn.Add_Click({ script:Install-Pkg $id $force }.GetNewClosure())
+            # Per-row data on the control + a plain (non-closure) handler: a GetNewClosure handler rebinds the
+            # script: scope and can't resolve script:Install-Pkg, which crashes ShowDialog.
+            $btn.Tag = @{ Id = [string]$s.Id; Force = [bool]$s.Installed }
+            $btn.Add_Click({ param($sender, $e) script:Install-Pkg $sender.Tag.Id $sender.Tag.Force })
             [void]$row.Children.Add($btn)
 
             $info = New-Object System.Windows.Controls.StackPanel
