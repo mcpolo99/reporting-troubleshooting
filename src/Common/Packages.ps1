@@ -76,6 +76,11 @@ function Get-PackageRegistry {
             FallbackUrl     = 'https://download.sysinternals.com/files/Procdump.zip'   # single-tool fallback
             ExtractPatterns = @('*.exe', '*.chm', 'Eula*')
             Primary         = (Get-ProcDumpExeName)
+            # The full Suite ships 100+ exes; the ProcDump-only fallback ships 3. "Installed" must mean the
+            # whole Suite is present, not just ProcDump - otherwise an earlier ProcDump-only install makes the
+            # Suite install short-circuit as "already present" and the other tools never arrive. 10 cleanly
+            # separates the two and is architecture-agnostic (no per-arch exe names to track).
+            MinTools        = 10
         }
     )
 }
@@ -92,9 +97,21 @@ function Resolve-PackageTool([string]$Id, [string]$Exe) {
     if (Test-Path -LiteralPath $p) { $p } else { $null }
 }
 
+# Count the installed exes in a package's folder (used to tell a full Suite from a ProcDump-only fallback).
+function Get-PackageToolCount([string]$Id) {
+    $dir = Get-PackageDir $Id
+    if (Test-Path $dir) { @(Get-ChildItem $dir -Filter *.exe -File -ErrorAction SilentlyContinue).Count } else { 0 }
+}
+
+# "Installed" means complete: the Primary exe is present and validly Microsoft-signed, AND (for multi-tool
+# packages) at least MinTools exes are present. The second clause is what stops a ProcDump-only folder from
+# masquerading as the full Sysinternals Suite.
 function Test-PackageInstalled([string]$Id) {
+    $pkg = Get-Package $Id; if (-not $pkg) { return $false }
     $p = Resolve-PackageTool $Id
-    [bool]($p -and (Test-MicrosoftSignature $p))
+    if (-not ($p -and (Test-MicrosoftSignature $p))) { return $false }
+    $min = if ($pkg.PSObject.Properties['MinTools'] -and $pkg.MinTools) { [int]$pkg.MinTools } else { 1 }
+    (Get-PackageToolCount $Id) -ge $min
 }
 
 function Get-PackageStatus([string]$Id) {
@@ -119,9 +136,15 @@ function Install-Package {
     $dir = Get-PackageDir $Id
     $primary = Join-Path $dir $pkg.Primary
 
+    $min = if ($pkg.PSObject.Properties['MinTools'] -and $pkg.MinTools) { [int]$pkg.MinTools } else { 1 }
     if ((Test-Path -LiteralPath $primary) -and -not $Force) {
-        if (Test-MicrosoftSignature $primary) { Write-PkgLog "$($pkg.Name) present: $dir"; return $true }
-        Write-PkgLog "$($pkg.Name) failed signature check, re-acquiring." 'WARN'
+        if (-not (Test-MicrosoftSignature $primary)) {
+            Write-PkgLog "$($pkg.Name) failed signature check, re-acquiring." 'WARN'
+        } elseif ((Get-PackageToolCount $Id) -lt $min) {
+            Write-PkgLog "$($pkg.Name) is incomplete (only $(Get-PackageToolCount $Id) tool(s), expected $min+) - acquiring the full package." 'WARN'
+        } else {
+            Write-PkgLog "$($pkg.Name) present: $dir"; return $true
+        }
     }
     # Reinstall (-Force) is a clean wipe-and-reinstall so stale files from an older version don't linger.
     # Best effort: an in-use binary stays locked and is overwritten in place below (or fails loudly there).

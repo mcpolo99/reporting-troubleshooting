@@ -2,6 +2,13 @@
 function Show-MainWindow {
     Add-Type -AssemblyName PresentationFramework, System.Windows.Forms -ErrorAction Stop
 
+    # Force software rendering. On clean/VM/RDP/low-desktop-heap machines WPF's hardware composition
+    # render target fails to allocate (HwndTarget.UpdateWindowSettings throws Win32 1816 "Not enough
+    # quota is available to process this command" on the WM_WINDOWPOSCHANGED messages during show),
+    # spamming the recovery handler. A diagnostic GUI gains nothing from GPU accel, so take it off the
+    # table. Must be set before the window's HwndTarget is created (i.e. before XamlReader.Load/ShowDialog).
+    try { [System.Windows.Media.RenderOptions]::ProcessRenderMode = [System.Windows.Interop.RenderMode]::SoftwareOnly } catch {}
+
     $xaml   = Get-Content -Path $script:MainWindowSchema -Raw
     $reader = [System.Xml.XmlReader]::Create([System.IO.StringReader]::new($xaml))
     try { $w = [System.Windows.Markup.XamlReader]::Load($reader) } finally { $reader.Close() }
@@ -487,7 +494,13 @@ function Show-MainWindow {
     $w.Dispatcher.add_UnhandledException({
         param($src, $de)
         try {
-            & $script:Append "UI error (recovered): $($de.Exception.Message)"
+            # Collapse identical consecutive recoveries (a render-target hiccup fires one per
+            # WM_WINDOWPOSCHANGED) so one transient fault doesn't flood the output with copies.
+            $msg = "$($de.Exception.Message)"
+            if ($msg -ne $script:LastUiError) {
+                $script:LastUiError = $msg
+                & $script:Append "UI error (recovered): $msg"
+            }
             $logDir = Join-Path $env:ProgramData 'ReportingTroubleshooting\Logs'
             New-Item -ItemType Directory -Path $logDir -Force -ErrorAction SilentlyContinue | Out-Null
             $de.Exception.ToString() | Set-Content -LiteralPath (Join-Path $logDir ('ui_error_{0:yyyyMMdd_HHmmss}.log' -f (Get-Date))) -Encoding UTF8 -ErrorAction SilentlyContinue
