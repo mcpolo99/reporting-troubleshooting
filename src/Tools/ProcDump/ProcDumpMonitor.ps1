@@ -18,6 +18,9 @@
   Version is in $ScriptVersion below - bump it for every change you deploy.
 
 .CHANGELOG
+  2.3.0  Stop is status-aware and no longer silent: reports task state + active ProcDump count, logs progress
+         while waiting, says plainly when nothing is running/attached, and defaults TaskUser to the current
+         console user. Clearer arm/attach logging (attaching vs waiting).
   2.2.0  Install/resolve ProcDump through the shared package engine (Common\Packages.ps1) in the shared
          store %ProgramData%\ReportingTroubleshooting\Packages\sysinternals (one source of truth, reused
          by every tool and the GUI Packages tab). Uninstall no longer removes the shared tools.
@@ -51,7 +54,7 @@ param(
 )
 
 # =============================== VERSION =================================
-$ScriptVersion = '2.2.0'
+$ScriptVersion = '2.3.0'
 $GracefulStopSince = [version]'2.0.0'   # installed copies older than this may kill apps when stopped
 
 # =============================== CONSTANTS ===============================
@@ -208,9 +211,9 @@ if ([W.K]::AttachConsole($ProcessId)) {
 }
 
 function Stop-ProcDumpInstances($cfg, [int]$TimeoutSec = 30) {
-    $pds = Get-OurProcDumps
-    if (-not $pds) { return }
-    Write-Log "Detaching $($pds.Count) ProcDump instance(s) gracefully..."
+    $pds = @(Get-OurProcDumps)
+    if ($pds.Count -eq 0) { Write-Log 'No ProcDump instances running - nothing to detach.'; return }
+    Write-Log "Stopping $($pds.Count) ProcDump instance(s) gracefully (detaching any attached, quitting any still waiting)..."
 
     # 1) Ctrl+C every instance (detaches if attached, quits if waiting)
     foreach ($pd in $pds) { Send-CtrlC $pd.ProcessId }
@@ -561,19 +564,31 @@ function Get-MonitorTask { Get-ScheduledTask -TaskName $TaskName -ErrorAction Si
 
 # Graceful: ask the monitor to stop via a request file; it detaches ProcDump and exits by itself.
 # The task is only force-ended if the monitor doesn't respond in time.
-function Stop-MonitorTask($cfg, [int]$TimeoutSec = 90) {
+function Stop-MonitorTask($cfg, [int]$TimeoutSec = 60) {
     $task = Get-MonitorTask
-    if ($task -and $task.State -eq 'Running') {
-        Set-Content -Path $StopFile -Value (Get-Date -Format o) -ErrorAction SilentlyContinue
-        Write-Log 'Asked monitor to stop (detaching ProcDump without touching the apps)...'
-        $deadline = (Get-Date).AddSeconds($TimeoutSec)
-        while ((Get-Date) -lt $deadline -and (Get-MonitorTask).State -eq 'Running') { Start-Sleep -Seconds 1 }
-        if ((Get-MonitorTask).State -eq 'Running') {
-            Write-Log "Monitor did not stop within $TimeoutSec s - ending task." 'WARN'
-            Stop-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
-        } else {
-            Write-Log 'Monitor stopped.'
-        }
+    if (-not $task) { Write-Log 'Monitor task is not installed - nothing to stop.' 'WARN'; Stop-ProcDumpInstances $cfg; return }
+    if ($task.State -ne 'Running') {
+        Write-Log "Monitor task is not running (state: $($task.State)) - already stopped."
+        Remove-Item $StopFile -Force -ErrorAction SilentlyContinue
+        Stop-ProcDumpInstances $cfg      # clean up any orphaned ProcDump just in case
+        return
+    }
+
+    $active = @(Get-OurProcDumps).Count
+    Set-Content -Path $StopFile -Value (Get-Date -Format o) -ErrorAction SilentlyContinue
+    Write-Log "Stop requested (monitor running; $active ProcDump instance(s) active). Waiting up to ${TimeoutSec}s for it to detach and exit..."
+    $deadline = (Get-Date).AddSeconds($TimeoutSec); $nextTick = 10
+    while ((Get-Date) -lt $deadline -and (Get-MonitorTask).State -eq 'Running') {
+        Start-Sleep -Seconds 1
+        $elapsed = [int]($TimeoutSec - ($deadline - (Get-Date)).TotalSeconds)
+        if ($elapsed -ge $nextTick) { Write-Log "...still waiting for the monitor to stop (${elapsed}s)."; $nextTick += 10 }
+    }
+    if ((Get-MonitorTask).State -eq 'Running') {
+        Write-Log ("Monitor did not acknowledge the stop within ${TimeoutSec}s - ending the task. If this keeps " +
+                   'happening, reinstall the monitor: an older installed copy can watch a different stop-request path.') 'WARN'
+        Stop-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
+    } else {
+        Write-Log 'Monitor stopped gracefully.'
     }
     Remove-Item $StopFile -Force -ErrorAction SilentlyContinue
     Stop-ProcDumpInstances $cfg      # anything left over, still graceful
