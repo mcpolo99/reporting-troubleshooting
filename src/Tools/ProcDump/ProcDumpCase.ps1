@@ -38,10 +38,11 @@
   system_info.txt, SUMMARY.txt   (findings, e.g. Code Integrity / Smart App Control blocks)
 
 .NOTES
-  ProcDump lookup order: -ProcDumpPath, PATH (incl. WinGet links), script folder (+ \Tools),
-  %ProgramData%\ProcDumpCase\Tools, %ProgramData%\ProcDumpMonitor\Tools, common Sysinternals
-  folders, WinGet packages. Every candidate must be validly Microsoft-signed. Only then a
-  download is offered (to %ProgramData%\ProcDumpCase\Tools), signature-verified as well.
+  Output goes under the one app root by default: %ProgramData%\ReportingTroubleshooting\Case\<exe>_<datetime>\.
+  ProcDump lookup order: -ProcDumpPath, PATH (incl. WinGet links), script folder (+ \Tools), the shared
+  package store %ProgramData%\ReportingTroubleshooting\Packages\sysinternals, common Sysinternals folders,
+  WinGet packages. Every candidate must be validly Microsoft-signed. Only then the shared package engine
+  installs it (to the shared store), signature-verified as well.
   Full dumps contain the process memory (paths, user names, possibly licence data). Share them
   only through the vendor's official support channel.
 #>
@@ -50,7 +51,7 @@ param(
     [string]$ExePath,
     [string]$Arguments = '',
     [string]$WorkingDirectory,
-    [string]$OutputRoot = 'C:\dumps\Cases',
+    [string]$OutputRoot = (Join-Path $env:ProgramData 'ReportingTroubleshooting\Case'),   # under the one app root
     [switch]$Auto,                        # agnostic default: catch a crash, a silent exit OR a hang in one run
     [string[]]$ExceptionFilter = @(),     # e.g. FileLoadException, E0434352, C0000005 -> first-chance dumps
     [switch]$FirstChance,                 # dump on ALL first-chance exceptions (noisy, limited by -MaxDumps)
@@ -180,7 +181,6 @@ function Find-ProcDump {
         foreach ($c in @(Get-Command $n -CommandType Application -All -ErrorAction SilentlyContinue)) { $cands.Add($c.Source) }
     }
     $dirs = @($PSScriptRoot, $(if ($PSScriptRoot) { Join-Path $PSScriptRoot 'Tools' }), $ToolsDir,
-              (Join-Path $env:ProgramData 'ProcDumpMonitor\Tools'),
               'C:\Sysinternals', 'C:\SysinternalsSuite', 'C:\Tools\Sysinternals', 'C:\Tools',
               (Join-Path $env:ProgramFiles 'Sysinternals'), (Join-Path $env:ProgramFiles 'SysinternalsSuite'),
               (Join-Path $env:LOCALAPPDATA 'Microsoft\WinGet\Links'))

@@ -69,7 +69,7 @@ try {
         Write-Host 'If MachinePolicy/UserPolicy is set, it overrides -ExecutionPolicy Bypass (Group Policy).' -ForegroundColor Yellow
     }
     try {
-        $logDir = Join-Path $env:LOCALAPPDATA 'ReportingTroubleshooting\Logs'
+        $logDir = Join-Path $env:ProgramData 'ReportingTroubleshooting\Logs'
         New-Item -ItemType Directory -Path $logDir -Force -ErrorAction SilentlyContinue | Out-Null
         $log = Join-Path $logDir ('startup_{0:yyyyMMdd_HHmmss}.log' -f (Get-Date))
         $_ | Out-String | Set-Content -LiteralPath $log -Encoding UTF8

@@ -33,13 +33,13 @@
          menu + unattended switches, delegates temporary procdump to ProcDumpCase.ps1.
 
 .FILES
-  %ProgramData%\PerfViewCapture\
-      Tools\PerfView.exe                       resolved + Microsoft-signature-verified copy
+  %ProgramData%\ReportingTroubleshooting\PerfView\        (all under the one app root)
       config.json                              settings + collection profiles
       active.json                              state of the current background trace
+      Output\PerfViewData_<profile>_<label>_<datetime>.etl(.zip)   the trace (default OutputDir)
       Logs\PerfViewCapture_<datetime>.log      one per menu/op session
       Logs\PerfView_<datetime>.log             PerfView's own output, one per start/stop/collect
-  <OutputDir>\PerfViewData_<profile>_<label>_<datetime>.etl(.zip)   the trace
+  PerfView.exe itself lives in the shared store %ProgramData%\ReportingTroubleshooting\Packages\perfview\
 #>
 [CmdletBinding()]
 param(
@@ -64,7 +64,7 @@ $ScriptVersion = '1.1.0'
 
 # =============================== CONSTANTS ===============================
 $AppName     = 'PerfViewCapture'
-$BaseDir     = Join-Path $env:ProgramData $AppName
+$BaseDir     = Join-Path $env:ProgramData 'ReportingTroubleshooting\PerfView'   # all app data lives under the one app root
 $ConfigFile  = Join-Path $BaseDir 'config.json'
 $ActiveFile  = Join-Path $BaseDir 'active.json'
 $LogDir      = Join-Path $BaseDir 'Logs'
@@ -145,7 +145,7 @@ function Get-DefaultProfiles {
 
 function Get-DefaultConfig {
     [pscustomobject]@{
-        OutputDir      = 'C:\dumps\PerfView'
+        OutputDir      = (Join-Path $BaseDir 'Output')
         DefaultProfile = 'Balanced'
         Merge          = $true
         Zip            = $true

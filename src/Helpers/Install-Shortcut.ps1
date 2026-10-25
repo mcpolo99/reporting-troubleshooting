@@ -45,7 +45,7 @@ function Install-DesktopShortcut {
         [string]$Name = 'Reporting & Troubleshooting'
     )
     if (-not (Test-Path $TargetBat)) { throw "Launcher not found: $TargetBat" }
-    $iconDir = Join-Path $env:LOCALAPPDATA 'ReportingTroubleshooting'
+    $iconDir = Join-Path $env:ProgramData 'ReportingTroubleshooting\Icons'
     New-Item -ItemType Directory -Path $iconDir -Force | Out-Null
     $ico = Join-Path $iconDir 'rt.ico'
     New-RtIcon -Path $ico

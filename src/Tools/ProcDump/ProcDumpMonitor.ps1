@@ -28,17 +28,18 @@
          (.info.txt), duplicate-capture detection, cooldown, configurable -n, Update with version check.
   (unversioned)  Earlier copies - treated as version 0.0.0 by the update check.
   Monitor mode (what the scheduled task runs - not meant to be started by hand):
-      ... -File "%ProgramData%\ProcDumpMonitor\ProcDumpMonitor.ps1" -Monitor
+      ... -File "%ProgramData%\ReportingTroubleshooting\Monitor\ProcDumpMonitor.ps1" -Monitor
 
 .FILES
-  %ProgramData%\ProcDumpMonitor\
+  %ProgramData%\ReportingTroubleshooting\Monitor\        (all under the one app root)
       ProcDumpMonitor.ps1                 installed copy of this script
       config.json                         settings
-      Tools\                              Sysinternals Suite (downloaded); procdump*.exe is signature-verified
+      Dumps\                              captured dumps (default DumpDir)
       Logs\ProcDumpMonitor_<datetime>.log         one per monitor launch
       Logs\ProcDumpMonitor-Setup_<datetime>.log   one per setup/menu session
       Logs\ProcDump_<app>_<datetime>.log          ProcDump's own output, one per ProcDump session
   <DumpDir>\<dump>.dmp + <dump>.info.txt          dump + reason, exception, PID, exe versions
+  ProcDump itself lives in the shared store %ProgramData%\ReportingTroubleshooting\Packages\sysinternals\
 #>
 [CmdletBinding()]
 param(
@@ -56,7 +57,7 @@ $GracefulStopSince = [version]'2.0.0'   # installed copies older than this may k
 # =============================== CONSTANTS ===============================
 $AppName         = 'ProcDumpMonitor'
 $TaskName        = 'ProcDumpMonitor'
-$BaseDir         = Join-Path $env:ProgramData $AppName
+$BaseDir         = Join-Path $env:ProgramData 'ReportingTroubleshooting\Monitor'   # all app data under the one app root
 $ConfigFile      = Join-Path $BaseDir 'config.json'
 $LogDir          = Join-Path $BaseDir 'Logs'
 $InstalledScript = Join-Path $BaseDir "$AppName.ps1"
@@ -103,7 +104,7 @@ $ProcDumpExe     = Join-Path $ToolsDir $ProcDumpExeName
 function Get-DefaultConfig {
     [pscustomobject]@{
         Apps             = @('AppA.exe')
-        DumpDir          = 'C:\dumps'
+        DumpDir          = (Join-Path $BaseDir 'Dumps')
         KeepDumps        = 15
         CheckSeconds     = 5
         CleanupSeconds   = 300

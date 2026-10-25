@@ -41,7 +41,7 @@ function Show-MainWindow {
     # so if this app closes/crashes mid-trace we must abort the session. These OS/file paths let us do that
     # without the runspace (which may be gone on a crash). active.json presence = a trace is live.
     $script:PvExe        = Join-Path $env:ProgramData 'ReportingTroubleshooting\Packages\perfview\PerfView.exe'
-    $script:PvActiveFile = Join-Path $env:ProgramData 'PerfViewCapture\active.json'
+    $script:PvActiveFile = Join-Path $env:ProgramData 'ReportingTroubleshooting\PerfView\active.json'
     $script:PvSession    = 'PerfViewCapture'
     function script:Stop-PerfViewHard {
         if (-not (Test-Path $script:PvActiveFile)) { return }   # no live trace; also prevents double-abort
@@ -54,7 +54,7 @@ function Show-MainWindow {
     }
 
     # live tail of the background monitor's newest log
-    $script:MonLogDir = Join-Path $env:ProgramData 'ProcDumpMonitor\Logs'
+    $script:MonLogDir = Join-Path $env:ProgramData 'ReportingTroubleshooting\Monitor\Logs'
     $script:MonLogCur = ''; $script:MonLogLen = -1; $script:TailCounter = 0
     function script:Update-MonTail {
         if (-not $script:ChkMonTail.IsChecked) { return }
@@ -281,11 +281,13 @@ function Show-MainWindow {
         foreach ($v in @($values)) { & $makeChip $v }
         [void]$wrap.Children.Add($tb)
 
+        # Emit $vals (NOT ,$vals): the caller wraps with @(& $c.Tag), and the comma idiom would double-nest
+        # into a single array element that -join stringifies to "System.Object[]".
         $getter = {
             $vals = @()
             foreach ($c in $wrap.Children) { if ($c -is [System.Windows.Controls.Border]) { $vals += [string]$c.Tag } }
             if ("$($tb.Text)".Trim()) { $vals += "$($tb.Text)".Trim() }
-            ,$vals
+            $vals
         }.GetNewClosure()
 
         return @{ Panel = $wrap; Getter = $getter }

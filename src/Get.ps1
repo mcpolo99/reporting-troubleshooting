@@ -100,7 +100,7 @@ else {
         # Replace the installed scripts, but PRESERVE runtime data that lives under the install dir: the
         # shared package store (installed tools) and logs. Wiping these made installed packages vanish on
         # every update. (Other tools keep their own state under %ProgramData%\<tool>.)
-        $preserve = @('.version', 'Packages', 'Logs')
+        $preserve = @('.version', 'Packages', 'Logs', 'PerfView', 'Monitor', 'Case', 'Icons')
         Get-ChildItem $InstallDir -Force | Where-Object { $preserve -notcontains $_.Name } |
             Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
         Get-ChildItem $root.FullName -Force | Copy-Item -Destination $InstallDir -Recurse -Force
