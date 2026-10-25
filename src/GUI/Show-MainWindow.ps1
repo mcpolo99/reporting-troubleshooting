@@ -234,6 +234,9 @@ function Show-MainWindow {
     # Chip/tag editor (like mail recipients): type a value, Enter locks it as a removable chip and clears
     # the box for the next one; Backspace on an empty box removes the last chip. Returns the panel + a getter.
     function script:New-TagEditor($values) {
+        # Capture the theme brushes as locals: inside the GetNewClosure blocks below, $script:* rebinds to the
+        # closure's own (empty) scope, so the chips would get null brushes and render invisibly.
+        $fg = $script:FgBrush; $chipBg = $script:ChipBg
         $wrap = New-Object System.Windows.Controls.WrapPanel
         $wrap.HorizontalAlignment = 'Left'
 
@@ -241,22 +244,22 @@ function Show-MainWindow {
         $tb.MinWidth = 120; $tb.Margin = '2'; $tb.VerticalAlignment = 'Center'
         $tb.BorderThickness = New-Object System.Windows.Thickness(0)
         $tb.Background = [System.Windows.Media.Brushes]::Transparent
-        $tb.Foreground = $script:FgBrush
+        $tb.Foreground = $fg
 
         $makeChip = {
             param($text)
             $text = "$text".Trim()
             if (-not $text) { return }
             $chip = New-Object System.Windows.Controls.Border
-            $chip.Background = $script:ChipBg; $chip.CornerRadius = New-Object System.Windows.CornerRadius(3)
+            $chip.Background = $chipBg; $chip.CornerRadius = New-Object System.Windows.CornerRadius(3)
             $chip.Margin = '0,2,4,2'; $chip.Padding = '6,1,3,1'; $chip.Tag = $text
             $sp = New-Object System.Windows.Controls.StackPanel; $sp.Orientation = 'Horizontal'
             $lbl = New-Object System.Windows.Controls.TextBlock
-            $lbl.Text = $text; $lbl.Foreground = $script:FgBrush; $lbl.VerticalAlignment = 'Center'
+            $lbl.Text = $text; $lbl.Foreground = $fg; $lbl.VerticalAlignment = 'Center'
             $btn = New-Object System.Windows.Controls.Button
             $btn.Content = [char]0x00D7; $btn.Margin = '4,0,0,0'; $btn.Padding = '3,0,3,0'
             $btn.BorderThickness = New-Object System.Windows.Thickness(0); $btn.FontWeight = 'Bold'
-            $btn.Background = [System.Windows.Media.Brushes]::Transparent; $btn.Foreground = $script:FgBrush
+            $btn.Background = [System.Windows.Media.Brushes]::Transparent; $btn.Foreground = $fg
             $btn.Cursor = [System.Windows.Input.Cursors]::Hand; $btn.ToolTip = 'Remove'
             $btn.Add_Click({ [void]$wrap.Children.Remove($chip) }.GetNewClosure())
             [void]$sp.Children.Add($lbl); [void]$sp.Children.Add($btn); $chip.Child = $sp
