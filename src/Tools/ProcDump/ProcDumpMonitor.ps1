@@ -584,15 +584,40 @@ function Register-MonitorTask($cfg) {
 
 function Get-MonitorTask { Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue }
 
-# Graceful: ask the monitor to stop via a request file; it detaches ProcDump and exits by itself.
-# The task is only force-ended if the monitor doesn't respond in time.
+# The actual monitor-loop process(es) by command line - NOT the task state. The task may run the loop under
+# conhost (HeadlessLauncher), and the task leaving 'Running' doesn't guarantee that PowerShell child died;
+# while it lives it keeps re-arming ProcDump. Matches the loop launcher (and its conhost wrapper). Excludes
+# this process so a Stop issued from the GUI/menu never ends itself.
+function Get-MonitorProcesses {
+    @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object {
+        $_.ProcessId -ne $PID -and
+        "$($_.CommandLine)" -match 'ProcDumpMonitor\.ps1' -and
+        "$($_.CommandLine)" -match '(?i)(^|\s)-Monitor(\s|$)'
+    })
+}
+
+# Force-end every monitor-loop process so it stops re-arming ProcDump. Returns how many were ended.
+function Stop-MonitorProcesses {
+    $mons = @(Get-MonitorProcesses)
+    foreach ($m in $mons) {
+        Write-Log "Ending monitor process PID $($m.ProcessId)."
+        try { Stop-Process -Id $m.ProcessId -Force -ErrorAction Stop }
+        catch { Write-Log "Could not end monitor PID $($m.ProcessId) (different user? run elevated): $($_.Exception.Message)" 'WARN' }
+    }
+    $mons.Count
+}
+
+# Graceful: ask the monitor to stop via a request file; it detaches ProcDump and exits by itself. Then
+# GUARANTEE it: force-end any loop process the task left behind (e.g. a conhost-launched PowerShell), and
+# only afterwards detach ProcDump - so nothing re-arms it between detach and loop-death.
 function Stop-MonitorTask($cfg, [int]$TimeoutSec = 60) {
     $task = Get-MonitorTask
-    if (-not $task) { Write-Log 'Monitor task is not installed - nothing to stop.' 'WARN'; Stop-ProcDumpInstances $cfg; return }
-    if ($task.State -ne 'Running') {
-        Write-Log "Monitor task is not running (state: $($task.State)) - already stopped."
+    $running = ($task -and $task.State -eq 'Running') -or (@(Get-MonitorProcesses).Count -gt 0)
+    if (-not $running) {
+        Write-Log $(if ($task) { "Monitor task is not running (state: $($task.State)) - already stopped." } else { 'Monitor task is not installed - nothing to stop.' })
         Remove-Item $StopFile -Force -ErrorAction SilentlyContinue
-        Stop-ProcDumpInstances $cfg      # clean up any orphaned ProcDump just in case
+        Stop-MonitorProcesses | Out-Null                 # reap any stray loop just in case
+        Stop-ProcDumpInstances $cfg                      # clean up orphaned ProcDump
         return
     }
 
@@ -600,20 +625,25 @@ function Stop-MonitorTask($cfg, [int]$TimeoutSec = 60) {
     Set-Content -Path $StopFile -Value (Get-Date -Format o) -ErrorAction SilentlyContinue
     Write-Log "Stop requested (monitor running; $active ProcDump instance(s) active). Waiting up to ${TimeoutSec}s for it to detach and exit..."
     $deadline = (Get-Date).AddSeconds($TimeoutSec); $nextTick = 10
-    while ((Get-Date) -lt $deadline -and (Get-MonitorTask).State -eq 'Running') {
+    while ((Get-Date) -lt $deadline) {
+        $stillUp = ((Get-MonitorTask).State -eq 'Running') -or (@(Get-MonitorProcesses).Count -gt 0)
+        if (-not $stillUp) { break }
         Start-Sleep -Seconds 1
         $elapsed = [int]($TimeoutSec - ($deadline - (Get-Date)).TotalSeconds)
         if ($elapsed -ge $nextTick) { Write-Log "...still waiting for the monitor to stop (${elapsed}s)."; $nextTick += 10 }
     }
+
+    # Force whatever remains: stop the task instance, then kill any loop process it left running.
     if ((Get-MonitorTask).State -eq 'Running') {
-        Write-Log ("Monitor did not acknowledge the stop within ${TimeoutSec}s - ending the task. If this keeps " +
-                   'happening, reinstall the monitor: an older installed copy can watch a different stop-request path.') 'WARN'
+        Write-Log 'Monitor did not acknowledge the stop in time - ending the task.' 'WARN'
         Stop-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
-    } else {
-        Write-Log 'Monitor stopped gracefully.'
     }
+    $killed = Stop-MonitorProcesses
+    if ($killed) { Write-Log "Force-ended $killed lingering monitor process(es) that would have kept re-arming ProcDump." 'WARN' }
+    else { Write-Log 'Monitor stopped.' }
+
     Remove-Item $StopFile -Force -ErrorAction SilentlyContinue
-    Stop-ProcDumpInstances $cfg      # anything left over, still graceful
+    Stop-ProcDumpInstances $cfg      # now the loop is dead, detach any ProcDump left behind
 }
 
 function Start-MonitorTask {
@@ -755,8 +785,15 @@ function Invoke-Uninstall {
     # (outside BaseDir) and are untouched regardless.
     $cfg = Read-Config
     Stop-MonitorTask $cfg
-    if (Get-MonitorTask) { Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false; Write-Log 'Scheduled task removed.' }
-    else { Write-Log 'No scheduled task to remove.' }
+    if (Get-MonitorTask) {
+        # Disable first so no trigger (logon / StartWhenAvailable) can fire it mid-uninstall, then remove it.
+        Disable-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue | Out-Null
+        Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false
+        Write-Log 'Scheduled task removed.'
+    } else { Write-Log 'No scheduled task to remove.' }
+    $left = Stop-MonitorProcesses      # belt and suspenders: nothing left to re-arm ProcDump
+    if ($left) { Write-Log "Ended $left monitor process(es) still running after task removal." 'WARN' }
+    Stop-ProcDumpInstances $cfg
     Write-Log "Configuration preserved at $ConfigFile. Uninstall removes only the scheduled task; delete $BaseDir by hand if you want config/logs gone."
     Write-Host 'Uninstall complete - scheduled task removed; configuration preserved.'
 }
