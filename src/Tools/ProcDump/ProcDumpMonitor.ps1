@@ -123,7 +123,17 @@ function Read-Config {
             Write-Log "Config file unreadable, using defaults: $($_.Exception.Message)" 'WARN'
         }
     }
-    $cfg.Apps = @($cfg.Apps | Where-Object { $_ } | ForEach-Object { "$_".Trim() })
+    # Heal Apps. An older GUI build could save the whole list as the string "System.Object[]" (a stringified
+    # array), which then armed ProcDump against a bogus process name that never exists - so it never attached.
+    # Split any comma-joined value, trim, and drop empties and stringified-object artifacts.
+    $rawApps = @($cfg.Apps)
+    $cfg.Apps = @($rawApps |
+        ForEach-Object { "$_" -split ',' } |
+        ForEach-Object { $_.Trim() } |
+        Where-Object { $_ -and $_ -notmatch '^System\.(Object|Collections)' })
+    if ($rawApps | Where-Object { "$_" -match '^System\.' }) {
+        Write-Log "Config 'Apps' held an invalid entry (e.g. 'System.Object[]') from an old build - removed it. Re-add the app(s) to monitor if the list is now empty." 'WARN'
+    }
     # A saved empty TaskUser must not stick as empty: the Logon task needs a user, so fall back to the
     # current console user (same default as Get-DefaultConfig).
     if (-not "$($cfg.TaskUser)".Trim()) { $cfg.TaskUser = (Get-ConsoleUser) }
