@@ -474,14 +474,29 @@ function Show-MainWindow {
     try { script:Build-PkgEditor } catch { & $script:Append "Package status load failed: $($_.Exception.Message)" }
     & $script:RefreshPv; & $script:RefreshMon
 
+    # Last-resort guard: a stray exception on the UI thread (a bad event handler) must not kill the window.
+    # Show it in the output, write the full detail to a log, and keep the app alive.
+    $w.Dispatcher.add_UnhandledException({
+        param($src, $de)
+        try {
+            & $script:Append "UI error (recovered): $($de.Exception.Message)"
+            $logDir = Join-Path $env:ProgramData 'ReportingTroubleshooting\Logs'
+            New-Item -ItemType Directory -Path $logDir -Force -ErrorAction SilentlyContinue | Out-Null
+            $de.Exception.ToString() | Set-Content -LiteralPath (Join-Path $logDir ('ui_error_{0:yyyyMMdd_HHmmss}.log' -f (Get-Date))) -Encoding UTF8 -ErrorAction SilentlyContinue
+        } catch {}
+        $de.Handled = $true
+    })
+
     # ---------- output pump + log tail ----------
     $timer = New-Object System.Windows.Threading.DispatcherTimer
     $timer.Interval = [TimeSpan]::FromMilliseconds(200)
     $timer.Add_Tick({
-        Update-ToolJobs
-        $script:LblBusy.Text = if (Test-ToolJobsBusy) { 'Working...' } else { 'Ready' }
-        $script:TailCounter++
-        if ($script:TailCounter % 5 -eq 0) { script:Update-MonTail }   # ~1s cadence
+        try {
+            Update-ToolJobs
+            $script:LblBusy.Text = if (Test-ToolJobsBusy) { 'Working...' } else { 'Ready' }
+            $script:TailCounter++
+            if ($script:TailCounter % 5 -eq 0) { script:Update-MonTail }   # ~1s cadence
+        } catch { & $script:Append "Timer error: $($_.Exception.Message)" }
     })
     $timer.Start()
 

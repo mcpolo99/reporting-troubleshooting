@@ -67,7 +67,8 @@ function Update-ToolJobs {
             foreach ($e in $job.PS.Streams.Error) { if ($job.OnText) { & $job.OnText "ERROR: $($e.ToString())" } }
             $job.PS.Dispose()
             $script:ToolJobs.RemoveAt($i)
-            if ($job.OnDone) { & $job.OnDone }
+            # A failing OnDone (e.g. a UI rebuild) must not escape the timer tick and tear down the window.
+            if ($job.OnDone) { try { & $job.OnDone } catch { if ($job.OnText) { & $job.OnText "Post-action error: $($_.Exception.Message)" } } }
         }
     }
 }
