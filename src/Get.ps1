@@ -10,6 +10,10 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
+# Allow the installed .ps1 (and its dot-sources/runspaces, all this process) to run when the machine
+# policy is Restricted. Get.ps1 itself runs from memory (irm|iex) so it is not blocked.
+try { Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass -Force -ErrorAction SilentlyContinue } catch {}
+
 $Owner       = 'mcpolo99'
 $Repo        = 'reporting-troubleshooting'
 $ApiBase     = "https://api.github.com/repos/$Owner/$Repo"
