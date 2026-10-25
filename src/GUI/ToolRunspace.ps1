@@ -8,7 +8,12 @@ $script:ToolJobs = New-Object System.Collections.ArrayList
 # turns on console echo so Write-Log output is captured on the Information stream.
 function New-ToolRunspace {
     param([string]$ToolPath, [switch]$Load)
-    $rs = [runspacefactory]::CreateRunspace()
+    # A runspace created here does NOT inherit the host's -ExecutionPolicy Bypass; it defaults to the
+    # machine policy, so on a Restricted machine dot-sourcing/invoking the tool .ps1 inside it is blocked.
+    # Set the session policy to Bypass so the tools load regardless of the (non-GPO) machine policy.
+    $iss = [System.Management.Automation.Runspaces.InitialSessionState]::CreateDefault()
+    try { $iss.ExecutionPolicy = [Microsoft.PowerShell.ExecutionPolicy]::Bypass } catch {}
+    $rs = [runspacefactory]::CreateRunspace($iss)
     $rs.ApartmentState = 'STA'
     $rs.ThreadOptions  = 'ReuseThread'
     $rs.Open()
