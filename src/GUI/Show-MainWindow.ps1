@@ -261,7 +261,15 @@ function Show-MainWindow {
             $btn.BorderThickness = New-Object System.Windows.Thickness(0); $btn.FontWeight = 'Bold'
             $btn.Background = [System.Windows.Media.Brushes]::Transparent; $btn.Foreground = $fg
             $btn.Cursor = [System.Windows.Input.Cursors]::Hand; $btn.ToolTip = 'Remove'
-            $btn.Add_Click({ [void]$wrap.Children.Remove($chip) }.GetNewClosure())
+            # Remove via the visual tree (Button -> StackPanel -> Border chip -> WrapPanel), NOT a captured
+            # $wrap: this handler is nested inside the $makeChip closure, where GetNewClosure does not capture
+            # $wrap, so a captured reference is null on click ("cannot call a method on a null-valued expression").
+            $btn.Add_Click({
+                param($sender, $e)
+                $theChip = $sender.Parent.Parent          # StackPanel -> Border
+                $panel = if ($theChip) { $theChip.Parent } else { $null }   # WrapPanel
+                if ($panel) { [void]$panel.Children.Remove($theChip) }
+            })
             [void]$sp.Children.Add($lbl); [void]$sp.Children.Add($btn); $chip.Child = $sp
             $idx = $wrap.Children.IndexOf($tb); if ($idx -lt 0) { $idx = $wrap.Children.Count }
             $wrap.Children.Insert($idx, $chip)
