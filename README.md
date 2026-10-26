@@ -16,10 +16,29 @@ Run this in a PowerShell / terminal - it downloads the latest release, installs 
 The bootstrap (`src/Get.ps1`) elevates, checks the installed version against GitHub, downloads only when
 there is a newer version, installs to `%ProgramData%\ReportingTroubleshooting`, and opens the launcher.
 
+Pass switches after the closing `)` of the one-liner, e.g. to install the **develop** branch:
+
+```powershell
+& ([scriptblock]::Create((irm 'https://raw.githubusercontent.com/mcpolo99/reporting-troubleshooting/main/src/Get.ps1'))) -Dev
+```
+
+any branch by name (slashes are allowed, e.g. a feature branch):
+
+```powershell
+& ([scriptblock]::Create((irm 'https://raw.githubusercontent.com/mcpolo99/reporting-troubleshooting/main/src/Get.ps1'))) -Branch feature/my-change
+```
+
 | Switch | Effect |
 |---|---|
-| `-Dev`   | install from the `main` branch head instead of the latest release |
+| `-Branch <name>` | install that branch's head instead of the stable release (for testing) |
+| `-Dev` | shorthand for `-Branch develop` |
 | `-Force` | reinstall even if already up to date |
+
+A branch build is **isolated**: it installs to `%ProgramData%\ReportingTroubleshooting\branch\<name>` and runs
+from there, so it never overwrites the stable install at `%ProgramData%\ReportingTroubleshooting`. The shared
+tool store (`...\Packages`) and per-tool data (`...\Monitor`, `...\PerfView`) stay machine-wide, so a branch
+build reuses already-installed tools instead of re-downloading them. Omit both switches for the normal stable
+install from the latest release.
 
 ### Offline (download the source, run it as-is)
 

@@ -1,10 +1,17 @@
 <#
-  Online installer: elevate, resolve the latest GitHub release (or main head with -Dev), and when it
-  differs from the installed .version (or -Force) download + install to %ProgramData%\ReportingTroubleshooting,
-  then launch ReportingToolkit.ps1.
+  Online installer: elevate, resolve the latest GitHub release (stable) and when it differs from the
+  installed .version (or -Force) download + install to %ProgramData%\ReportingTroubleshooting, then launch
+  ReportingToolkit.ps1.
+
+  Branch builds (for testing): -Branch <name> installs that branch's head instead of the stable release;
+  -Dev is shorthand for -Branch develop. A branch build is ISOLATED - it installs to
+  %ProgramData%\ReportingTroubleshooting\branch\<name> and runs from there, so it never overwrites the stable
+  install. The shared tool store (...\Packages) and per-tool data (...\Monitor, ...\PerfView) stay machine-wide,
+  so a branch build reuses already-installed tools rather than re-downloading them.
 #>
 param(
-    [switch]$Dev,
+    [string]$Branch,     # install this branch's head (isolated), e.g. -Branch develop / -Branch feature/foo
+    [switch]$Dev,        # shorthand for -Branch develop
     [switch]$Force
 )
 
@@ -18,9 +25,20 @@ $Owner       = 'mcpolo99'
 $Repo        = 'reporting-troubleshooting'
 $ApiBase     = "https://api.github.com/repos/$Owner/$Repo"
 $RawGet      = "https://raw.githubusercontent.com/$Owner/$Repo/main/src/Get.ps1"
-$InstallDir  = Join-Path $env:ProgramData 'ReportingTroubleshooting'
-$VersionFile = Join-Path $InstallDir '.version'
+$StableDir   = Join-Path $env:ProgramData 'ReportingTroubleshooting'
 $EntryScript = 'src\ReportingToolkit.ps1'
+
+# Effective branch: -Branch wins, -Dev means develop, otherwise stable (latest release).
+$EffBranch = if ($Branch) { $Branch.Trim() } elseif ($Dev) { 'develop' } else { '' }
+if ($EffBranch) {
+    # Isolate branch builds under ...\branch\<name> so they never overwrite the stable install. The name is
+    # sanitised for a folder (feature/foo -> feature-foo); the real branch ref keeps its slashes for GitHub.
+    $safeBranch  = ($EffBranch -replace '[^\w.-]', '-')
+    $InstallDir  = Join-Path $StableDir "branch\$safeBranch"
+} else {
+    $InstallDir  = $StableDir
+}
+$VersionFile = Join-Path $InstallDir '.version'
 
 if ($ExecutionContext.SessionState.LanguageMode -ne 'FullLanguage') {
     Write-Error 'PowerShell is running in constrained language mode; this toolset cannot run here.'
@@ -41,8 +59,9 @@ if (-not (Test-Admin)) {
     $self = Join-Path $env:TEMP 'ReportingTroubleshooting-Get.ps1'
     try { Invoke-RestMethod $RawGet -OutFile $self } catch { Write-Error "Could not download the bootstrap: $_"; return }
     $a = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', "`"$self`"")
-    if ($Dev)   { $a += '-Dev' }
-    if ($Force) { $a += '-Force' }
+    if ($Branch) { $a += @('-Branch', "`"$Branch`"") }
+    if ($Dev)    { $a += '-Dev' }
+    if ($Force)  { $a += '-Force' }
     try { Start-Process powershell.exe -Verb RunAs -ArgumentList ($a -join ' ') }
     catch { Write-Error 'Elevation was declined; the toolset needs administrator rights to install.' }
     return
@@ -51,26 +70,35 @@ if (-not (Test-Admin)) {
 Clear-Host
 Write-Host '-------------------------------------------------------------------------------------------'
 Write-Host ' Reporting & Troubleshooting toolset'
+if ($EffBranch) { Write-Host " BRANCH BUILD: $EffBranch  (isolated at $InstallDir)" -ForegroundColor Yellow }
 Write-Host '-------------------------------------------------------------------------------------------'
 
 $headers = @{ 'User-Agent' = 'reporting-troubleshooting-bootstrap' }
 
-# Resolve the latest ref + download url: a GitHub Release if one exists, else the main branch head.
+# Resolve the ref + download url. A branch build takes that branch's head; otherwise the latest GitHub
+# Release (stable), falling back to the main branch head when no release exists yet.
 $ref = $null; $zipUrl = $null; $mode = $null
-if (-not $Dev) {
+if ($EffBranch) {
+    try {
+        $ref = (Invoke-RestMethod "$ApiBase/commits/$EffBranch" -Headers $headers).sha
+    } catch { Write-Error "Could not resolve branch '$EffBranch' on $Owner/$Repo (does it exist?): $_"; return }
+    $zipUrl = "https://github.com/$Owner/$Repo/archive/refs/heads/$EffBranch.zip"
+    $mode   = "branch $EffBranch @ $($ref.Substring(0,7))"
+}
+else {
     try {
         $rel    = Invoke-RestMethod "$ApiBase/releases/latest" -Headers $headers
         $ref    = $rel.tag_name
         $zipUrl = $rel.zipball_url
         $mode   = "release $ref"
-    } catch { }   # no releases yet -> fall through to the branch head
-}
-if (-not $ref) {
-    try {
-        $ref    = (Invoke-RestMethod "$ApiBase/commits/main" -Headers $headers).sha
-        $zipUrl = "https://github.com/$Owner/$Repo/archive/refs/heads/main.zip"
-        $mode   = "main @ $($ref.Substring(0,7))"
-    } catch { Write-Error "Could not reach GitHub to determine the latest version: $_"; return }
+    } catch { }   # no releases yet -> fall through to the main head
+    if (-not $ref) {
+        try {
+            $ref    = (Invoke-RestMethod "$ApiBase/commits/main" -Headers $headers).sha
+            $zipUrl = "https://github.com/$Owner/$Repo/archive/refs/heads/main.zip"
+            $mode   = "main @ $($ref.Substring(0,7))"
+        } catch { Write-Error "Could not reach GitHub to determine the latest version: $_"; return }
+    }
 }
 
 $installed = if (Test-Path $VersionFile) { (Get-Content $VersionFile -Raw).Trim() } else { $null }
@@ -100,7 +128,9 @@ else {
         # Replace the installed scripts, but PRESERVE runtime data that lives under the install dir: the
         # shared package store (installed tools) and logs. Wiping these made installed packages vanish on
         # every update. (Other tools keep their own state under %ProgramData%\<tool>.)
-        $preserve = @('.version', 'Packages', 'Logs', 'PerfView', 'Monitor', 'Case', 'Icons')
+        # Stable keeps its machine-wide runtime data (shared tool store, logs, per-tool data) across updates.
+        # A branch dir holds only scripts - that data lives under the stable root - so only .version is kept.
+        $preserve = if ($EffBranch) { @('.version') } else { @('.version', 'Packages', 'Logs', 'PerfView', 'Monitor', 'Case', 'Icons') }
         Get-ChildItem $InstallDir -Force | Where-Object { $preserve -notcontains $_.Name } |
             Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
         Get-ChildItem $root.FullName -Force | Copy-Item -Destination $InstallDir -Recurse -Force

@@ -151,12 +151,19 @@ git tag -a $Tag -m "Release $Tag"
 git push $Remote $Tag
 
 # Tag is already pushed above, so the release binds to it; no --target (a short SHA there is rejected).
-$ghArgs = @('release', 'create', $Tag, '--title', $Tag, '--notes', $Notes)
+# Notes go via --notes-file, NEVER --notes: notes are multi-line and contain quotes, and passing them as a
+# native-exe command-line argument mangles them (gh then treats a fragment as a path and the create fails,
+# AFTER the tag/commit are already pushed). A file sidesteps all shell/arg quoting.
+$notesFile = Join-Path $env:TEMP ("rt_relnotes_{0}.md" -f $PID)
+[IO.File]::WriteAllText($notesFile, $Notes, (New-Object System.Text.UTF8Encoding($false)))
+$ghArgs = @('release', 'create', $Tag, '--title', $Tag, '--notes-file', $notesFile)
 if ($Draft)      { $ghArgs += '--draft' }
 if ($PreRelease) { $ghArgs += '--prerelease' }
 Info 'Creating GitHub release...'
 gh @ghArgs
-if ($LASTEXITCODE -ne 0) { Fail "gh release create failed. Tag was pushed; undo with: git push $Remote :$Tag ; git tag -d $Tag" }
+$ghCode = $LASTEXITCODE
+Remove-Item $notesFile -Force -ErrorAction SilentlyContinue
+if ($ghCode -ne 0) { Fail "gh release create failed. Tag was pushed; undo with: git push $Remote :$Tag ; git tag -d $Tag" }
 
 if ($UploadGetAsset) {
     if (Test-Path $GetScript) { Info 'Uploading Get.ps1 asset...'; gh release upload $Tag $GetScript --clobber }
