@@ -5,6 +5,15 @@ truth; each release is tagged `vX.Y.Z` and published as a GitHub release by `scr
 
 <!-- NEW RELEASES INSERTED BELOW -->
 
+## [v1.0.32] - 2026-10-26
+### Features
+- Dump fault-identification and known-issues de-duplication. Every crash, hang or exception dump is given a STABLE fault id (crash = faulting module+offset; hang / managed exception = the normalised managed call stack, walked with ClrMD using the .NET Framework DAC already on the machine). Occurrences are recorded per machine; the first dump of an issue is kept and later recurrences are counted and suppressed, so already-analysed problems stop piling up.
+- "Verify deps" button on the Packages tab: checks the environment the hang/exception walk relies on and proves it by walking a real dump on that machine.
+
+### Fixes
+- PerfView now caches symbols in its own dedicated Symbols subfolder instead of a shared/unset location.
+
+
 ## [v1.0.31] - 2026-10-25
 Changes since v1.0.30:
 
@@ -207,6 +216,7 @@ Changes since v1.0.0:
 - WPF/XAML launcher (GUI default, `-CLI` text menu) with shared light/dark theme.
 - Shared components (logging, admin/signature/prompt/version helpers) under `src/Common`.
 - Bootstrap installer (`src/Get.ps1` + `src/run.bat`) with version check against GitHub.
+
 
 
 
