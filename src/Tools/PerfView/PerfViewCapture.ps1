@@ -61,7 +61,7 @@ param(
 
 # =============================== VERSION =================================
 # Stamped automatically by scripts\New-Release.ps1 from the repo VERSION - do not edit by hand.
-$ScriptVersion = '1.0.37'
+$ScriptVersion = '1.0.38'
 
 # =============================== CONSTANTS ===============================
 $AppName     = 'PerfViewCapture'
