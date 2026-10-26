@@ -26,20 +26,5 @@ $script:LogMaxMB  = 10
 . (Join-Path $CommonDir 'Logging.ps1')
 . (Join-Path $CommonDir 'Common.ps1')
 . (Join-Path $CommonDir 'Packages.ps1')
-. (Join-Path $CommonDir 'DumpId.ps1')
-
-# Verify the ENVIRONMENT the dump fault-identifier depends on but does NOT install (the already-delivered
-# pieces: the box's own .NET Framework CLR + DAC, the system debug engine) and prove it by walking a real
-# dump on this machine. Emits text lines (streamed to the GUI). The "Verify deps" button calls this.
-function Test-Dependencies {
-    $clrmd = Resolve-PackageTool 'clrmd'
-    $dumpDir = 'C:\dumps'
-    $monCfg = Join-Path $env:ProgramData 'ReportingTroubleshooting\Monitor\config.json'
-    if (Test-Path $monCfg) { try { $d = (Get-Content $monCfg -Raw | ConvertFrom-Json).DumpDir; if ($d) { $dumpDir = $d } } catch {} }
-    "Verifying dependencies (environment the hang/exception identifier needs - not installed by us):"
-    $rows = Test-DumpWalkPrereqs -ClrMdDll $clrmd -DumpDir $dumpDir
-    foreach ($r in $rows) { "  [{0,-4}] {1} - {2}" -f $r.Status, $r.Name, $r.Detail }
-    $fail = @($rows | Where-Object { $_.Status -eq 'FAIL' }).Count
-    if ($fail) { "RESULT: $fail check(s) FAILED - crash ids still work, but hang/managed-exception (Tier-2) ids are unavailable until fixed." }
-    else { "RESULT: all required dependencies present - full crash + hang/managed-exception identification available." }
-}
+# (Fault-id dependency verification lives on the ProcDump Monitor tab - it is app-aware and runs in the
+# monitor runspace via Get-MonitorDepReport; the Packages tool only installs/resolves packages.)

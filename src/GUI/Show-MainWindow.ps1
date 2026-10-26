@@ -9,29 +9,55 @@ function Show-MainWindow {
     # table. Must be set before the window's HwndTarget is created (i.e. before XamlReader.Load/ShowDialog).
     try { [System.Windows.Media.RenderOptions]::ProcessRenderMode = [System.Windows.Interop.RenderMode]::SoftwareOnly } catch {}
 
-    $xaml   = Get-Content -Path $script:MainWindowSchema -Raw
-    $reader = [System.Xml.XmlReader]::Create([System.IO.StringReader]::new($xaml))
-    try { $w = [System.Windows.Markup.XamlReader]::Load($reader) } finally { $reader.Close() }
+    # Load a XAML file into an object (shell or a reusable tab control).
+    function script:Read-Xaml([string]$path) {
+        $x = Get-Content -Path $path -Raw
+        $r = [System.Xml.XmlReader]::Create([System.IO.StringReader]::new($x))
+        try { [System.Windows.Markup.XamlReader]::Load($r) } finally { $r.Close() }
+    }
+
+    # Shell window + each tab body as its own reusable control (Schemas\Tabs\*.xaml), injected into the
+    # matching TabItem. Keeping tabs in separate files makes them easy to maintain in isolation.
+    $w = script:Read-Xaml $script:MainWindowSchema
+    $tabsDir = Join-Path (Split-Path $script:MainWindowSchema -Parent) 'Tabs'
+    $script:TabPages = [ordered]@{
+        TabPackages = script:Read-Xaml (Join-Path $tabsDir 'PackagesTab.xaml')
+        TabPerfView = script:Read-Xaml (Join-Path $tabsDir 'PerfViewTab.xaml')
+        TabMonitor  = script:Read-Xaml (Join-Path $tabsDir 'MonitorTab.xaml')
+        TabCase     = script:Read-Xaml (Join-Path $tabsDir 'CaseTab.xaml')
+    }
+    foreach ($tabName in $script:TabPages.Keys) {
+        $tabItem = $w.FindName($tabName)
+        if (-not $tabItem) { throw "Shell is missing TabItem '$tabName'." }
+        $tabItem.Content = $script:TabPages[$tabName]
+    }
+
     Set-WindowThemeResources -window $w -usesDarkMode (Get-SystemUsesDarkMode)
     $script:FgBrush  = $w.Resources['AppFgColor']
     $script:IdBrush  = $w.Resources['AppIdColor']
     $script:ChipBg   = $w.Resources['CardHoverColor']
 
+    # Each XamlReader.Load makes its own name scope, so a named element lives in the shell OR one of the tab
+    # controls. Resolve every name across all of them.
+    $findScopes = @($w) + @($script:TabPages.Values)
     foreach ($n in 'TxtOutput','LblBusy','LblVersion',
                    'CmbPvProfile','TxtPvLabel','BtnPvStart','BtnPvStop','BtnPvAbort','TxtPvSeconds','BtnPvCollect','BtnPvOpen','BtnPvStatus','LblPvStatus',
                    'TxtPvProfName','PnlPvKernel','CmbPvClr','PnlPvProviders','TxtPvProvOther','TxtPvExtra','TxtPvCircular','TxtPvBuffer','BtnPvProfSave','BtnPvProfDelete','BtnPvProfDefault',
                    'TxtPvOutput','TxtPvSym','ChkPvMerge','ChkPvZip','BtnPvSettingsSave',
-                   'BtnMonInstall','BtnMonStart','BtnMonStop','BtnMonStatus','BtnMonUninstall','LblMonStatus','PnlMonConfig','BtnMonSave','BtnMonReload','ChkMonTail','TxtMonLog',
+                   'BtnMonInstall','BtnMonStart','BtnMonStop','BtnMonStatus','BtnMonUninstall','LblMonStatus','BtnMonVerify','LblMonVerify','PnlMonConfig','BtnMonSave','BtnMonReload','ChkMonTail','TxtMonLog',
                    'TxtCaseExe','BtnCaseBrowse','CmbCaseMode','ChkCaseFusion','ChkCaseAppConfig','TxtCaseTimeout','BtnCaseRun','LblCaseStatus',
-                   'BtnPkgInstallAll','BtnPkgRefresh','BtnPkgOpen','BtnPkgVerify','PnlPackages','LblPkgStatus',
+                   'BtnPkgInstallAll','BtnPkgRefresh','BtnPkgOpen','BtnPkgUpdate','LblPkgUpdate','PnlPackages','LblPkgStatus',
                    'BtnShortcut') {
-        Set-Variable -Name $n -Scope script -Value $w.FindName($n)
+        $el = $null
+        foreach ($s in $findScopes) { $el = $s.FindName($n); if ($el) { break } }
+        Set-Variable -Name $n -Scope script -Value $el
     }
     $script:LblVersion.Text = "v$ScriptVersion"
 
     $script:RsPv  = New-ToolRunspace -ToolPath $script:ToolPerfViewPath -Load
     $script:RsMon = New-ToolRunspace -ToolPath $script:ToolMonitorPath  -Load
     $script:RsPkg = New-ToolRunspace -ToolPath $script:ToolPackagesPath -Load
+    $script:RsUpd = New-ToolRunspace    # plain runspace for the lightweight GitHub update check (off the Pkg runspace)
     $script:Busy  = @{ Pv = $false; Mon = $false; Case = $false; Pkg = $false }
     $script:PvProfiles = @()
     $script:PvLoading  = $false
@@ -367,6 +393,13 @@ function Show-MainWindow {
     $script:BtnMonStop.Add_Click({ & $script:Append 'Monitor: stop...'; script:Invoke-Action 'Mon' $script:RsMon { Stop-MonitorTask (Read-Config) } @() $script:RefreshMon })
     $script:BtnMonStatus.Add_Click({ & $script:RefreshMon })
     $script:BtnMonUninstall.Add_Click({ & $script:Append 'Monitor: uninstall...'; script:Invoke-Action 'Mon' $script:RsMon { Invoke-Uninstall } @() $script:RefreshMon })
+    $script:BtnMonVerify.Add_Click({
+        if ($script:Busy['Mon']) { & $script:Append 'Monitor: busy - try again in a moment.'; return }
+        $script:LblMonVerify.Text = 'Verifying dependencies for the monitored apps (attaching briefly to each running app)...'
+        & $script:Append 'Monitor: verifying fault-id dependencies for the configured apps...'
+        $done = { $script:LblMonVerify.Text = 'Dependency check complete - details in Output above.' }
+        Start-ToolJob -Runspace $script:RsMon -Script { Get-MonitorDepReport } -OnText $script:Append -OnDone $done | Out-Null
+    })
     $script:BtnMonReload.Add_Click({ & $script:Append 'Monitor: reload config'; script:Build-MonEditor })
     $script:BtnMonSave.Add_Click({
         if ($script:MonCtls.Count -eq 0) { return }
@@ -446,16 +479,87 @@ function Show-MainWindow {
         $done = { $script:Busy['Pkg'] = $false; $script:LblPkgStatus.Text = 'Done.'; script:Build-PkgEditor }
         Start-ToolJob -Runspace $script:RsPkg -Script { Install-AllPackages | Out-Null } -OnText $script:Append -OnDone $done | Out-Null
     })
-    $script:BtnPkgVerify.Add_Click({
-        if ($script:Busy['Pkg']) { & $script:Append 'Packages: busy - try again in a moment.'; return }
-        $script:Busy['Pkg'] = $true; $script:LblPkgStatus.Text = 'Verifying dependencies...'
-        & $script:Append 'Packages: verifying dependencies (this opens a sample dump - a few seconds)...'
-        $done = { $script:Busy['Pkg'] = $false; $script:LblPkgStatus.Text = 'Dependency check done.' }
-        Start-ToolJob -Runspace $script:RsPkg -Script { Test-Dependencies } -OnText $script:Append -OnDone $done | Out-Null
-    })
     $script:BtnPkgRefresh.Add_Click({ script:Build-PkgEditor })
     $script:BtnPkgOpen.Add_Click({
         Start-ToolJob -Runspace $script:RsPkg -Script { $d = Get-PackageRoot; New-Item -ItemType Directory -Path $d -Force | Out-Null; Start-Process explorer.exe $d; "opened $d" } -OnText $script:Append | Out-Null
+    })
+
+    # ---------- App self-update (stable follows releases; a branch build follows its branch head) ----------
+    # Install context: ToolkitRoot is ...\src, so the install root is its parent. A branch build lives under
+    # ...\branch\<name> and records the real branch in a .branch marker (the folder name is sanitised).
+    $script:InstallRoot     = Split-Path $script:ToolkitRoot -Parent
+    $script:IsBranchInstall = [bool]($script:InstallRoot -match '\\branch\\')
+    $script:BranchName      = if (Test-Path (Join-Path $script:InstallRoot '.branch')) { (Get-Content (Join-Path $script:InstallRoot '.branch') -Raw).Trim() }
+                              elseif ($script:IsBranchInstall) { Split-Path $script:InstallRoot -Leaf } else { '' }
+    $script:UpdateAvailable = $false
+
+    # Runs in the dedicated RsUpd runspace (self-contained, built-in cmdlets only) and returns ONE sentinel
+    # line the UI parses. Stable = latest release tag; branch build = that branch's head sha.
+    $script:UpdateCheckSB = {
+        param($installRoot, $isBranch, $branchName)
+        $Owner = 'mcpolo99'; $Repo = 'reporting-troubleshooting'; $ApiBase = "https://api.github.com/repos/$Owner/$Repo"
+        [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
+        $h = @{ 'User-Agent' = 'reporting-troubleshooting-update' }
+        $verFile = Join-Path $installRoot '.version'
+        $current = if (Test-Path $verFile) { (Get-Content $verFile -Raw).Trim() } else { '' }
+        try {
+            if ($isBranch) {
+                $latest  = (Invoke-RestMethod "$ApiBase/commits/$branchName" -Headers $h).sha
+                $chan    = "branch $branchName"
+                $latDisp = $latest.Substring(0, 7)
+                $curDisp = if ($current) { $current.Substring(0, [Math]::Min(7, $current.Length)) } else { '(unknown)' }
+            } else {
+                $latest  = (Invoke-RestMethod "$ApiBase/releases/latest" -Headers $h).tag_name
+                $chan    = 'release'
+                $latDisp = "$latest"; $curDisp = if ($current) { "$current" } else { '(unknown)' }
+            }
+            $avail = if ($current -and "$current" -ne "$latest") { 1 } else { 0 }
+            "RTUPDATE|$avail|$curDisp|$latDisp|$chan"
+        } catch { "RTUPDATE|err|$current||$($_.Exception.Message)" }
+    }
+
+    # Parses the sentinel on the UI thread and sets the button + status line.
+    $script:OnUpdateText = {
+        param($line)
+        if ("$line" -notlike 'RTUPDATE|*') { & $script:Append $line; return }
+        $p = "$line" -split '\|', 5
+        $avail = $p[1]; $cur = $p[2]; $lat = $p[3]; $chan = $p[4]
+        if ($avail -eq 'err') {
+            $script:UpdateAvailable = $false
+            $script:BtnPkgUpdate.Content = 'Check for updates'
+            $script:LblPkgUpdate.Text = "Update check failed: $chan"
+        } elseif ($avail -eq '1') {
+            $script:UpdateAvailable = $true
+            $script:BtnPkgUpdate.Content = "Update now -> $lat"
+            $script:LblPkgUpdate.Text = "Update available ($chan): $cur -> $lat. Click 'Update now' to install and relaunch."
+        } else {
+            $script:UpdateAvailable = $false
+            $script:BtnPkgUpdate.Content = 'Check for updates'
+            $script:LblPkgUpdate.Text = "Up to date ($chan $lat)."
+        }
+    }
+
+    function script:Check-ForUpdate {
+        $script:LblPkgUpdate.Text = 'Checking for updates...'
+        Start-ToolJob -Runspace $script:RsUpd -Script $script:UpdateCheckSB `
+            -ArgList @($script:InstallRoot, $script:IsBranchInstall, $script:BranchName) -OnText $script:OnUpdateText | Out-Null
+    }
+
+    # Re-bootstrap via the online installer on the right channel; it installs the newer build and relaunches,
+    # then this window closes. (Already elevated; Get.ps1 self-elevates anyway.)
+    function script:Do-AppUpdate {
+        $raw = 'https://raw.githubusercontent.com/mcpolo99/reporting-troubleshooting/main/src/Get.ps1'
+        $cmd = if ($script:IsBranchInstall) { "& ([scriptblock]::Create((irm '$raw'))) -Branch `"$($script:BranchName)`"" }
+               else { "& ([scriptblock]::Create((irm '$raw')))" }
+        try {
+            Start-Process powershell.exe -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', $cmd)
+            & $script:Append 'Update started in a new window - it will install the new version and reopen the app. Closing...'
+            if ($script:MainWin) { $script:MainWin.Close() }
+        } catch { & $script:Append "Could not start the update: $($_.Exception.Message)" }
+    }
+
+    $script:BtnPkgUpdate.Add_Click({
+        if ($script:UpdateAvailable) { script:Do-AppUpdate } else { script:Check-ForUpdate }
     })
 
     # ---------- Case ----------
@@ -511,6 +615,8 @@ function Show-MainWindow {
     try { script:Build-MonEditor } catch { & $script:Append "Monitor config load failed: $($_.Exception.Message)" }
     try { script:Build-PkgEditor } catch { & $script:Append "Package status load failed: $($_.Exception.Message)" }
     & $script:RefreshPv; & $script:RefreshMon
+    # Non-blocking check on startup: enable the update button / status line if a newer build exists.
+    try { script:Check-ForUpdate } catch { & $script:Append "Update check failed: $($_.Exception.Message)" }
 
     # Last-resort guard: a stray exception on the UI thread (a bad event handler) must not kill the window.
     # Show it in the output, write the full detail to a log, and keep the app alive.
@@ -573,8 +679,9 @@ function Show-MainWindow {
                 else { script:Stop-PerfViewHard }
             }
         } catch { script:Stop-PerfViewHard }
-        foreach ($rs in @($script:RsPv, $script:RsMon, $script:RsPkg)) { try { $rs.Close() } catch {} }
+        foreach ($rs in @($script:RsPv, $script:RsMon, $script:RsPkg, $script:RsUpd)) { try { $rs.Close() } catch {} }
     })
 
+    $script:MainWin = $w
     [void]$w.ShowDialog()
 }

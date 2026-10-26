@@ -1,4 +1,4 @@
-# Shared stable-fault-signature engine. Dot-source it (after Common.ps1). Defines functions only.
+﻿# Shared stable-fault-signature engine. Dot-source it (after Common.ps1). Defines functions only.
 #
 # Purpose: give every crash/hang/exception dump a STABLE id that is identical iff the fault is the
 # same - even across machines and dump files - so already-analysed problems can be deduplicated. The
@@ -247,68 +247,76 @@ function Invoke-DumpWalk {
     }
 }
 
-# =============================== PREREQUISITE VERIFY ===================
-# Verify the ENVIRONMENT the Tier-2 walk depends on but does NOT install - the pieces that are assumed to
-# already be on a prod box (its own .NET Framework CLR + matching DAC, the system debug engine). A dev box
-# has these for other reasons, so the only trustworthy check is to actually walk a real dump ON THAT box.
-# Returns an array of @{ Name; Status = OK|FAIL|WARN|SKIP; Detail }.
-function Test-DumpWalkPrereqs {
-    param([string]$ClrMdDll, [string]$DumpDir, [string]$SampleDump)
-    $checks = @()
-    $add = { param($n, $s, $d) $script:__c += ,([pscustomobject]@{ Name = $n; Status = $s; Detail = $d }) }
-    $script:__c = @()
-
-    # 1) .NET Framework 4.x runtime (needed to run ClrMD and present wherever bSuite runs)
+# Append a capability gap to KnownIssues\gaps.jsonl - things the tool could not do on this machine (a
+# missing walk tool, an unsupported runtime, an attach failure). Surfaces what to improve.
+function Add-DepGap([string]$Area, [string]$Detail, [string]$Dir) {
+    if (-not $Dir) { $Dir = Get-KnownIssuesDir }
     try {
-        $ndp = Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\NET Framework Setup\NDP\v4\Full' -ErrorAction Stop
-        if ($ndp.Release) { & $add '.NET Framework 4.x' 'OK' ("Release $($ndp.Release), version $($ndp.Version)") }
-        else { & $add '.NET Framework 4.x' 'WARN' 'v4\Full present but no Release value' }
-    } catch { & $add '.NET Framework 4.x' 'FAIL' 'not found in registry (NDP\v4\Full)' }
+        if (-not (Test-Path -LiteralPath $Dir)) { New-Item -ItemType Directory -Path $Dir -Force | Out-Null }
+        $rec = @{ ts = (Get-Date).ToUniversalTime().ToString('o'); machine = (Get-MachineKey); computer = $env:COMPUTERNAME; area = $Area; detail = $Detail }
+        Add-Content -LiteralPath (Join-Path $Dir 'gaps.jsonl') -Value ($rec | ConvertTo-Json -Compress) -Encoding UTF8
+    } catch {}
+}
 
-    # 2) system debug engine (built into Windows; ClrMD/cdb use it)
-    foreach ($m in 'dbgeng.dll', 'dbghelp.dll') {
-        $p = Join-Path $env:SystemRoot "System32\$m"
-        if (Test-Path $p) { & $add $m 'OK' $p } else { & $add $m 'WARN' "missing: $p" }
+# Passively attach to a LIVE process (read-only, no suspend, no dump) and try to create its CLR runtime -
+# the no-dump proof that this machine can fault-identify that app. Returns @{ Managed; Flavor; Clr; Ok; Error }.
+function Test-AppWalkable([int]$ProcessId, [string]$ClrMdDll) {
+    if (-not ($ClrMdDll -and (Test-Path -LiteralPath $ClrMdDll))) { return @{ Managed = $null; Ok = $false; Error = 'ClrMD not installed' } }
+    if (-not $script:ClrMdLoaded) { try { Add-Type -Path $ClrMdDll -ErrorAction Stop; $script:ClrMdLoaded = $true } catch { return @{ Managed = $null; Ok = $false; Error = "ClrMD load failed: $($_.Exception.Message)" } } }
+    $dt = $null
+    try {
+        $dt = [Microsoft.Diagnostics.Runtime.DataTarget]::AttachToProcess($ProcessId, 5000, [Microsoft.Diagnostics.Runtime.AttachFlag]::Passive)
+        $clr = $dt.ClrVersions | Select-Object -First 1
+        if (-not $clr) { return @{ Managed = $false; Flavor = 'native'; Ok = $true } }   # no CLR = unmanaged; crash ids via module+offset
+        try { [void]$clr.CreateRuntime(); return @{ Managed = $true; Flavor = "$($clr.Flavor)"; Clr = "$($clr.Version)"; Ok = $true } }
+        catch { return @{ Managed = $true; Flavor = "$($clr.Flavor)"; Clr = "$($clr.Version)"; Ok = $false; Error = $_.Exception.Message } }
+    } catch {
+        return @{ Managed = $null; Ok = $false; Error = $_.Exception.Message }
+    } finally {
+        if ($dt) { try { $dt.Dispose() } catch {} }
+        [GC]::Collect(); [GC]::WaitForPendingFinalizers()
     }
+}
 
-    # 3) a Framework DAC/SOS on disk (ClrMD can also take the DAC from the dump's own path, so this is WARN)
-    $dac = @(Get-ChildItem (Join-Path $env:SystemRoot 'Microsoft.NET\Framework64') -Filter 'mscordacwks.dll' -Recurse -ErrorAction SilentlyContinue)
-    if ($dac.Count) { & $add 'Framework DAC (mscordacwks)' 'OK' ("$($dac.Count) found, e.g. $($dac[0].FullName)") }
-    else { & $add 'Framework DAC (mscordacwks)' 'WARN' 'none on disk - ClrMD will try the DAC referenced by each dump' }
-
-    # 4) ClrMD DLL present and loadable
+# Verify the fault-id capability for the MONITORED APPS on this machine - WITHOUT needing a dump. Checks the
+# base deps (ClrMD, debug engine), then for each app detects its runtime from the live process and proves the
+# walker can load it (passive attach). Logs any gap. Returns rows @{ Name; Status = OK|FAIL|WARN|SKIP; Detail }.
+function Test-MonitorDependencies {
+    param([string[]]$Apps, [string]$ClrMdDll, [string]$Dir)
+    $rows = @()
+    # base: walker + system debug engine
     if ($ClrMdDll -and (Test-Path -LiteralPath $ClrMdDll)) {
         $sig = (Get-AuthenticodeSignature $ClrMdDll).Status
-        try { Add-Type -Path $ClrMdDll -ErrorAction Stop; $script:ClrMdLoaded = $true; & $add 'ClrMD library' 'OK' "loaded ($sig signature)" }
-        catch { & $add 'ClrMD library' 'FAIL' "present but failed to load: $($_.Exception.Message)" }
-    } else { & $add 'ClrMD library' 'FAIL' 'not installed - install the clrmd package' }
-
-    # 5) THE REAL PROOF: walk an actual dump on this machine
-    $sample = $SampleDump
-    if (-not $sample -and $DumpDir -and (Test-Path $DumpDir)) {
-        $sample = (Get-ChildItem $DumpDir -Filter *.dmp -File -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending | Select-Object -First 1).FullName
-    }
-    if (-not $sample) {
-        & $add 'Functional walk' 'SKIP' 'no .dmp available to test - capture one dump, then re-verify'
-    } elseif (-not ($ClrMdDll -and (Test-Path -LiteralPath $ClrMdDll))) {
-        & $add 'Functional walk' 'SKIP' 'ClrMD not installed'
+        $rows += [pscustomobject]@{ Name = 'ClrMD walker'; Status = 'OK'; Detail = "installed ($sig signature)" }
     } else {
-        # Auto thread selection (Dispatcher / most-managed) so the test demonstrates a managed walk even
-        # when the sample is a crash whose faulting thread is native. The point is: can ClrMD load this
-        # machine's CLR and walk managed code at all?
-        $name = [IO.Path]::GetFileName($sample)
-        $walk = Invoke-DumpWalk -Path $sample -ClrMdDll $ClrMdDll -TargetOSID 0
-        if ($walk -and $walk.Frames.Count) {
-            & $add 'Functional walk' 'OK' ("{0}: CLR loaded, {1} managed frame(s), leaf '{2}'" -f $name, $walk.Frames.Count, $walk.Frames[0])
-        } elseif ($walk) {
-            & $add 'Functional walk' 'OK' ("{0}: CLR loaded OK (sample had no managed frames to walk)" -f $name)
+        $rows += [pscustomobject]@{ Name = 'ClrMD walker'; Status = 'FAIL'; Detail = 'not installed - install it on the Packages tab (needed for hang/managed ids)' }
+        Add-DepGap 'clrmd-missing' 'ClrMD walker not installed' $Dir
+    }
+    $dbg = Join-Path $env:SystemRoot 'System32\dbgeng.dll'
+    $rows += [pscustomobject]@{ Name = 'Debug engine'; Status = $(if (Test-Path $dbg) { 'OK' } else { 'WARN' }); Detail = $dbg }
+
+    foreach ($app in @($Apps)) {
+        if (-not "$app".Trim()) { continue }
+        $procName = [IO.Path]::GetFileNameWithoutExtension("$app")
+        $procs = @(Get-Process -Name $procName -ErrorAction SilentlyContinue)
+        if (-not $procs.Count) {
+            $rows += [pscustomobject]@{ Name = "App: $app"; Status = 'WARN'; Detail = 'not running now - start it and re-verify to detect its runtime' }
+            continue
+        }
+        $r = Test-AppWalkable -ProcessId $procs[0].Id -ClrMdDll $ClrMdDll
+        if ($r.Managed -eq $false) {
+            $rows += [pscustomobject]@{ Name = "App: $app"; Status = 'OK'; Detail = "native/unmanaged (PID $($procs[0].Id)) - crash ids via module+offset; no managed walk needed" }
+        } elseif ($r.Managed -and $r.Ok) {
+            $rows += [pscustomobject]@{ Name = "App: $app"; Status = 'OK'; Detail = "$($r.Flavor) CLR $($r.Clr) (PID $($procs[0].Id)) - walkable, hang/managed ids available" }
+        } elseif ($r.Managed -and -not $r.Ok) {
+            $rows += [pscustomobject]@{ Name = "App: $app"; Status = 'FAIL'; Detail = "$($r.Flavor) CLR $($r.Clr) but the walker could not load it: $($r.Error)" }
+            Add-DepGap 'walk-failed' ("$app ($($r.Flavor) $($r.Clr)): $($r.Error)") $Dir
         } else {
-            & $add 'Functional walk' 'FAIL' ("{0}: ClrMD could not load the CLR (DAC mismatch?) - Tier-2 ids unavailable on this box" -f $name)
+            $rows += [pscustomobject]@{ Name = "App: $app"; Status = 'FAIL'; Detail = "could not probe (PID $($procs[0].Id)): $($r.Error)" }
+            Add-DepGap 'probe-failed' ("$app`: $($r.Error)") $Dir
         }
     }
-
-    $out = $script:__c; Remove-Variable __c -Scope script -ErrorAction SilentlyContinue
-    return $out
+    return $rows
 }
 
 # =============================== LOCAL REGISTRY =========================
@@ -481,6 +489,11 @@ function Invoke-DumpTriage {
     }
 
     $idObj = Get-DumpStableId $sig
+    # A Tier-2 kind (hang / managed exception) with no frames means the managed walk could not run (ClrMD
+    # missing or the walk failed) - the id stays provisional and the dump is kept. Record the gap.
+    if ($idObj.WalkPending -and $sig.Kind -ne 'crash') {
+        Add-DepGap 'tier2-unavailable' ("$($sig.Kind) dump $([IO.Path]::GetFileName($DumpPath)): managed walk unavailable (ClrMD missing or failed) - id provisional, dump kept") $Dir
+    }
     $res = Register-DumpOccurrence -IdObj $idObj -Sig $sig -DumpPath $DumpPath -Dir $Dir -BaselinePath $BaselinePath -SuppressKnown $SuppressKnown
     $res.Kind = $sig.Kind
     $res.Leaf = if ($sig.Frames -and $sig.Frames.Count) { $sig.Frames[0] } elseif ($sig.Module) { '{0}+0x{1:x}' -f $sig.Module, $sig.Offset } else { '' }

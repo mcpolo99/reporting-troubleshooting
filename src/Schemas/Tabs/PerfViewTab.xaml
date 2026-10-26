@@ -1,0 +1,83 @@
+<ScrollViewer xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+              xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+              VerticalScrollBarVisibility="Auto">
+  <StackPanel Margin="14">
+    <TextBlock Text="Performance tracing (ETW/ETL) with size-capped profiles. Install PerfView from the Packages tab." Foreground="{DynamicResource AppIdColor}" TextWrapping="Wrap" Margin="0,0,0,10"/>
+    <StackPanel Orientation="Horizontal" Margin="0,0,0,8">
+      <TextBlock Text="Profile:" Foreground="{DynamicResource AppFgColor}" VerticalAlignment="Center" Width="60"/>
+      <ComboBox x:Name="CmbPvProfile" Width="170" VerticalAlignment="Center"/>
+      <TextBlock Text="Label:" Foreground="{DynamicResource AppFgColor}" VerticalAlignment="Center" Width="50" Margin="16,0,0,0"/>
+      <TextBox x:Name="TxtPvLabel" Width="150" VerticalAlignment="Center"/>
+    </StackPanel>
+    <StackPanel Orientation="Horizontal" Margin="0,0,0,8">
+      <Button x:Name="BtnPvStart" Content="Start trace" Height="30" MinWidth="110" Margin="0,0,8,0"/>
+      <Button x:Name="BtnPvStop"  Content="Stop trace"  Height="30" MinWidth="110" Margin="0,0,8,0"/>
+      <Button x:Name="BtnPvAbort" Content="Abort"        Height="30" MinWidth="80"/>
+    </StackPanel>
+    <StackPanel Orientation="Horizontal" Margin="0,0,0,8">
+      <TextBlock Text="Timed (sec):" Foreground="{DynamicResource AppFgColor}" VerticalAlignment="Center" Width="80"/>
+      <TextBox x:Name="TxtPvSeconds" Text="600" Width="70" VerticalAlignment="Center" Margin="0,0,8,0"/>
+      <Button x:Name="BtnPvCollect" Content="Timed collect" Height="30" MinWidth="120"/>
+    </StackPanel>
+    <StackPanel Orientation="Horizontal" Margin="0,0,0,10">
+      <Button x:Name="BtnPvOpen"   Content="Open output folder" Height="30" MinWidth="150" Margin="0,0,8,0"/>
+      <Button x:Name="BtnPvStatus" Content="Refresh status"     Height="30" MinWidth="120"/>
+    </StackPanel>
+    <TextBlock x:Name="LblPvStatus" Foreground="{DynamicResource AppIdColor}" TextWrapping="Wrap" Margin="0,0,0,12"/>
+
+    <Border BorderBrush="{DynamicResource AppIdColor}" BorderThickness="0,1,0,0" Margin="0,0,0,10"/>
+    <TextBlock Text="Profile / logging settings" Foreground="{DynamicResource AppFgColor}" FontWeight="SemiBold" Margin="0,0,0,8"/>
+    <StackPanel Margin="0,0,0,8">
+      <StackPanel Orientation="Horizontal" Margin="0,2">
+        <TextBlock Text="Name" Foreground="{DynamicResource AppFgColor}" VerticalAlignment="Center" Width="110"/>
+        <TextBox x:Name="TxtPvProfName" Width="300"/>
+      </StackPanel>
+
+      <TextBlock Text="Kernel events" Foreground="{DynamicResource AppFgColor}" Margin="0,8,0,2"/>
+      <WrapPanel x:Name="PnlPvKernel" Margin="0,0,0,4"/>
+
+      <StackPanel Orientation="Horizontal" Margin="0,4">
+        <TextBlock Text="CLR events" Foreground="{DynamicResource AppFgColor}" VerticalAlignment="Center" Width="110"/>
+        <ComboBox x:Name="CmbPvClr" Width="180" IsEditable="True"/>
+      </StackPanel>
+
+      <TextBlock Text="Providers" Foreground="{DynamicResource AppFgColor}" Margin="0,8,0,2"/>
+      <WrapPanel x:Name="PnlPvProviders" Margin="0,0,0,4"/>
+      <StackPanel Orientation="Horizontal" Margin="0,2">
+        <TextBlock Text="Other providers" Foreground="{DynamicResource AppFgColor}" VerticalAlignment="Center" Width="110"/>
+        <TextBox x:Name="TxtPvProvOther" Width="300"/>
+      </StackPanel>
+
+      <StackPanel Orientation="Horizontal" Margin="0,8,0,2">
+        <TextBlock Text="Extra args" Foreground="{DynamicResource AppFgColor}" VerticalAlignment="Center" Width="110"/>
+        <TextBox x:Name="TxtPvExtra" Width="300"/>
+      </StackPanel>
+      <StackPanel Orientation="Horizontal" Margin="0,4,0,0">
+        <TextBlock Text="Circular MB" Foreground="{DynamicResource AppFgColor}" VerticalAlignment="Center" Width="110"/>
+        <TextBox x:Name="TxtPvCircular" Width="70" Margin="0,0,16,0"/>
+        <TextBlock Text="Buffer MB" Foreground="{DynamicResource AppFgColor}" VerticalAlignment="Center" Margin="0,0,6,0"/>
+        <TextBox x:Name="TxtPvBuffer" Width="70"/>
+      </StackPanel>
+    </StackPanel>
+    <StackPanel Orientation="Horizontal" Margin="0,0,0,12">
+      <Button x:Name="BtnPvProfSave"    Content="Save profile" Height="28" MinWidth="100" Margin="0,0,8,0"/>
+      <Button x:Name="BtnPvProfDelete"  Content="Delete"       Height="28" MinWidth="70"  Margin="0,0,8,0"/>
+      <Button x:Name="BtnPvProfDefault" Content="Set default"  Height="28" MinWidth="90"/>
+    </StackPanel>
+
+    <TextBlock Text="Global settings" Foreground="{DynamicResource AppFgColor}" FontWeight="SemiBold" Margin="0,0,0,8"/>
+    <Grid Margin="0,0,0,8">
+      <Grid.ColumnDefinitions><ColumnDefinition Width="110"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+      <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
+      <TextBlock Grid.Row="0" Grid.Column="0" Text="OutputDir"  Foreground="{DynamicResource AppFgColor}" VerticalAlignment="Center" Margin="0,2"/>
+      <TextBox   Grid.Row="0" Grid.Column="1" x:Name="TxtPvOutput" Margin="0,2"/>
+      <TextBlock Grid.Row="1" Grid.Column="0" Text="SymbolPath" Foreground="{DynamicResource AppFgColor}" VerticalAlignment="Center" Margin="0,2"/>
+      <TextBox   Grid.Row="1" Grid.Column="1" x:Name="TxtPvSym" Margin="0,2"/>
+      <StackPanel Grid.Row="2" Grid.Column="1" Orientation="Horizontal" Margin="0,4,0,0">
+        <CheckBox x:Name="ChkPvMerge" Content="Merge on stop" Foreground="{DynamicResource AppFgColor}" Margin="0,0,16,0"/>
+        <CheckBox x:Name="ChkPvZip"   Content="Zip on stop"   Foreground="{DynamicResource AppFgColor}"/>
+      </StackPanel>
+    </Grid>
+    <Button x:Name="BtnPvSettingsSave" Content="Save settings" Height="28" MinWidth="110" HorizontalAlignment="Left"/>
+  </StackPanel>
+</ScrollViewer>

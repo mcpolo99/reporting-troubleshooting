@@ -176,6 +176,24 @@ function Install-TriageWorker {
     Write-Log "Fault-id worker copied to $InstalledTriage"
 }
 
+# Verify the fault-id dependencies for the CONFIGURED apps on this machine (no dump needed) and emit a
+# readable report. Backs the Monitor tab's "Verify deps" button (run in the monitor runspace). Gaps are
+# logged to KnownIssues\gaps.jsonl by the engine.
+function Get-MonitorDepReport {
+    $cfg   = Read-Config
+    $clrmd = Resolve-PackageTool 'clrmd'
+    "Fault-id dependency check for the monitored apps on $env:COMPUTERNAME:"
+    $apps = @($cfg.Apps | Where-Object { "$_".Trim() })
+    if (-not $apps.Count) { "  (no apps configured yet - add apps in the config editor below, then re-verify)" }
+    $rows = Test-MonitorDependencies -Apps $apps -ClrMdDll $clrmd
+    foreach ($r in $rows) { "  [{0,-4}] {1} - {2}" -f $r.Status, $r.Name, $r.Detail }
+    $fail = @($rows | Where-Object { $_.Status -eq 'FAIL' }).Count
+    $warn = @($rows | Where-Object { $_.Status -eq 'WARN' }).Count
+    if ($fail) { "RESULT: $fail dependency problem(s) - crash ids still work, but hang/managed-exception ids are unavailable where failed (logged to KnownIssues\gaps.jsonl)." }
+    elseif ($warn) { "RESULT: no failures; $warn app(s) not running - start them and re-verify for a full check." }
+    else { "RESULT: all monitored apps can be fault-identified on this machine." }
+}
+
 # Install ClrMD (managed stack-walker) when known-issues dedupe is on, so hang/managed-exception ids work.
 function Install-KnownIssuesDeps($cfg) {
     if (-not $cfg.KnownIssuesEnabled) { return }

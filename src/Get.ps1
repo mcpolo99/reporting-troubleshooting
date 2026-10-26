@@ -130,7 +130,7 @@ else {
         # every update. (Other tools keep their own state under %ProgramData%\<tool>.)
         # Stable keeps its machine-wide runtime data (shared tool store, logs, per-tool data) across updates.
         # A branch dir holds only scripts - that data lives under the stable root - so only .version is kept.
-        $preserve = if ($EffBranch) { @('.version') } else { @('.version', 'Packages', 'Logs', 'PerfView', 'Monitor', 'Case', 'Icons') }
+        $preserve = if ($EffBranch) { @('.version', '.branch') } else { @('.version', 'Packages', 'Logs', 'PerfView', 'Monitor', 'Case', 'Icons') }
         Get-ChildItem $InstallDir -Force | Where-Object { $preserve -notcontains $_.Name } |
             Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
         Get-ChildItem $root.FullName -Force | Copy-Item -Destination $InstallDir -Recurse -Force
@@ -138,6 +138,9 @@ else {
             ForEach-Object { Unblock-File $_.FullName -ErrorAction SilentlyContinue }
 
         Set-Content -Path $VersionFile -Value $ref -Encoding ASCII
+        # Record the real branch name (the folder name is sanitised and may differ, e.g. feature/foo ->
+        # feature-foo) so the in-app updater can re-install the same branch.
+        if ($EffBranch) { Set-Content -Path (Join-Path $InstallDir '.branch') -Value $EffBranch -Encoding ASCII }
         Write-Host "> Installed to $InstallDir"
     }
     catch { Write-Error "Install failed: $_"; return }
