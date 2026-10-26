@@ -9,20 +9,22 @@
   ProcDump capture stays TEMPORARY - it is delegated to ProcDumpCase.ps1 and nothing is installed.
 
 .USAGE
-  Interactive (menu: setup, install, status, start/stop, timed collect, abort, procdump):
+  Interactive (menu: setup, install, status, start/stop capture, abort, procdump):
       powershell -ExecutionPolicy Bypass -File .\PerfViewCapture.ps1
   Unattended:
       ...\PerfViewCapture.ps1 -Install
-      ...\PerfViewCapture.ps1 -Start [-Profile Balanced] [-Label 6.0.0.222]
-      ...\PerfViewCapture.ps1 -Stop
-      ...\PerfViewCapture.ps1 -CollectTimed -Seconds 600 [-Profile Full] [-Label x] [-StopOnEvent]
+      ...\PerfViewCapture.ps1 -Start [-Profile Balanced] [-Label 6.0.0.222] [-Seconds 0]
+      ...\PerfViewCapture.ps1 -Stop                    # stop the running capture (fires the stop event)
       ...\PerfViewCapture.ps1 -Abort
       ...\PerfViewCapture.ps1 -Status
-      ...\PerfViewCapture.ps1 -SendStopEvent          # fires the stop event for a -StopOnEvent collect
+      ...\PerfViewCapture.ps1 -SendStopEvent           # same as -Stop: fires the stop event
       ...\PerfViewCapture.ps1 -Uninstall
 
-  Start begins a background trace and returns immediately; Stop merges + zips and reports the file.
-  Timed collect blocks for -Seconds (or until the stop event) - use it for unattended capture.
+  ONE capture model for every trace: -Start runs a single PerfView 'collect' that ALWAYS arms the stop
+  event, so it can be stopped at any time with -Stop (or from the GUI, or by any process writing the
+  event). -Seconds adds a hard time cap ONLY when > 0; -Seconds 0 (default) means no limit - it runs
+  until stopped. On stop it merges + zips and reports the output file. -CollectTimed is a kept alias for
+  -Start (the stop event is always on now). -Abort force-cancels a stuck session WITHOUT saving data.
 
 .VERSION
   $ScriptVersion is stamped automatically from the repo VERSION by scripts\New-Release.ps1 at release time -
@@ -45,7 +47,7 @@ param(
     [switch]$Start,
     [switch]$Stop,
     [switch]$CollectTimed,
-    [ValidateRange(1, 86400)][int]$Seconds = 600,
+    [ValidateRange(0, 86400)][int]$Seconds = 0,   # 0 = no time cap (stop with -Stop / the event)
     [switch]$StopOnEvent,
     [switch]$Abort,
     [switch]$Status,
@@ -284,7 +286,7 @@ function Watch-PerfViewProgress([System.Diagnostics.Process]$Proc, [string]$LogP
                 } finally { $fs.Dispose() }
             } catch { }
         }
-        if (((Get-Date) - $lastEmit).TotalSeconds -ge 10) {
+        if (((Get-Date) - $lastEmit).TotalSeconds -ge 30) {   # 30s heartbeat: enough for liveness without flooding a long capture
             Write-Log ("{0}: working... {1}s elapsed" -f $What, [int]((Get-Date) - $started).TotalSeconds)
             $lastEmit = Get-Date
         }
@@ -321,89 +323,76 @@ function Get-OutFile($cfg, $p, [string]$Label) {
     Join-Path $cfg.OutputDir $name
 }
 
-function Start-Trace([string]$ProfileName, [string]$Label) {
+# ONE capture model for every trace: a single `collect` that always arms the stop event
+# (/StopOnEventLogMessage) so ANY trace can be stopped on demand with Stop-Trace, and adds a hard time
+# cap (/MaxCollectSec) ONLY when MaxSeconds > 0 (0 = run until Stop / the event, no time limit). This
+# call blocks (streaming progress) for the whole trace, then merges+zips and reports the file. Stop it
+# from anywhere - even another process or the GUI while this is running - by firing the event (Stop-Trace).
+function Start-Trace([string]$ProfileName, [string]$Label, [int]$MaxSeconds = 0) {
     $cfg = Read-Config
     $active = Read-ActiveState
     if ($active) {
-        Write-Log "A trace is already active (session '$($active.SessionName)', file $($active.OutFile)). Stop or Abort it first." 'WARN'
+        Write-Log "A trace is already active (profile '$($active.Profile)', file $($active.OutFile)). Stop or Abort it first." 'WARN'
         return
     }
     $p = Get-Profile $cfg $ProfileName
     New-Item -ItemType Directory -Path $cfg.OutputDir -Force | Out-Null
     $out = Get-OutFile $cfg $p $Label
-
-    $args = (Get-ProfileArgs $p) + @('start', $out)
-    $code = Invoke-PerfView $args "Start trace (profile '$($p.Name)')"
-    if ($code -eq 0) {
-        Save-ActiveState ([pscustomobject]@{
-            SessionName = $SessionName
-            OutFile     = $out
-            Profile     = $p.Name
-            Label       = $Label
-            StartedUtc  = (Get-Date).ToUniversalTime().ToString('o')
-        })
-        if ($Label) { $cfg.LastLabel = $Label; Save-Config $cfg }
-        Write-Log "Trace started. Output on stop: $out (+ .zip). Reproduce the problem, then run Stop."
-    } else {
-        Write-Log 'Start failed - no active trace recorded. Check the PerfView log.' 'ERROR'
-        $script:ExitCode = 1
-    }
-}
-
-function Stop-Trace {
-    $cfg = Read-Config
-    $active = Read-ActiveState
-    if (-not $active) { Write-Log 'No active trace recorded. If a session is orphaned, use Abort.' 'WARN'; return }
-
-    $env:_NT_SYMBOL_PATH = Get-SymbolPath $cfg; Write-Log "_NT_SYMBOL_PATH = $($env:_NT_SYMBOL_PATH)"
-    $args = @('stop', "/Merge:$([bool]$cfg.Merge)", "/Zip:$([bool]$cfg.Zip)")
-    $code = Invoke-PerfView $args 'Stop trace'
-    if ($code -eq 0) {
-        Clear-ActiveState
-        $etl = $active.OutFile
-        $zip = "$etl.zip"
-        foreach ($f in @($zip, $etl)) {
-            if (Test-Path $f) {
-                $mb = [math]::Round((Get-Item $f).Length / 1MB, 1)
-                Write-Log ("Trace written: {0} ({1} MB)" -f $f, $mb)
-            }
-        }
-        if (-not (Test-Path $zip) -and -not (Test-Path $etl)) {
-            Write-Log "Stop reported success but $etl / .zip not found - check the PerfView log." 'WARN'
-        }
-    } else {
-        Write-Log 'Stop failed. The session may still be running - try Abort, then check the PerfView log.' 'ERROR'
-        $script:ExitCode = 1
-    }
-}
-
-function Invoke-CollectTimed([string]$ProfileName, [string]$Label, [int]$MaxSeconds, [switch]$StopOnEventLog) {
-    $cfg = Read-Config
-    $p   = Get-Profile $cfg $ProfileName
-    New-Item -ItemType Directory -Path $cfg.OutputDir -Force | Out-Null
-    $out = Get-OutFile $cfg $p $Label
     $env:_NT_SYMBOL_PATH = Get-SymbolPath $cfg; Write-Log "_NT_SYMBOL_PATH = $($env:_NT_SYMBOL_PATH)"
 
     $args = @('collect', $out) + (Get-ProfileArgs $p) +
-            @("/MaxCollectSec:$MaxSeconds", "/Merge:$([bool]$cfg.Merge)", "/Zip:$([bool]$cfg.Zip)")
-    if ($StopOnEventLog) { $args += "/StopOnEventLogMessage:$StopEventText" }
+            @("/StopOnEventLogMessage:$StopEventText", "/Merge:$([bool]$cfg.Merge)", "/Zip:$([bool]$cfg.Zip)")
+    if ($MaxSeconds -gt 0) { $args += "/MaxCollectSec:$MaxSeconds" }
 
-    Write-Log ("Timed collect (profile '{0}', up to {1}s{2}). This blocks until it stops." -f `
-               $p.Name, $MaxSeconds, $(if ($StopOnEventLog) { " or the '$StopEventText' event" } else { '' }))
+    Save-ActiveState ([pscustomobject]@{
+        SessionName = $SessionName
+        OutFile     = $out
+        Profile     = $p.Name
+        Label       = $Label
+        MaxSeconds  = $MaxSeconds
+        StartedUtc  = (Get-Date).ToUniversalTime().ToString('o')
+    })
     if ($Label) { $cfg.LastLabel = $Label; Save-Config $cfg }
-    $code = Invoke-PerfView $args 'Timed collect'
+
+    $howStop = if ($MaxSeconds -gt 0) { "Stop any time (Stop button / '$StopEventText' event), or it ends automatically after ${MaxSeconds}s." }
+               else { "No time limit - runs until you Stop it (fires the '$StopEventText' event)." }
+    Write-Log "Capture started (profile '$($p.Name)'). $howStop  Output on stop: $out (+ .zip). Reproduce the problem, then Stop."
+
+    $code = Invoke-PerfView $args 'Collect'
+    Clear-ActiveState
     if ($code -eq 0) {
         $zip = "$out.zip"
         $f = if (Test-Path $zip) { $zip } elseif (Test-Path $out) { $out } else { $null }
         if ($f) { Write-Log ("Trace written: {0} ({1} MB)" -f $f, [math]::Round((Get-Item $f).Length / 1MB, 1)) }
-        else    { Write-Log "Collect finished but $out / .zip not found - check the PerfView log." 'WARN' }
-    } else { $script:ExitCode = 1 }
+        else    { Write-Log "Capture finished but $out / .zip not found - check the PerfView log." 'WARN' }
+    } else {
+        Write-Log 'Capture failed - check the PerfView log.' 'ERROR'
+        $script:ExitCode = 1
+    }
 }
 
+# Stop ANY running capture by firing the stop event the collect watches for. Returns immediately; the
+# running Start-Trace (here or in another process) then stops, merges, zips and reports the file. Needs
+# no admin, so it works from a separate runspace while a capture is blocking its own.
+function Stop-Trace {
+    $active = Read-ActiveState
+    if (-not $active) { Write-Log 'No active trace recorded. If a session is orphaned, use Abort.' 'WARN'; return }
+    Write-Log "Stopping capture: signalling '$StopEventText'. PerfView will stop, merge and zip, then report the output file."
+    Send-StopEvent
+}
+
+# Back-compat shim: a timed collect is just a Start-Trace with a time cap. The stop event is always armed
+# now, so -StopOnEventLog is accepted but redundant.
+function Invoke-CollectTimed([string]$ProfileName, [string]$Label, [int]$MaxSeconds, [switch]$StopOnEventLog) {
+    Start-Trace $ProfileName $Label $MaxSeconds
+}
+
+# Force-cancel: aborts the ETW session WITHOUT merging (data discarded). Use only to clear a stuck/orphaned
+# session; the normal stop is Stop-Trace (which keeps the data).
 function Stop-Abort {
     $code = Invoke-PerfView @('abort') 'Abort trace'
     Clear-ActiveState
-    Write-Log ($(if ($code -eq 0) { 'Abort complete - any orphaned session cleared.' } else { 'Abort returned non-zero (there may have been nothing to abort).' }))
+    Write-Log ($(if ($code -eq 0) { 'Abort complete - any orphaned session cleared (no data saved).' } else { 'Abort returned non-zero (there may have been nothing to abort).' }))
 }
 
 function Send-StopEvent {
@@ -541,10 +530,9 @@ function Show-Menu {
         Write-Host ' 1) Setup / edit configuration (profiles, output dir, symbols, zip/merge)'
         Write-Host ' 2) Install / verify PerfView'
         Write-Host ' 3) Status'
-        Write-Host ' 4) Start trace        (pick profile + optional version/patch label)'
-        Write-Host ' 5) Stop trace         (merge + zip, show output path)'
-        Write-Host ' 6) Timed collect      (runs for N seconds, optional stop-on-event)'
-        Write-Host ' 7) Abort trace        (clear an orphaned session)'
+        Write-Host ' 4) Start capture      (pick profile, optional label, optional max seconds; 0 = until Stop)'
+        Write-Host ' 5) Stop capture       (signal the stop event; it merges + zips and shows the output path)'
+        Write-Host ' 7) Abort capture      (force-cancel a stuck/orphaned session, no data saved)'
         Write-Host ' 8) Open output folder'
         Write-Host ' U) Update PerfView to latest'
         Write-Host ' Q) Quit'
@@ -553,18 +541,12 @@ function Show-Menu {
             '2' { $null = Install-PerfView }
             '3' { Show-Status }
             '4' {
-                $prof  = Select-Profile $cfg 'Start trace'
+                $prof  = Select-Profile $cfg 'Start capture'
                 $label = Read-Value 'Version/patch label (optional)' $cfg.LastLabel
-                Start-Trace $prof $label
+                $secs  = Read-Int 'Max seconds (0 = no limit, stop with option 5 or the event)' 0 0
+                Start-Trace $prof $label $secs
             }
             '5' { Stop-Trace }
-            '6' {
-                $prof  = Select-Profile $cfg 'Timed collect'
-                $label = Read-Value 'Version/patch label (optional)' $cfg.LastLabel
-                $secs  = Read-Int 'Collect for how many seconds' 600 1
-                $soe   = (Read-Value 'Stop early on the stop event? (y/n)' 'n') -match '^(y|yes)$'
-                if ($soe) { Invoke-CollectTimed $prof $label $secs -StopOnEventLog } else { Invoke-CollectTimed $prof $label $secs }
-            }
             '7' { Stop-Abort }
             '8' { if (Test-Path $cfg.OutputDir) { Start-Process explorer.exe $cfg.OutputDir } else { Write-Host 'Output folder does not exist yet.' } }
             'U' { $null = Install-PerfView -Force }
@@ -635,9 +617,9 @@ $script:LogMaxMB = [int]$cfgBoot.LogMaxMB
 Remove-OldLogs ([int]$cfgBoot.LogKeep)
 
 if     ($Install)       { $null = Install-PerfView }
-elseif ($Start)         { Start-Trace $Profile $Label }
+elseif ($Start)         { Start-Trace $Profile $Label $Seconds }   # -Seconds 0 (default) = until -Stop / event
 elseif ($Stop)          { Stop-Trace }
-elseif ($CollectTimed)  { if ($StopOnEvent) { Invoke-CollectTimed $Profile $Label $Seconds -StopOnEventLog } else { Invoke-CollectTimed $Profile $Label $Seconds } }
+elseif ($CollectTimed)  { Start-Trace $Profile $Label $Seconds }   # same path; the stop event is always armed
 elseif ($Abort)         { Stop-Abort }
 elseif ($Status)        { Show-Status }
 elseif ($SendStopEvent) { Send-StopEvent }

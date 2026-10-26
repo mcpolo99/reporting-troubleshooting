@@ -10,14 +10,14 @@
       <TextBox x:Name="TxtPvLabel" Width="150" VerticalAlignment="Center"/>
     </StackPanel>
     <StackPanel Orientation="Horizontal" Margin="0,0,0,8">
-      <Button x:Name="BtnPvStart" Content="Start trace" Height="30" MinWidth="110" Margin="0,0,8,0"/>
-      <Button x:Name="BtnPvStop"  Content="Stop trace"  Height="30" MinWidth="110" Margin="0,0,8,0"/>
-      <Button x:Name="BtnPvAbort" Content="Abort"        Height="30" MinWidth="80"/>
+      <TextBlock Text="Max sec:" Foreground="{DynamicResource AppFgColor}" VerticalAlignment="Center" Width="60"/>
+      <TextBox x:Name="TxtPvSeconds" Text="0" Width="70" VerticalAlignment="Center" Margin="0,0,8,0"/>
+      <TextBlock Text="(0 = no limit; stop with the Stop button or the stop event)" Foreground="{DynamicResource AppIdColor}" VerticalAlignment="Center"/>
     </StackPanel>
     <StackPanel Orientation="Horizontal" Margin="0,0,0,8">
-      <TextBlock Text="Timed (sec):" Foreground="{DynamicResource AppFgColor}" VerticalAlignment="Center" Width="80"/>
-      <TextBox x:Name="TxtPvSeconds" Text="600" Width="70" VerticalAlignment="Center" Margin="0,0,8,0"/>
-      <Button x:Name="BtnPvCollect" Content="Timed collect" Height="30" MinWidth="120"/>
+      <Button x:Name="BtnPvStart" Content="Start capture" Height="30" MinWidth="120" Margin="0,0,8,0"/>
+      <Button x:Name="BtnPvStop"  Content="Stop"          Height="30" MinWidth="90"  Margin="0,0,8,0"/>
+      <Button x:Name="BtnPvAbort" Content="Abort"         Height="30" MinWidth="80"/>
     </StackPanel>
     <StackPanel Orientation="Horizontal" Margin="0,0,0,10">
       <Button x:Name="BtnPvOpen"   Content="Open output folder" Height="30" MinWidth="150" Margin="0,0,8,0"/>

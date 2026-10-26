@@ -41,7 +41,7 @@ function Show-MainWindow {
     # controls. Resolve every name across all of them.
     $findScopes = @($w) + @($script:TabPages.Values)
     foreach ($n in 'TxtOutput','LblBusy','LblVersion',
-                   'CmbPvProfile','TxtPvLabel','BtnPvStart','BtnPvStop','BtnPvAbort','TxtPvSeconds','BtnPvCollect','BtnPvOpen','BtnPvStatus','LblPvStatus',
+                   'CmbPvProfile','TxtPvLabel','BtnPvStart','BtnPvStop','BtnPvAbort','TxtPvSeconds','BtnPvOpen','BtnPvStatus','LblPvStatus',
                    'TxtPvProfName','PnlPvKernel','CmbPvClr','PnlPvProviders','TxtPvProvOther','TxtPvExtra','TxtPvCircular','TxtPvBuffer','BtnPvProfSave','BtnPvProfDelete','BtnPvProfDefault',
                    'TxtPvOutput','TxtPvSym','ChkPvMerge','ChkPvZip','BtnPvSettingsSave',
                    'BtnMonInstall','BtnMonStart','BtnMonStop','BtnMonStatus','BtnMonUninstall','LblMonStatus','BtnMonVerify','LblMonVerify','PnlMonConfig','BtnMonSave','BtnMonReload','ChkMonTail','TxtMonLog',
@@ -55,6 +55,9 @@ function Show-MainWindow {
     $script:LblVersion.Text = "v$ScriptVersion"
 
     $script:RsPv  = New-ToolRunspace -ToolPath $script:ToolPerfViewPath -Load
+    # Second PerfView runspace for control actions (Stop/Abort/Status). A capture blocks RsPv for its whole
+    # duration, so Stop (fire the event) and status must run here or they'd be stuck behind it.
+    $script:RsPvCtl = New-ToolRunspace -ToolPath $script:ToolPerfViewPath -Load
     $script:RsMon = New-ToolRunspace -ToolPath $script:ToolMonitorPath  -Load
     $script:RsPkg = New-ToolRunspace -ToolPath $script:ToolPackagesPath -Load
     $script:RsUpd = New-ToolRunspace    # plain runspace for the lightweight GitHub update check (off the Pkg runspace)
@@ -139,7 +142,7 @@ function Show-MainWindow {
         $state = if ($task) { $task.State } else { 'not installed' }
         "Task: $state  |  apps: $($cfg.Apps -join ', ')  |  keep: $($cfg.KeepDumps)  |  dumps in $($cfg.DumpDir)"
     }
-    $script:RefreshPv  = [scriptblock]::Create("Start-ToolJob -Runspace `$script:RsPv  -Script { $($pvStatusSB.ToString()) }  -OnText `$script:SetPvStatus  | Out-Null")
+    $script:RefreshPv  = [scriptblock]::Create("Start-ToolJob -Runspace `$script:RsPvCtl -Script { $($pvStatusSB.ToString()) }  -OnText `$script:SetPvStatus  | Out-Null")
     $script:RefreshMon = [scriptblock]::Create("Start-ToolJob -Runspace `$script:RsMon -Script { $($monStatusSB.ToString()) } -OnText `$script:SetMonStatus | Out-Null")
 
     $script:ToolName = @{ Pv = 'PerfView'; Mon = 'Monitor'; Pkg = 'Packages'; Case = 'Case' }
@@ -189,18 +192,23 @@ function Show-MainWindow {
 
     $script:CmbPvProfile.Add_SelectionChanged({ if (-not $script:PvLoading) { script:Load-PvProfileFields ([string]$script:CmbPvProfile.SelectedItem) } })
 
+    # One Start for every trace: a 'collect' with the stop event always armed; the Max-sec field adds a
+    # hard cap only when > 0 (0 = run until Stop). The capture blocks RsPv for its whole duration (live
+    # progress streams to Output); Stop/Abort/Status run on RsPvCtl so they work while it is running.
     $script:BtnPvStart.Add_Click({
         $p = [string]$script:CmbPvProfile.SelectedItem; $l = $script:TxtPvLabel.Text
-        & $script:Append "PerfView: start trace (profile '$p')..."
-        script:Invoke-Action 'Pv' $script:RsPv { param($pp,$ll) Start-Trace $pp $ll } @($p, $l) $script:RefreshPv
+        $s = 0; [void][int]::TryParse($script:TxtPvSeconds.Text, [ref]$s); if ($s -lt 0) { $s = 0 }
+        $lim = if ($s -gt 0) { "up to ${s}s, or until Stop" } else { 'until Stop' }
+        & $script:Append "PerfView: start capture (profile '$p', $lim)..."
+        script:Invoke-Action 'Pv' $script:RsPv { param($pp,$ll,$ss) Start-Trace $pp $ll $ss } @($p, $l, $s) $script:RefreshPv
     })
-    $script:BtnPvStop.Add_Click({ & $script:Append 'PerfView: stop trace...'; script:Invoke-Action 'Pv' $script:RsPv { Stop-Trace } @() $script:RefreshPv })
-    $script:BtnPvAbort.Add_Click({ & $script:Append 'PerfView: abort...'; script:Invoke-Action 'Pv' $script:RsPv { Stop-Abort } @() $script:RefreshPv })
-    $script:BtnPvCollect.Add_Click({
-        $p = [string]$script:CmbPvProfile.SelectedItem; $l = $script:TxtPvLabel.Text; $s = 0
-        [void][int]::TryParse($script:TxtPvSeconds.Text, [ref]$s); if ($s -lt 1) { $s = 600 }
-        & $script:Append "PerfView: timed collect ($s s, profile '$p')..."
-        script:Invoke-Action 'Pv' $script:RsPv { param($pp,$ll,$ss) Invoke-CollectTimed $pp $ll $ss } @($p, $l, $s) $script:RefreshPv
+    $script:BtnPvStop.Add_Click({
+        & $script:Append 'PerfView: stop capture (signalling; it will merge, zip and report the file)...'
+        Start-ToolJob -Runspace $script:RsPvCtl -Script { Stop-Trace } -OnText $script:Append -OnDone $script:RefreshPv | Out-Null
+    })
+    $script:BtnPvAbort.Add_Click({
+        & $script:Append 'PerfView: abort (force-cancel, no data saved)...'
+        Start-ToolJob -Runspace $script:RsPvCtl -Script { Stop-Abort } -OnText $script:Append -OnDone $script:RefreshPv | Out-Null
     })
     $script:BtnPvOpen.Add_Click({ script:Invoke-Action 'Pv' $script:RsPv { $cfg = Read-Config; if (Test-Path $cfg.OutputDir) { Start-Process explorer.exe $cfg.OutputDir; 'opened output folder' } else { 'output folder does not exist yet' } } @() $null })
     $script:BtnPvStatus.Add_Click({ & $script:RefreshPv })
@@ -673,20 +681,23 @@ function Show-MainWindow {
     $timer.Start()
 
     # ---------- terminate an active PerfView trace on close / crash ----------
-    # Graceful close saves the trace (Stop-Trace); a crash aborts it (Stop-PerfViewHard). A hard kill that
-    # bypasses these is recovered on next startup (orphan cleanup above). active.json is the live-trace flag.
+    # Graceful close signals the stop event so the capture finalizes (merge+zip); a crash aborts it
+    # (Stop-PerfViewHard, data discarded). A hard kill that bypasses these is recovered on next startup
+    # (orphan cleanup above). active.json is the live-trace flag.
     [System.AppDomain]::CurrentDomain.add_UnhandledException({ script:Stop-PerfViewHard })
     [System.AppDomain]::CurrentDomain.add_ProcessExit({ script:Stop-PerfViewHard })
 
     $w.Add_Closed({
         $timer.Stop()
         try {
+            # Graceful close with a capture running: signal the stop event so PerfView finalizes (merge+zip)
+            # on its own - the collect is an independent process and finishes after we exit. Only fall back
+            # to a hard abort (discards data) if signalling fails.
             if (Test-Path $script:PvActiveFile) {
-                if (-not $script:Busy['Pv']) { Invoke-ToolSync -Runspace $script:RsPv -Script { Stop-Trace } | Out-Null }
-                else { script:Stop-PerfViewHard }
+                Invoke-ToolSync -Runspace $script:RsPvCtl -Script { Send-StopEvent } | Out-Null
             }
         } catch { script:Stop-PerfViewHard }
-        foreach ($rs in @($script:RsPv, $script:RsMon, $script:RsPkg, $script:RsUpd)) { try { $rs.Close() } catch {} }
+        foreach ($rs in @($script:RsPv, $script:RsPvCtl, $script:RsMon, $script:RsPkg, $script:RsUpd)) { try { $rs.Close() } catch {} }
     })
 
     $script:MainWin = $w
