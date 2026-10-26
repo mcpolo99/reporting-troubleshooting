@@ -547,15 +547,58 @@ function Get-EffectiveArgs($cfg) {
 # ProcDump is started hidden through cmd.exe with its output redirected to its own log file
 # (Logs\ProcDump_<app>_<datetime>.log, kept like the other logs). Each loop the monitor also
 # copies new lines into the main log, so attach, triggers and dump writes all show up there.
-function Start-ProcDumpCaptured([string]$App, [string]$ArgLine) {
+# --- bitness-matched ProcDump selection ---
+# A 64-bit procdump cannot produce a walkable managed dump of a 32-bit (WOW64) process, and vice versa, so
+# each app must be captured by the procdump matching ITS bitness. Both ship in the Sysinternals Suite.
+function Get-PeBitness([string]$Path) {
+    if (-not ($Path -and (Test-Path -LiteralPath $Path))) { return 0 }
+    try {
+        $fs = [IO.File]::OpenRead($Path)
+        try {
+            $br = New-Object IO.BinaryReader($fs)
+            $fs.Position = 0x3C; $peOff = $br.ReadInt32(); $fs.Position = $peOff
+            if ($br.ReadUInt32() -ne 0x00004550) { return 0 }        # 'PE\0\0'
+            switch ($br.ReadUInt16()) { 0x014c { 32 } 0x8664 { 64 } 0xAA64 { 64 } default { 0 } }
+        } finally { $fs.Dispose() }
+    } catch { 0 }
+}
+
+# App bitness: prefer the running process (IsWow64 via DumpId's Get-ProcessBitness), else the exe's PE header,
+# else default to 64-bit. Self-corrects once the app has run at least once.
+function Get-AppBitness([string]$App) {
+    # An explicit exe path is authoritative - read its PE header before any name-based lookup (process names
+    # are not unique across bitness, e.g. 32- and 64-bit powershell.exe).
+    if ([IO.Path]::IsPathRooted($App)) { $pe = Get-PeBitness $App; if ($pe) { return $pe } }
+    $name = [IO.Path]::GetFileNameWithoutExtension($App)
+    $p = @(Get-Process -Name $name -ErrorAction SilentlyContinue)
+    if ($p.Count) {
+        $b = Get-ProcessBitness $p[0].Id; if ($b) { return $b }
+        try { if ($p[0].Path) { $pe = Get-PeBitness $p[0].Path; if ($pe) { return $pe } } } catch {}
+    }
+    $cmd = Get-Command $App -ErrorAction SilentlyContinue
+    if ($cmd -and $cmd.Source) { $pe = Get-PeBitness $cmd.Source; if ($pe) { return $pe } }
+    return 64
+}
+
+# The bitness-matched ProcDump exe path for an app (falls back to the default if the matched one is missing).
+function Get-ProcDumpExeForApp([string]$App) {
+    $bits = Get-AppBitness $App
+    $exe  = if ($bits -eq 32) { 'procdump.exe' } else { $ProcDumpExeName }
+    $path = Join-Path $ToolsDir $exe
+    if (-not (Test-Path $path)) { $path = $ProcDumpExe; $exe = $ProcDumpExeName }
+    [pscustomobject]@{ Path = $path; Bits = $bits; Name = $exe }
+}
+
+function Start-ProcDumpCaptured([string]$App, [string]$ArgLine, [string]$ExePath) {
     New-Item -ItemType Directory -Path $LogDir -Force | Out-Null
     $name    = [IO.Path]::GetFileNameWithoutExtension($App)
     $outFile = Join-Path $LogDir ('ProcDump_{0}_{1:yyyyMMdd_HHmmss}.log' -f $name, (Get-Date))
     if (Test-Path -LiteralPath $outFile) { $outFile = $outFile -replace '\.log$', ('_{0:fff}.log' -f (Get-Date)) }
+    if (-not $ExePath) { $ExePath = $ProcDumpExe }
 
     $psi = New-Object System.Diagnostics.ProcessStartInfo
     $psi.FileName        = Join-Path $env:SystemRoot 'System32\cmd.exe'
-    $psi.Arguments       = "/d /c `"`"$ProcDumpExe`" $ArgLine > `"$outFile`" 2>&1`""
+    $psi.Arguments       = "/d /c `"`"$ExePath`" $ArgLine > `"$outFile`" 2>&1`""
     $psi.UseShellExecute = $false
     $psi.CreateNoWindow  = $true
     $proc = [System.Diagnostics.Process]::Start($psi)
@@ -1095,9 +1138,12 @@ function Invoke-Monitor {
                 $dumpTemplate = Join-Path $cfg.DumpDir ('PROCESSNAME_{0}_YYMMDD_HHMMSS.dmp' -f $env:COMPUTERNAME)
                 $argLine = "$pdArgs $app `"$dumpTemplate`""
                 try {
-                    $monitors[$app] = Start-ProcDumpCaptured $app $argLine
+                    # Capture with the ProcDump matching the app's bitness so the dump stays walkable for a
+                    # 32-bit (WOW64) app. Self-corrects once the app is running (bitness read from the process).
+                    $pdSel = Get-ProcDumpExeForApp $app
+                    $monitors[$app] = Start-ProcDumpCaptured $app $argLine $pdSel.Path
                     $attach = if ($pidsNow) { "attaching to running $app (PID $pidsNow)" } else { "watching for $app to start (none running yet)" }
-                    Write-Log "ProcDump armed - $attach. Launcher PID $($monitors[$app].Process.Id)."
+                    Write-Log "ProcDump armed ($($pdSel.Bits)-bit $($pdSel.Name)) - $attach. Launcher PID $($monitors[$app].Process.Id)."
                 } catch {
                     Write-Log "Failed to start ProcDump for ${app}: $($_.Exception.Message)" 'ERROR'
                 }

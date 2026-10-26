@@ -14,6 +14,9 @@
 # CLR, not the app, so a managed exception is identified by its managed stack (Tier-2), not module+offset.
 $script:CLR_EXCEPTION_CODE = 0xE0434352
 
+# This file's own path, so a bitness-redirected child (see Invoke-InMatchingHost) can reload these functions.
+$script:DumpIdPath = $PSCommandPath
+
 function Get-KnownIssuesDir {
     Join-Path $env:ProgramData 'ReportingTroubleshooting\Monitor\KnownIssues'
 }
@@ -158,6 +161,79 @@ function Get-DumpStableId($Sig, [int]$TopN = 8) {
     }
 }
 
+# =============================== BITNESS DISPATCH ======================
+# ClrMD loads the target's DAC as a NATIVE library into the host process, so the host must be the SAME
+# bitness as the target - attaching to / walking a 32-bit target from 64-bit PowerShell throws
+# "Dac architecture mismatch!" (and vice versa). These helpers detect the target bitness and re-run the
+# ClrMD work in the matching-bitness Windows PowerShell host.
+
+$script:HostBits = if ([Environment]::Is64BitProcess) { 64 } else { 32 }
+
+# Bitness of the DUMPED PROCESS (not the machine). SystemInfo.ProcessorArchitecture reports the OS/CPU arch,
+# so on a 64-bit OS it is x64 even for a 32-bit (WOW64) process - useless here. The reliable signal is that a
+# WOW64 process always has wow64.dll loaded. So: wow64.dll in the module list => 32-bit; else fall back to the
+# SystemInfo arch (covers a genuine 32-bit OS). Returns 32 or 64 (0 if unknown).
+function Get-DumpBitness([string]$Path) {
+    try {
+        $fs = [IO.File]::Open($Path, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::ReadWrite)
+        try {
+            $br = New-Object IO.BinaryReader($fs)
+            if ($br.ReadUInt32() -ne 0x504D444D) { return 0 }
+            [void]$br.ReadUInt32(); $n = $br.ReadUInt32(); $dir = $br.ReadUInt32()
+            $fs.Position = $dir
+            $dirs = @(for ($i = 0; $i -lt $n; $i++) { ,@($br.ReadUInt32(), $br.ReadUInt32(), $br.ReadUInt32()) })
+            $sysArch = $null
+            foreach ($d in $dirs) {
+                if ($d[0] -eq 7) { $fs.Position = $d[2]; $sysArch = $br.ReadUInt16() }
+                elseif ($d[0] -eq 4) {                                   # ModuleList: look for wow64.dll
+                    $fs.Position = $d[2]; $nMod = $br.ReadUInt32()
+                    $nameRvas = @()
+                    for ($j = 0; $j -lt $nMod; $j++) {
+                        [void]$br.ReadUInt64(); [void]$br.ReadUInt32(); [void]$br.ReadUInt32(); [void]$br.ReadUInt32()
+                        $nameRvas += $br.ReadUInt32(); $fs.Position += 52 + 8 + 8 + 8 + 8
+                    }
+                    foreach ($nr in $nameRvas) {
+                        $fs.Position = $nr; $len = $br.ReadUInt32()
+                        $nm = [Text.Encoding]::Unicode.GetString($br.ReadBytes([int]$len))
+                        if ($nm -match '(?i)\\wow64\.dll$') { return 32 }
+                    }
+                }
+            }
+            if ($null -ne $sysArch) { return $(if ($sysArch -eq 9 -or $sysArch -eq 12) { 64 } else { 32 }) }
+            return 0
+        } finally { $fs.Dispose() }
+    } catch { return 0 }
+}
+
+# Live process bitness: 32 if it's a WOW64 (32-bit) process on a 64-bit OS, else matches the OS.
+Add-Type -Namespace RT -Name Wow -MemberDefinition @'
+[System.Runtime.InteropServices.DllImport("kernel32.dll", SetLastError=true)]
+public static extern bool IsWow64Process(System.IntPtr h, out bool wow);
+'@ -ErrorAction SilentlyContinue
+function Get-ProcessBitness([int]$ProcessId) {
+    if (-not [Environment]::Is64BitOperatingSystem) { return 32 }
+    try {
+        $p = Get-Process -Id $ProcessId -ErrorAction Stop
+        $wow = $false
+        if ([RT.Wow]::IsWow64Process($p.Handle, [ref]$wow)) { return $(if ($wow) { 32 } else { 64 }) }
+    } catch {}
+    return 0
+}
+
+# Run a ClrMD-using command in the matching-bitness Windows PowerShell host and parse its JSON stdout. The
+# child dot-sources this file and sets RT_BITNESS_REDIR=1 so it runs the work in-process (no further hop).
+function Invoke-InMatchingHost([int]$Bits, [string]$Command) {
+    $sub = if ($Bits -eq 32) { 'SysWOW64' } else { 'System32' }
+    $exe = Join-Path $env:SystemRoot "$sub\WindowsPowerShell\v1.0\powershell.exe"
+    if (-not (Test-Path $exe) -or -not $script:DumpIdPath) { return $null }
+    $full = ". `"$script:DumpIdPath`"; `$env:RT_BITNESS_REDIR='1'; $Command"
+    try {
+        $out = & $exe -NoProfile -ExecutionPolicy Bypass -Command $full 2>$null
+        if (-not $out) { return $null }
+        return (($out -join "`n") | ConvertFrom-Json)
+    } catch { return $null }
+}
+
 # =============================== TIER-2 STACK WALK =====================
 # Managed stack walk via ClrMD (Microsoft.Diagnostics.Runtime, a single signed net45 DLL). Works on
 # .NET Framework dumps using the DAC already installed on the box (bSuite's own CLR). Returns the
@@ -200,6 +276,20 @@ function Invoke-DumpWalk {
         [int]$Max = 40
     )
     if (-not (Test-Path -LiteralPath $ClrMdDll)) { return $null }
+    # Match host bitness to the dump's architecture (ClrMD loads the DAC as native code). If the dump is a
+    # different bitness than this host, redo the walk in the matching-bitness PowerShell and take its result.
+    if ($env:RT_BITNESS_REDIR -ne '1') {
+        $tb = Get-DumpBitness $Path
+        if ($tb -and $tb -ne $script:HostBits) {
+            $cmd = "Invoke-DumpWalk -Path '$Path' -ClrMdDll '$ClrMdDll' -TargetOSID $TargetOSID -Max $Max | ConvertTo-Json -Depth 8 -Compress"
+            $j = Invoke-InMatchingHost -Bits $tb -Command $cmd
+            if ($j) {
+                $fr = if ($j.Frames) { @($j.Frames) } else { @() }
+                return @{ Frames = $fr; ExceptionType = $j.ExceptionType; ThreadOSID = $j.ThreadOSID }
+            }
+            return $null
+        }
+    }
     if (-not $script:ClrMdLoaded) {
         try { Add-Type -Path $ClrMdDll -ErrorAction Stop; $script:ClrMdLoaded = $true } catch { return $null }
     }
@@ -262,6 +352,16 @@ function Add-DepGap([string]$Area, [string]$Detail, [string]$Dir) {
 # the no-dump proof that this machine can fault-identify that app. Returns @{ Managed; Flavor; Clr; Ok; Error }.
 function Test-AppWalkable([int]$ProcessId, [string]$ClrMdDll) {
     if (-not ($ClrMdDll -and (Test-Path -LiteralPath $ClrMdDll))) { return @{ Managed = $null; Ok = $false; Error = 'ClrMD not installed' } }
+    # A 32-bit app can only be attached from a 32-bit host (and vice versa) - the DAC loads as native code.
+    if ($env:RT_BITNESS_REDIR -ne '1') {
+        $tb = Get-ProcessBitness $ProcessId
+        if ($tb -and $tb -ne $script:HostBits) {
+            $cmd = "Test-AppWalkable -ProcessId $ProcessId -ClrMdDll '$ClrMdDll' | ConvertTo-Json -Compress"
+            $j = Invoke-InMatchingHost -Bits $tb -Command $cmd
+            if ($j) { return @{ Managed = $j.Managed; Flavor = $j.Flavor; Clr = $j.Clr; Ok = $j.Ok; Error = $j.Error } }
+            return @{ Managed = $null; Ok = $false; Error = "could not probe in $tb-bit host" }
+        }
+    }
     if (-not $script:ClrMdLoaded) { try { Add-Type -Path $ClrMdDll -ErrorAction Stop; $script:ClrMdLoaded = $true } catch { return @{ Managed = $null; Ok = $false; Error = "ClrMD load failed: $($_.Exception.Message)" } } }
     $dt = $null
     try {
