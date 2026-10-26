@@ -256,15 +256,23 @@ function Get-ProfileArgs($p) {
 
 # Tails PerfView's own /LogFile while it runs and surfaces progress: notable phase lines (merging,
 # zipping, symbol resolution, ...) as they are written, plus an elapsed-time heartbeat so long, quiet
-# steps (merge/zip on Stop, the whole duration of a timed collect) don't look frozen. Returns when the
-# process exits. Reads the log share-friendly so it never blocks PerfView's own writes.
+# steps (merge/zip on Stop, the whole duration of a collect) don't look frozen. Reads the log
+# share-friendly so it never blocks PerfView's own writes.
+#
+# PerfView writes one terminal line per command - "[DONE <time> SUCCESS: ...]" or "[DONE ... FAIL: ...]"
+# - and can then stay resident (e.g. blocked on a "press enter to close" wait on an inherited console),
+# so we must NOT wait on process exit alone or the heartbeat runs forever after the work is finished.
+# That DONE line is the authoritative completion signal; on seeing it we stop and report its result.
+# Returns @{ Done=<bool seen>; Success=<bool> }.
 function Watch-PerfViewProgress([System.Diagnostics.Process]$Proc, [string]$LogPath, [string]$What) {
     $started  = Get-Date
     $lastEmit = Get-Date
     $pos      = 0L
     $prev     = ''
+    $done     = $false
+    $success  = $false
     $phaseRx  = '(?i)\b(start|stopp|stopped|merg|zip|resolv|convert|collect|symbol|writing|complet|done|elapsed|error|warn)'
-    while (-not $Proc.HasExited) {
+    while (-not $Proc.HasExited -and -not $done) {
         Start-Sleep -Milliseconds 500
         if (Test-Path $LogPath) {
             try {
@@ -281,16 +289,18 @@ function Watch-PerfViewProgress([System.Diagnostics.Process]$Proc, [string]$LogP
                                 if ($t.Length -gt 140) { $t = $t.Substring(0, 137) + '...' }
                                 Write-Log "  $t"; $prev = $t; $lastEmit = Get-Date
                             }
+                            if ($t -match '\[DONE\b') { $done = $true; $success = ($t -match '(?i)\bSUCCESS\b') }
                         }
                     }
                 } finally { $fs.Dispose() }
             } catch { }
         }
-        if (((Get-Date) - $lastEmit).TotalSeconds -ge 30) {   # 30s heartbeat: enough for liveness without flooding a long capture
+        if (-not $done -and ((Get-Date) - $lastEmit).TotalSeconds -ge 30) {   # 30s heartbeat: liveness without flooding a long capture
             Write-Log ("{0}: working... {1}s elapsed" -f $What, [int]((Get-Date) - $started).TotalSeconds)
             $lastEmit = Get-Date
         }
     }
+    return @{ Done = $done; Success = $success }
 }
 
 # Runs PerfView with its own per-op log file and surfaces live progress (see Watch-PerfViewProgress).
@@ -304,9 +314,20 @@ function Invoke-PerfView([string[]]$PerfViewArgs, [string]$What) {
     try {
         # -PassThru without -Wait so we can tail the log and report progress while it runs.
         $proc = Start-Process -FilePath $PerfViewExe -ArgumentList $full -NoNewWindow -PassThru -ErrorAction Stop
-        Watch-PerfViewProgress $proc $pvLog $What
-        $proc.WaitForExit()
-        $code = $proc.ExitCode
+        $r = Watch-PerfViewProgress $proc $pvLog $What
+        if ($proc.HasExited) {
+            $code = $proc.ExitCode
+        } elseif ($r.Done) {
+            # Work finished (DONE in the log) but PerfView is still resident - give it a moment, then release
+            # it so the job can complete. Trust the log's SUCCESS/FAIL for the result code.
+            if (-not $proc.WaitForExit(5000)) {
+                Write-Log "$What finished (per the PerfView log) but the process stayed resident - closing it." 'INFO'
+                try { $proc.Kill() } catch { }
+            }
+            $code = if ($r.Success) { 0 } else { 1 }
+        } else {
+            $proc.WaitForExit(); $code = $proc.ExitCode
+        }
         Write-Log "$What finished with exit code $code (PerfView log: $pvLog)" ($(if ($code -eq 0) {'INFO'} else {'WARN'}))
         return $code
     } catch {
