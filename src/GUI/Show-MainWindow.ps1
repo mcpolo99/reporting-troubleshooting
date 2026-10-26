@@ -142,8 +142,13 @@ function Show-MainWindow {
     $script:RefreshPv  = [scriptblock]::Create("Start-ToolJob -Runspace `$script:RsPv  -Script { $($pvStatusSB.ToString()) }  -OnText `$script:SetPvStatus  | Out-Null")
     $script:RefreshMon = [scriptblock]::Create("Start-ToolJob -Runspace `$script:RsMon -Script { $($monStatusSB.ToString()) } -OnText `$script:SetMonStatus | Out-Null")
 
+    $script:ToolName = @{ Pv = 'PerfView'; Mon = 'Monitor'; Pkg = 'Packages'; Case = 'Case' }
     function script:Invoke-Action($toolKey, $rs, [scriptblock]$sb, [object[]]$argList, [scriptblock]$onDone) {
-        if ($script:Busy[$toolKey]) { & $script:Append 'Busy - wait for the current action to finish.'; return }
+        if ($script:Busy[$toolKey]) {
+            $n = $script:ToolName[$toolKey]; if (-not $n) { $n = $toolKey }
+            & $script:Append "$n is still running the previous action - watch the Output above for progress; it will report when done."
+            return
+        }
         $script:Busy[$toolKey] = $true
         $done = [scriptblock]::Create("`$script:Busy['$toolKey'] = `$false; " + $(if ($onDone) { $onDone.ToString() } else { '' }))
         Start-ToolJob -Runspace $rs -Script $sb -ArgList $argList -OnText $script:Append -OnDone $done | Out-Null

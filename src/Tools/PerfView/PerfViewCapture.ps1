@@ -139,6 +139,16 @@ function Get-DefaultProfiles {
             CircularMB   = 4096
             BufferSizeMB = 1024
             ExtraArgs    = ''
+        },
+        [pscustomobject]@{
+            Name = 'Max'
+            Description  = 'Full event set with a 20 GB circular buffer - deepest/longest capture. Pair with a long collect (Merge/Zip on; e.g. a 900 s timed collect, or Start then Stop when the problem is reproduced).'
+            KernelEvents = 'Default,ThreadTime,FileIOInit,FileIO,DiskIO,MemoryHardFaults,VirtualAlloc,NetworkTCPIP'
+            ClrEvents    = 'Default'
+            Providers    = 'Microsoft-Windows-Kernel-Memory,Microsoft-Windows-TCPIP'
+            CircularMB   = 20000
+            BufferSizeMB = 1024
+            ExtraArgs    = ''
         }
     )
 }
@@ -170,6 +180,12 @@ function Read-Config {
         }
     }
     if (-not $cfg.Profiles) { $cfg.Profiles = Get-DefaultProfiles }
+    else {
+        # Append any built-in profile the saved config doesn't have yet (by name), so new built-ins (e.g.
+        # 'Max') reach existing installs without discarding the user's own/edited profiles.
+        $have = @($cfg.Profiles | ForEach-Object { $_.Name })
+        foreach ($d in Get-DefaultProfiles) { if ($have -notcontains $d.Name) { $cfg.Profiles = @($cfg.Profiles) + $d } }
+    }
     return $cfg
 }
 
@@ -236,7 +252,46 @@ function Get-ProfileArgs($p) {
     return $a
 }
 
-# Runs PerfView with its own per-op log file and streams output to the console (interactive).
+# Tails PerfView's own /LogFile while it runs and surfaces progress: notable phase lines (merging,
+# zipping, symbol resolution, ...) as they are written, plus an elapsed-time heartbeat so long, quiet
+# steps (merge/zip on Stop, the whole duration of a timed collect) don't look frozen. Returns when the
+# process exits. Reads the log share-friendly so it never blocks PerfView's own writes.
+function Watch-PerfViewProgress([System.Diagnostics.Process]$Proc, [string]$LogPath, [string]$What) {
+    $started  = Get-Date
+    $lastEmit = Get-Date
+    $pos      = 0L
+    $prev     = ''
+    $phaseRx  = '(?i)\b(start|stopp|stopped|merg|zip|resolv|convert|collect|symbol|writing|complet|done|elapsed|error|warn)'
+    while (-not $Proc.HasExited) {
+        Start-Sleep -Milliseconds 500
+        if (Test-Path $LogPath) {
+            try {
+                $fs = New-Object System.IO.FileStream($LogPath, [System.IO.FileMode]::Open,
+                        [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
+                try {
+                    if ($fs.Length -gt $pos) {
+                        $fs.Position = $pos
+                        $sr = New-Object System.IO.StreamReader($fs)
+                        $chunk = $sr.ReadToEnd(); $pos = $fs.Position; $sr.Dispose()
+                        foreach ($ln in ($chunk -split "`r?`n")) {
+                            $t = $ln.Trim()
+                            if ($t -and $t -match $phaseRx -and $t -ne $prev) {
+                                if ($t.Length -gt 140) { $t = $t.Substring(0, 137) + '...' }
+                                Write-Log "  $t"; $prev = $t; $lastEmit = Get-Date
+                            }
+                        }
+                    }
+                } finally { $fs.Dispose() }
+            } catch { }
+        }
+        if (((Get-Date) - $lastEmit).TotalSeconds -ge 10) {
+            Write-Log ("{0}: working... {1}s elapsed" -f $What, [int]((Get-Date) - $started).TotalSeconds)
+            $lastEmit = Get-Date
+        }
+    }
+}
+
+# Runs PerfView with its own per-op log file and surfaces live progress (see Watch-PerfViewProgress).
 function Invoke-PerfView([string[]]$PerfViewArgs, [string]$What) {
     if (-not (Test-Path $PerfViewExe)) {
         if (-not (Install-PerfView)) { Write-Log 'PerfView is not installed and could not be acquired.' 'ERROR'; return 1 }
@@ -245,7 +300,10 @@ function Invoke-PerfView([string[]]$PerfViewArgs, [string]$What) {
     $full  = @('/AcceptEULA', "/LogFile:$pvLog", "/SessionName:$SessionName") + $PerfViewArgs
     Write-Log "$What : PerfView $($full -join ' ')"
     try {
-        $proc = Start-Process -FilePath $PerfViewExe -ArgumentList $full -NoNewWindow -Wait -PassThru -ErrorAction Stop
+        # -PassThru without -Wait so we can tail the log and report progress while it runs.
+        $proc = Start-Process -FilePath $PerfViewExe -ArgumentList $full -NoNewWindow -PassThru -ErrorAction Stop
+        Watch-PerfViewProgress $proc $pvLog $What
+        $proc.WaitForExit()
         $code = $proc.ExitCode
         Write-Log "$What finished with exit code $code (PerfView log: $pvLog)" ($(if ($code -eq 0) {'INFO'} else {'WARN'}))
         return $code
