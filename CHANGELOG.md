@@ -5,6 +5,11 @@ truth; each release is tagged `vX.Y.Z` and published as a GitHub release by `scr
 
 <!-- NEW RELEASES INSERTED BELOW -->
 
+## [v1.0.35] - 2026-10-26
+### Fixes
+- 32-bit (WOW64) monitored apps are now handled correctly. ClrMD loads the target's DAC as native code, so the fault-identifier now runs the attach/walk in the PowerShell host matching the target bitness, and the monitor captures each app with the matching-bitness ProcDump (procdump.exe for 32-bit, procdump64.exe for 64-bit). Previously a 32-bit app (e.g. the Biesse Wrt.* services) produced "Dac architecture mismatch" and an unwalkable dump.
+
+
 ## [v1.0.34] - 2026-10-26
 ### Features
 - The main window is split into reusable per-tab controls: MainWindow.xaml is now just the shell, and each tab (Packages, PerfView, ProcDump Monitor, ProcDump Case) lives in its own file under Schemas\Tabs\, so tabs are easy to maintain in isolation.
@@ -231,6 +236,7 @@ Changes since v1.0.0:
 - WPF/XAML launcher (GUI default, `-CLI` text menu) with shared light/dark theme.
 - Shared components (logging, admin/signature/prompt/version helpers) under `src/Common`.
 - Bootstrap installer (`src/Get.ps1` + `src/run.bat`) with version check against GitHub.
+
 
 
 
