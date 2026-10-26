@@ -5,6 +5,13 @@ truth; each release is tagged `vX.Y.Z` and published as a GitHub release by `scr
 
 <!-- NEW RELEASES INSERTED BELOW -->
 
+## [v1.0.34] - 2026-10-26
+### Features
+- The main window is split into reusable per-tab controls: MainWindow.xaml is now just the shell, and each tab (Packages, PerfView, ProcDump Monitor, ProcDump Case) lives in its own file under Schemas\Tabs\, so tabs are easy to maintain in isolation.
+- "Verify deps" moved to the ProcDump Monitor tab and no longer needs an existing dump: for each monitored app it detects the .NET runtime from the live process and passively attaches to prove the fault-identifier can load it. Gaps (missing walker, unsupported runtime, attach failure) are logged to KnownIssues\gaps.jsonl.
+- Packages tab gains "Check for updates": detects a newer build (latest release for a stable install, the branch head for a branch build) and installs + relaunches in one click.
+
+
 ## [v1.0.33] - 2026-10-26
 ### Features
 - `-Branch <name>` installs any branch's head for testing, isolated under `%ProgramData%\ReportingTroubleshooting\branch\<name>` so it never overwrites the stable install. `-Dev` is now shorthand for `-Branch develop`. The shared tool store and per-tool data stay machine-wide, so a branch build reuses already-installed tools.
@@ -224,6 +231,7 @@ Changes since v1.0.0:
 - WPF/XAML launcher (GUI default, `-CLI` text menu) with shared light/dark theme.
 - Shared components (logging, admin/signature/prompt/version helpers) under `src/Common`.
 - Bootstrap installer (`src/Get.ps1` + `src/run.bat`) with version check against GitHub.
+
 
 
 
