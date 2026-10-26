@@ -32,6 +32,7 @@
   App data under the one app root %ProgramData%\ReportingTroubleshooting\PerfView\ :
       config.json                              settings + collection profiles
       active.json                              state of the current background trace
+      Symbols\                                 PerfView's own symbol cache (_NT_SYMBOL_PATH downstream store)
       Logs\PerfViewCapture_<datetime>.log      one per menu/op session
       Logs\PerfView_<datetime>.log             PerfView's own output, one per start/stop/collect
   PerfView.exe lives in the shared store %ProgramData%\ReportingTroubleshooting\Packages\perfview\
@@ -66,6 +67,7 @@ $BaseDir     = Join-Path $env:ProgramData 'ReportingTroubleshooting\PerfView'   
 $ConfigFile  = Join-Path $BaseDir 'config.json'
 $ActiveFile  = Join-Path $BaseDir 'active.json'
 $LogDir      = Join-Path $BaseDir 'Logs'
+$SymbolDir   = Join-Path $BaseDir 'Symbols'                        # PerfView's own symbol cache (subfolder of the app root)
 $SessionName = 'PerfViewCapture'                     # fixed ETW session name for start/stop/abort pairing
 $StopEventSource = 'PerfViewStop'
 $StopEventText   = 'PERFVIEW_STOP_NOW'
@@ -147,7 +149,7 @@ function Get-DefaultConfig {
         DefaultProfile = 'Balanced'
         Merge          = $true
         Zip            = $true
-        SymbolPath     = ''        # if set, exported as _NT_SYMBOL_PATH before a merge
+        SymbolPath     = ''        # exported as _NT_SYMBOL_PATH before a merge/collect; blank = default (Get-SymbolPath: cache in PerfView's own Symbols subfolder + the MS public server)
         LastLabel      = ''
         LogKeep        = 20
         LogMaxMB       = 10
@@ -185,6 +187,20 @@ function Get-Profile($cfg, [string]$Name) {
     }
     if (-not $p) { $p = $cfg.Profiles | Select-Object -First 1 }
     return $p
+}
+
+# Resolve the _NT_SYMBOL_PATH to export for a merge/collect. A custom cfg.SymbolPath wins; otherwise
+# PerfView caches into its OWN Symbols subfolder (not the shared C:\Symbols) backed by the MS public server.
+# Always creates the cache dir so PerfView can write to it.
+function Get-SymbolPath($cfg) {
+    $sp = "$($cfg.SymbolPath)".Trim()
+    if (-not $sp) { $sp = "SRV*$SymbolDir*https://msdl.microsoft.com/download/symbols" }
+    # Make sure any local down-stream cache dir(s) referenced exist (SRV*<dir>*... or plain path).
+    foreach ($m in [regex]::Matches($sp, '(?i)(?:SRV\*)?([A-Za-z]:\\[^*;]+)')) {
+        $dir = $m.Groups[1].Value.Trim()
+        if ($dir -and $dir -notmatch '^https?:') { New-Item -ItemType Directory -Path $dir -Force -ErrorAction SilentlyContinue | Out-Null }
+    }
+    return $sp
 }
 
 # =============================== ACTIVE STATE ============================
@@ -281,7 +297,7 @@ function Stop-Trace {
     $active = Read-ActiveState
     if (-not $active) { Write-Log 'No active trace recorded. If a session is orphaned, use Abort.' 'WARN'; return }
 
-    if ($cfg.SymbolPath) { $env:_NT_SYMBOL_PATH = $cfg.SymbolPath; Write-Log "_NT_SYMBOL_PATH = $($cfg.SymbolPath)" }
+    $env:_NT_SYMBOL_PATH = Get-SymbolPath $cfg; Write-Log "_NT_SYMBOL_PATH = $($env:_NT_SYMBOL_PATH)"
     $args = @('stop', "/Merge:$([bool]$cfg.Merge)", "/Zip:$([bool]$cfg.Zip)")
     $code = Invoke-PerfView $args 'Stop trace'
     if ($code -eq 0) {
@@ -308,7 +324,7 @@ function Invoke-CollectTimed([string]$ProfileName, [string]$Label, [int]$MaxSeco
     $p   = Get-Profile $cfg $ProfileName
     New-Item -ItemType Directory -Path $cfg.OutputDir -Force | Out-Null
     $out = Get-OutFile $cfg $p $Label
-    if ($cfg.SymbolPath) { $env:_NT_SYMBOL_PATH = $cfg.SymbolPath; Write-Log "_NT_SYMBOL_PATH = $($cfg.SymbolPath)" }
+    $env:_NT_SYMBOL_PATH = Get-SymbolPath $cfg; Write-Log "_NT_SYMBOL_PATH = $($env:_NT_SYMBOL_PATH)"
 
     $args = @('collect', $out) + (Get-ProfileArgs $p) +
             @("/MaxCollectSec:$MaxSeconds", "/Merge:$([bool]$cfg.Merge)", "/Zip:$([bool]$cfg.Zip)")
@@ -353,6 +369,7 @@ function Show-Status {
     Write-Host ("PerfView   : {0}" -f $(if (Test-Path $PerfViewExe) { "$PerfViewExe ($((Get-Item $PerfViewExe).VersionInfo.FileVersion))" } else { 'not installed' }))
     Write-Host ("Script     : v{0}" -f $ScriptVersion)
     Write-Host ("Output dir : {0}" -f $cfg.OutputDir)
+    Write-Host ("Symbols    : {0}" -f (Get-SymbolPath $cfg))
     Write-Host ("Default    : profile '{0}'   Merge={1} Zip={2}" -f $cfg.DefaultProfile, [bool]$cfg.Merge, [bool]$cfg.Zip)
     Write-Host ("Profiles   : {0}" -f (($cfg.Profiles | ForEach-Object { $_.Name }) -join ', '))
 
@@ -447,7 +464,7 @@ function Edit-Config($cfg) {
     $cfg.OutputDir  = Read-Value 'Output folder for traces' $cfg.OutputDir
     $cfg.Merge      = Read-Bool  'Merge the trace on stop' ([bool]$cfg.Merge)
     $cfg.Zip        = Read-Bool  'Zip the trace on stop' ([bool]$cfg.Zip)
-    $cfg.SymbolPath = Read-Value 'Symbol path for merge (_NT_SYMBOL_PATH, blank = leave unset)' $cfg.SymbolPath
+    $cfg.SymbolPath = Read-Value "Symbol path for merge (_NT_SYMBOL_PATH, blank = cache in $SymbolDir + MS public server)" $cfg.SymbolPath
     $cfg.LogKeep    = Read-Int   'Log files to keep' ([int]$cfg.LogKeep)
     $cfg.LogMaxMB   = Read-Int   'Max size per log file (MB)' ([int]$cfg.LogMaxMB)
     $cfg.DefaultProfile = Select-Profile $cfg 'Default profile'

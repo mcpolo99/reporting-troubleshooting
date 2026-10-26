@@ -81,6 +81,18 @@ function Get-PackageRegistry {
             # Suite install short-circuit as "already present" and the other tools never arrive. 10 cleanly
             # separates the two and is architecture-agnostic (no per-arch exe names to track).
             MinTools        = 10
+        },
+        [pscustomobject]@{
+            Id          = 'clrmd'
+            Name        = 'ClrMD (Microsoft.Diagnostics.Runtime)'
+            Description = 'Managed stack-walker for dump fault-identification (Microsoft, MIT). Single signed DLL.'
+            Kind        = 'zip'                                   # a nupkg is a zip
+            # Pinned: 1.1.142101 ships a self-contained net45 DLL with ZERO dependencies - loads directly in
+            # Windows PowerShell 5.1 and walks .NET Framework dumps using the DAC already on the box.
+            Url         = 'https://api.nuget.org/v3-flatcontainer/microsoft.diagnostics.runtime/1.1.142101/microsoft.diagnostics.runtime.1.1.142101.nupkg'
+            ExtractFrom     = 'lib\net45'                         # the DLL lives here inside the nupkg
+            ExtractPatterns = @('Microsoft.Diagnostics.Runtime.dll')
+            Primary         = 'Microsoft.Diagnostics.Runtime.dll'
         }
     )
 }
@@ -110,7 +122,11 @@ function Test-PackageInstalled([string]$Id) {
     $pkg = Get-Package $Id; if (-not $pkg) { return $false }
     $p = Resolve-PackageTool $Id
     if (-not ($p -and (Test-MicrosoftSignature $p))) { return $false }
-    $min = if ($pkg.PSObject.Properties['MinTools'] -and $pkg.MinTools) { [int]$pkg.MinTools } else { 1 }
+    # The exe tool-count floor only applies to multi-tool suites (MinTools>=2, e.g. Sysinternals). For a
+    # single-file package - an exe (PerfView) or a DLL (clrmd, which has no exe at all) - a signed Primary
+    # is the whole test.
+    $min = if ($pkg.PSObject.Properties['MinTools'] -and $pkg.MinTools) { [int]$pkg.MinTools } else { 0 }
+    if ($min -lt 2) { return $true }
     (Get-PackageToolCount $Id) -ge $min
 }
 
@@ -166,11 +182,11 @@ function Install-Package {
     $dir = Get-PackageDir $Id
     $primary = Join-Path $dir $pkg.Primary
 
-    $min = if ($pkg.PSObject.Properties['MinTools'] -and $pkg.MinTools) { [int]$pkg.MinTools } else { 1 }
+    $min = if ($pkg.PSObject.Properties['MinTools'] -and $pkg.MinTools) { [int]$pkg.MinTools } else { 0 }
     if ((Test-Path -LiteralPath $primary) -and -not $Force) {
         if (-not (Test-MicrosoftSignature $primary)) {
             Write-PkgLog "$($pkg.Name) failed signature check, re-acquiring." 'WARN'
-        } elseif ((Get-PackageToolCount $Id) -lt $min) {
+        } elseif ($min -ge 2 -and (Get-PackageToolCount $Id) -lt $min) {
             Write-PkgLog "$($pkg.Name) is incomplete (only $(Get-PackageToolCount $Id) tool(s), expected $min+) - acquiring the full package." 'WARN'
         } else {
             Write-PkgLog "$($pkg.Name) present: $dir"; return $true
@@ -237,8 +253,12 @@ function Install-Package {
                         }
                     }
                     Expand-Archive -Path $zip -DestinationPath $ex -Force
+                    # Some archives (e.g. a NuGet .nupkg) keep the wanted files in a subfolder; ExtractFrom
+                    # points at it so only that folder's matching files are copied (not same-named siblings
+                    # under other target frameworks).
+                    $srcRoot = if ($pkg.PSObject.Properties['ExtractFrom'] -and $pkg.ExtractFrom) { Join-Path $ex $pkg.ExtractFrom } else { $ex }
                     $pats = @($pkg.ExtractPatterns); if (-not $pats -or $pats.Count -eq 0) { $pats = @('*') }
-                    Get-ChildItem $ex -File | Where-Object { $name = $_.Name; ($pats | Where-Object { $name -like $_ }).Count -gt 0 } |
+                    Get-ChildItem $srcRoot -File | Where-Object { $name = $_.Name; ($pats | Where-Object { $name -like $_ }).Count -gt 0 } |
                         Copy-Item -Destination $dir -Force
                 } finally {
                     if (-not $localZip) { Remove-Item $zip -Force -ErrorAction SilentlyContinue }

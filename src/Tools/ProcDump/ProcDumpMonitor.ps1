@@ -37,7 +37,8 @@ param(
     [switch]$Install,
     [switch]$Update,
     [switch]$Force,
-    [switch]$Uninstall
+    [switch]$Uninstall,
+    [switch]$Triage          # on-demand: fault-identify + dedupe every dump in the configured DumpDir (no admin)
 )
 
 # =============================== VERSION =================================
@@ -52,6 +53,7 @@ $BaseDir         = Join-Path $env:ProgramData 'ReportingTroubleshooting\Monitor'
 $ConfigFile      = Join-Path $BaseDir 'config.json'
 $LogDir          = Join-Path $BaseDir 'Logs'
 $InstalledScript = Join-Path $BaseDir "$AppName.ps1"
+$InstalledTriage = Join-Path $BaseDir 'DumpTriage.ps1'   # fault-id worker deployed beside the monitor
 $MutexName       = "Global\$AppName"
 $StopFile        = Join-Path $BaseDir 'stop.request'    # created to ask the running monitor to stop gracefully
 # $ToolsDir / $ProcDumpExeName / $ProcDumpExe come from the shared package store, set after Packages.ps1 below.
@@ -85,6 +87,7 @@ if (-not $CommonDir) { throw "Shared components (Common\) not found from $MonScr
 . (Join-Path $CommonDir 'Logging.ps1')
 . (Join-Path $CommonDir 'Common.ps1')
 . (Join-Path $CommonDir 'Packages.ps1')
+. (Join-Path $CommonDir 'DumpId.ps1')     # stable fault-signature + known-issues dedupe engine
 
 # ProcDump lives in the shared package store - single source of truth: Common\Packages.ps1.
 $ToolsDir        = Get-PackageDir 'sysinternals'
@@ -103,6 +106,10 @@ function Get-DefaultConfig {
         CooldownSeconds  = 60           # after a dump: wait this long before re-arming ProcDump on the SAME process
         DuplicateAction  = 'Delete'     # Delete | Keep  - what to do with repeat captures of the same event
         DuplicateWindowSeconds = 300    # hang dumps of a process this soon after its exception dump = duplicate
+        KnownIssuesEnabled = $true      # identify each dump's stable fault id and dedupe already-seen problems
+        SuppressKnown    = $true        # keep the FIRST dump of each id, count + soft-suppress later recurrences
+        SuppressAction   = 'Recycle'    # Recycle = move recurrences to KnownIssues\Suppressed | Delete
+        BaselinePath     = ''           # optional: JSON of already-analysed ids to suppress even the first time (blank = installed baseline beside the script)
         LogKeep          = 20
         LogMaxMB         = 10
         RunMode          = 'Logon'      # Logon = as user at logon (GUI apps, hang detection) | Startup = SYSTEM at boot
@@ -157,6 +164,23 @@ function Install-CommonComponents {
     New-Item -ItemType Directory -Path $dst -Force | Out-Null
     Copy-Item (Join-Path $CommonDir '*.ps1') $dst -Force
     Write-Log "Shared components copied to $dst"
+}
+
+# Deploy the fault-id worker beside the installed monitor so the detached task can launch it.
+function Install-TriageWorker {
+    $src = Join-Path $MonScriptDir 'DumpTriage.ps1'
+    if (-not (Test-Path $src)) { Write-Log 'DumpTriage.ps1 not found next to the monitor - fault-id worker not deployed.' 'WARN'; return }
+    if ((Resolve-Path $src).Path -ieq $InstalledTriage) { return }   # already the installed copy
+    Copy-Item $src $InstalledTriage -Force
+    Unblock-File $InstalledTriage -ErrorAction SilentlyContinue
+    Write-Log "Fault-id worker copied to $InstalledTriage"
+}
+
+# Install ClrMD (managed stack-walker) when known-issues dedupe is on, so hang/managed-exception ids work.
+function Install-KnownIssuesDeps($cfg) {
+    if (-not $cfg.KnownIssuesEnabled) { return }
+    if (Install-Package 'clrmd') { Write-Log 'ClrMD present (managed hang/exception identification available).' }
+    else { Write-Log 'ClrMD not available - crash ids still work; hang/managed-exception ids need it (use Packages > Verify deps).' 'WARN' }
 }
 
 # Ensures the Sysinternals package (ProcDump + suite) is installed in the shared store. All download /
@@ -394,6 +418,22 @@ function Get-DumpApp($cfg, [string]$FileName) {
     $cfg.Apps | Where-Object { $FileName -like "$([IO.Path]::GetFileNameWithoutExtension($_))*" } | Select-Object -First 1
 }
 
+# Launch the fault-identification + dedupe worker for one freshly written dump, DETACHED and at
+# below-normal priority, so the slow managed stack walk never blocks the monitor loop. The worker
+# (DumpTriage.ps1, installed beside this script) computes the stable id, counts the occurrence, and
+# soft-suppresses recurrences of an already-kept/known id.
+function Enqueue-DumpTriage([string]$DumpPath) {
+    $worker = Join-Path $BaseDir 'DumpTriage.ps1'
+    if (-not (Test-Path $worker)) { $worker = Join-Path $MonScriptDir 'DumpTriage.ps1' }
+    if (-not (Test-Path $worker)) { Write-Log 'DumpTriage.ps1 not found - fault-id skipped for this dump.' 'WARN'; return }
+    try {
+        $p = Start-Process powershell.exe -WindowStyle Hidden -PassThru -ArgumentList @(
+            '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', "`"$worker`"", '-DumpPath', "`"$DumpPath`"", '-Quiet')
+        try { $p.PriorityClass = [System.Diagnostics.ProcessPriorityClass]::BelowNormal } catch {}
+        Write-Log "Fault-id worker queued for $([IO.Path]::GetFileName($DumpPath)) (PID $($p.Id))."
+    } catch { Write-Log "Could not launch fault-id worker: $($_.Exception.Message)" 'WARN' }
+}
+
 # Handles new dumps once fully written: reads the reason, detects repeat captures of the same
 # event, writes <dump>.info.txt, and logs a one-line summary.
 #   $known   : set of dump paths already handled
@@ -434,7 +474,9 @@ function Invoke-NewDumps($cfg, $known, $pending, $recent, $lastInfo) {
         $summary = if ($info) { "$($info.Trigger)$(if ($info.Exception) { ' | ' + $info.Exception })$(if ($info.ProcessId) { ' | PID ' + $info.ProcessId })" }
                    else { 'could not read dump header' }
 
-        if ($dupOf -and $cfg.DuplicateAction -eq 'Delete') {
+        # When known-issues dedupe is on, the triage worker owns all dedup/delete decisions (by stable fault
+        # id, across sessions), so the monitor's own same-session duplicate delete stands down here.
+        if ($dupOf -and $cfg.DuplicateAction -eq 'Delete' -and -not $cfg.KnownIssuesEnabled) {
             try {
                 Remove-Item -LiteralPath $d.FullName -Force -ErrorAction Stop
                 Write-Log "Duplicate capture deleted: $($d.Name) = repeat of $dupOf ($why)." 'WARN'
@@ -463,6 +505,9 @@ function Invoke-NewDumps($cfg, $known, $pending, $recent, $lastInfo) {
         $lvl = if ($dupOf) { 'WARN' } else { 'INFO' }
         Write-Log ("Dump complete: {0} ({1:N0} MB) - {2}{3}" -f $d.Name, ($d.Length / 1MB), $summary,
                    $(if ($dupOf) { " - DUPLICATE of $dupOf (kept)" } else { '' })) $lvl
+
+        # Fault-identify this dump and dedupe already-seen problems (runs detached - never blocks the loop).
+        if ($cfg.KnownIssuesEnabled) { Enqueue-DumpTriage $d.FullName }
     }
     # forget dumps that no longer exist
     $existing = @($dumps | ForEach-Object { $_.FullName })
@@ -759,12 +804,14 @@ function Invoke-Update {
         Copy-Item -Path $PSCommandPath -Destination $InstalledScript -Force -ErrorAction Stop
         Unblock-File -Path $InstalledScript -ErrorAction SilentlyContinue
         Install-CommonComponents
+        Install-TriageWorker
     } catch {
         Write-Log "Copy failed: $($_.Exception.Message) - restarting the previous version." 'ERROR'
         Start-MonitorTask; return
     }
     Save-Config $cfg                        # writes new settings into config.json so they're visible/editable
     if (-not (Install-Sysinternals)) { Write-Log 'Sysinternals tools missing and could not be downloaded.' 'WARN' }
+    Install-KnownIssuesDeps $cfg
     Register-MonitorTask $cfg               # task definition may have changed between versions
     Start-MonitorTask
 
@@ -793,8 +840,10 @@ function Invoke-Install {
         Copy-Item -Path $PSCommandPath -Destination $InstalledScript -Force
         Unblock-File -Path $InstalledScript -ErrorAction SilentlyContinue
         Install-CommonComponents
+        Install-TriageWorker
         Write-Log "Script copied to $InstalledScript"
     }
+    Install-KnownIssuesDeps $cfg
 
     Stop-MonitorTask $cfg
     Register-MonitorTask $cfg
@@ -1107,6 +1156,15 @@ if ($env:RT_LIBRARY -eq '1') { return }
 if ($Monitor) {
     Invoke-Monitor
     exit $script:ExitCode
+}
+
+# On-demand fault-id + dedupe over the configured dump folder (no admin needed).
+if ($Triage) {
+    $cfg = Read-Config
+    $worker = if (Test-Path $InstalledTriage) { $InstalledTriage } else { Join-Path $MonScriptDir 'DumpTriage.ps1' }
+    if (-not (Test-Path $worker)) { Write-Host 'DumpTriage.ps1 not found.' -ForegroundColor Red; exit 1 }
+    & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $worker -DumpDir $cfg.DumpDir
+    exit $LASTEXITCODE
 }
 
 if (-not (Test-Admin)) {

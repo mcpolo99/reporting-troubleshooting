@@ -23,7 +23,7 @@ function Show-MainWindow {
                    'TxtPvOutput','TxtPvSym','ChkPvMerge','ChkPvZip','BtnPvSettingsSave',
                    'BtnMonInstall','BtnMonStart','BtnMonStop','BtnMonStatus','BtnMonUninstall','LblMonStatus','PnlMonConfig','BtnMonSave','BtnMonReload','ChkMonTail','TxtMonLog',
                    'TxtCaseExe','BtnCaseBrowse','CmbCaseMode','ChkCaseFusion','ChkCaseAppConfig','TxtCaseTimeout','BtnCaseRun','LblCaseStatus',
-                   'BtnPkgInstallAll','BtnPkgRefresh','BtnPkgOpen','PnlPackages','LblPkgStatus',
+                   'BtnPkgInstallAll','BtnPkgRefresh','BtnPkgOpen','BtnPkgVerify','PnlPackages','LblPkgStatus',
                    'BtnShortcut') {
         Set-Variable -Name $n -Scope script -Value $w.FindName($n)
     }
@@ -445,6 +445,13 @@ function Show-MainWindow {
         & $script:Append 'Packages: install / verify all...'
         $done = { $script:Busy['Pkg'] = $false; $script:LblPkgStatus.Text = 'Done.'; script:Build-PkgEditor }
         Start-ToolJob -Runspace $script:RsPkg -Script { Install-AllPackages | Out-Null } -OnText $script:Append -OnDone $done | Out-Null
+    })
+    $script:BtnPkgVerify.Add_Click({
+        if ($script:Busy['Pkg']) { & $script:Append 'Packages: busy - try again in a moment.'; return }
+        $script:Busy['Pkg'] = $true; $script:LblPkgStatus.Text = 'Verifying dependencies...'
+        & $script:Append 'Packages: verifying dependencies (this opens a sample dump - a few seconds)...'
+        $done = { $script:Busy['Pkg'] = $false; $script:LblPkgStatus.Text = 'Dependency check done.' }
+        Start-ToolJob -Runspace $script:RsPkg -Script { Test-Dependencies } -OnText $script:Append -OnDone $done | Out-Null
     })
     $script:BtnPkgRefresh.Add_Click({ script:Build-PkgEditor })
     $script:BtnPkgOpen.Add_Click({
