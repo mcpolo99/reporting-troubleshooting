@@ -5,6 +5,13 @@ truth; each release is tagged `vX.Y.Z` and published as a GitHub release by `scr
 
 <!-- NEW RELEASES INSERTED BELOW -->
 
+## [v1.0.37] - 2026-10-26
+Changes since v1.0.36:
+
+### Features
+- live PerfView progress + Max capture profile (e36e623)
+
+
 ## [v1.0.36] - 2026-10-26
 Changes since v1.0.35:
 
@@ -243,6 +250,7 @@ Changes since v1.0.0:
 - WPF/XAML launcher (GUI default, `-CLI` text menu) with shared light/dark theme.
 - Shared components (logging, admin/signature/prompt/version helpers) under `src/Common`.
 - Bootstrap installer (`src/Get.ps1` + `src/run.bat`) with version check against GitHub.
+
 
 
 
