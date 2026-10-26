@@ -5,6 +5,14 @@ truth; each release is tagged `vX.Y.Z` and published as a GitHub release by `scr
 
 <!-- NEW RELEASES INSERTED BELOW -->
 
+## [v1.0.33] - 2026-10-26
+### Features
+- `-Branch <name>` installs any branch's head for testing, isolated under `%ProgramData%\ReportingTroubleshooting\branch\<name>` so it never overwrites the stable install. `-Dev` is now shorthand for `-Branch develop`. The shared tool store and per-tool data stay machine-wide, so a branch build reuses already-installed tools.
+
+### Fixes
+- Release automation now publishes notes via `--notes-file`, so multi-line notes containing quotes like "this" and 'that' no longer break `gh release create`.
+
+
 ## [v1.0.32] - 2026-10-26
 ### Features
 - Dump fault-identification and known-issues de-duplication. Every crash, hang or exception dump is given a STABLE fault id (crash = faulting module+offset; hang / managed exception = the normalised managed call stack, walked with ClrMD using the .NET Framework DAC already on the machine). Occurrences are recorded per machine; the first dump of an issue is kept and later recurrences are counted and suppressed, so already-analysed problems stop piling up.
@@ -216,6 +224,7 @@ Changes since v1.0.0:
 - WPF/XAML launcher (GUI default, `-CLI` text menu) with shared light/dark theme.
 - Shared components (logging, admin/signature/prompt/version helpers) under `src/Common`.
 - Bootstrap installer (`src/Get.ps1` + `src/run.bat`) with version check against GitHub.
+
 
 
 
