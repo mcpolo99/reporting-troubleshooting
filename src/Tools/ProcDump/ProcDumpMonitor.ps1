@@ -64,7 +64,8 @@ $script:LogPart    = 1
 $script:ExitCode   = 0
 $script:LogCount   = 0
 $script:LogPrefix  = $AppName
-$script:EchoLog    = $false        # also print log lines to the console (interactive use)
+$script:EchoLog    = $false        # also print log lines to the console / Information stream (interactive use + GUI capture)
+$script:Interactive = $false       # a console host that can actually Read-Host (menu mode only; NOT the GUI runspace)
 $script:LogMaxMB   = 10
 
 # =============================== SHARED COMPONENTS ======================
@@ -813,7 +814,10 @@ function Start-MonitorTask {
 # =============================== VERSION / UPDATE ========================
 # Get-ScriptVersionFromFile and Format-Version come from the shared Common component.
 function Confirm-Step([string]$Question) {
-    if (-not $script:EchoLog) { return [bool]$Force }       # unattended: only with -Force
+    # Only a real console session can prompt. The GUI runspace sets EchoLog (to capture Write-Log on the
+    # Information stream) but is NOT interactive, so prompting there throws "host does not support user
+    # interaction". Unattended / GUI: proceed only when -Force was requested.
+    if (-not $script:Interactive) { return [bool]$Force }
     (Read-Host "$Question (y/N)") -eq 'y'
 }
 
@@ -890,8 +894,8 @@ function Invoke-Install {
     }
     $cfg = Read-Config
     if (-not (Test-Path $ConfigFile)) {
-        if ($script:EchoLog) { Write-Host 'No config yet - running setup first.'; $cfg = Edit-Config $cfg }
-        else { Save-Config $cfg }
+        if ($script:Interactive) { Write-Host 'No config yet - running setup first.'; $cfg = Edit-Config $cfg }
+        else { Save-Config $cfg }   # GUI / unattended: write defaults; edit later via the Monitor tab
     }
     foreach ($d in @($BaseDir, $ToolsDir, $LogDir, $cfg.DumpDir)) { New-Item -ItemType Directory -Path $d -Force | Out-Null }
 
@@ -1242,6 +1246,7 @@ if (-not (Test-Admin)) {
 $script:LogPrefix = "$AppName-Setup"
 New-LogFile
 $script:EchoLog = -not ($Install -or $Update -or $Uninstall)   # menu mode prints to console; switches are silent
+$script:Interactive = $script:EchoLog                          # only the console menu can Read-Host
 Write-Log "Setup session (v$ScriptVersion) started by $env:USERDOMAIN\$env:USERNAME from $PSCommandPath"
 
 if     ($Install)   { Invoke-Install }

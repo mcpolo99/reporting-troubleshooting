@@ -388,7 +388,9 @@ function Show-MainWindow {
         }
     }
 
-    $script:BtnMonInstall.Add_Click({ & $script:Append 'Monitor: install...'; script:Invoke-Action 'Mon' $script:RsMon { Invoke-Install } @() $script:RefreshMon })
+    # Install from the GUI always refreshes the installed copy (that is the button's purpose), so force the
+    # "reinstall same version?" / downgrade confirmations the non-interactive runspace cannot answer.
+    $script:BtnMonInstall.Add_Click({ & $script:Append 'Monitor: install...'; script:Invoke-Action 'Mon' $script:RsMon { $script:Force = $true; Invoke-Install } @() $script:RefreshMon })
     $script:BtnMonStart.Add_Click({ & $script:Append 'Monitor: start... (live attach/dump activity shows in the "Monitor log (live)" panel below)'; script:Invoke-Action 'Mon' $script:RsMon { Start-MonitorTask } @() $script:RefreshMon })
     $script:BtnMonStop.Add_Click({ & $script:Append 'Monitor: stop...'; script:Invoke-Action 'Mon' $script:RsMon { Stop-MonitorTask (Read-Config) } @() $script:RefreshMon })
     $script:BtnMonStatus.Add_Click({ & $script:RefreshMon })
