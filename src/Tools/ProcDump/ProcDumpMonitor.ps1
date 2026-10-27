@@ -1178,9 +1178,8 @@ if ($Monitor) {
 # On-demand fault-id + dedupe over the configured dump folder (no admin needed).
 if ($Triage) {
     $cfg = Read-Config
-    $worker = if (Test-Path $InstalledTriage) { $InstalledTriage } else { Join-Path $MonScriptDir 'DumpTriage.ps1' }
-    if (-not (Test-Path $worker)) { Write-Host 'DumpTriage.ps1 not found.' -ForegroundColor Red; exit 1 }
-    & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $worker -DumpDir $cfg.DumpDir
+    if (-not (Test-Path $InstalledTriage)) { Write-Host 'DumpTriage.ps1 not found.' -ForegroundColor Red; exit 1 }
+    & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $InstalledTriage -DumpDir $cfg.DumpDir
     exit $LASTEXITCODE
 }
 
