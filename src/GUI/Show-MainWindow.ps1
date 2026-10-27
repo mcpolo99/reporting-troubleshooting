@@ -512,6 +512,13 @@ function Show-MainWindow {
     $script:IsBranchInstall = [bool]($script:InstallRoot -match '\\branch\\')
     $script:BranchName      = if (Test-Path (Join-Path $script:InstallRoot '.branch')) { (Get-Content (Join-Path $script:InstallRoot '.branch') -Raw).Trim() }
                               elseif ($script:IsBranchInstall) { Split-Path $script:InstallRoot -Leaf } else { '' }
+    # A branch build shares the release VERSION number but runs different code - make it visibly distinct so
+    # you can tell a branch install from the release (show the branch name + the installed commit sha).
+    if ($script:BranchName) {
+        $__sha = if (Test-Path (Join-Path $script:InstallRoot '.version')) { (Get-Content (Join-Path $script:InstallRoot '.version') -Raw).Trim() } else { '' }
+        $__short = if ($__sha.Length -ge 7) { $__sha.Substring(0, 7) } else { $__sha }
+        $script:LblVersion.Text = "v$ScriptVersion  (branch: $($script:BranchName)$(if ($__short) { "@$__short" } else { '' }))"
+    }
     $script:UpdateAvailable = $false
 
     # Runs in the dedicated RsUpd runspace (self-contained, built-in cmdlets only) and returns ONE sentinel
