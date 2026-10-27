@@ -845,11 +845,18 @@ function Start-MonitorRun {
     }
 }
 
-# What the "Start Monitor" button/menu does. If the service is enabled (the scheduled task exists), Start acts
-# on the service - it starts that task (persistent). If no service is enabled, it is simply a non-persistent
-# run in this session. Stopping is symmetric: Stop-Monitor ends whichever is running (task and/or process).
+# What the "Start Monitor" button/menu does. If the service is enabled AND its task points at THIS install's
+# src, Start starts that task (persistent). Otherwise - no task, or a task left over from an old install/path
+# that would just fail - it does a non-persistent run in this session, so Start always does something useful.
+# Enable Service re-registers the task to restore persistence. Stop-Monitor ends whichever is running.
 function Start-Monitor {
-    if (Get-MonitorTask) { Start-MonitorTask } else { Start-MonitorRun }
+    $task = Get-MonitorTask
+    if ($task) {
+        $pointsHere = @($task.Actions | Where-Object { "$($_.Arguments)" -like "*$InstalledScript*" })
+        if ($pointsHere.Count) { Start-MonitorTask; return }
+        Write-Log "A scheduled task exists but points at an old path, not this install's src - starting a non-persistent run instead. Click 'Enable Service' to re-register the task for persistence across logon/reboot." 'WARN'
+    }
+    Start-MonitorRun
 }
 
 # =============================== VERSION / UPDATE ========================
