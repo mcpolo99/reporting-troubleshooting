@@ -44,7 +44,7 @@ function Show-MainWindow {
                    'CmbPvProfile','TxtPvLabel','BtnPvStart','BtnPvStop','BtnPvAbort','TxtPvSeconds','BtnPvOpen','BtnPvStatus','LblPvStatus',
                    'TxtPvProfName','PnlPvKernel','CmbPvClr','PnlPvProviders','TxtPvProvOther','TxtPvExtra','TxtPvCircular','TxtPvBuffer','BtnPvProfSave','BtnPvProfDelete','BtnPvProfDefault',
                    'TxtPvOutput','TxtPvSym','ChkPvMerge','ChkPvZip','BtnPvSettingsSave',
-                   'BtnMonInstall','BtnMonStart','BtnMonStop','BtnMonStatus','BtnMonUninstall','LblMonStatus','BtnMonVerify','LblMonVerify','PnlMonConfig','BtnMonSave','BtnMonReload','ChkMonTail','TxtMonLog',
+                   'BtnMonEnable','BtnMonStart','BtnMonStop','BtnMonStatus','BtnMonDisable','LblMonStatus','BtnMonVerify','LblMonVerify','PnlMonConfig','BtnMonSave','BtnMonReload','ChkMonTail','TxtMonLog',
                    'TxtCaseExe','BtnCaseBrowse','CmbCaseMode','ChkCaseFusion','ChkCaseAppConfig','TxtCaseTimeout','BtnCaseRun','LblCaseStatus',
                    'BtnPkgInstallAll','BtnPkgRefresh','BtnPkgOpen','BtnPkgUpdate','LblPkgUpdate','PnlPackages','LblPkgStatus',
                    'BtnShortcut') {
@@ -409,11 +409,11 @@ function Show-MainWindow {
 
     # Enable from the GUI always refreshes the registered task (that is the button's purpose), so force the
     # "re-register same version?" / downgrade confirmations the non-interactive runspace cannot answer.
-    $script:BtnMonInstall.Add_Click({ & $script:Append 'Monitor: enabling...'; script:Invoke-Action 'Mon' $script:RsMon { $script:Force = $true; Invoke-Install } @() $script:RefreshMon })
-    $script:BtnMonStart.Add_Click({ & $script:Append 'Monitor: start... (live attach/dump activity shows in the "Monitor log (live)" panel below)'; script:Invoke-Action 'Mon' $script:RsMon { Start-MonitorTask } @() $script:RefreshMon })
-    $script:BtnMonStop.Add_Click({ & $script:Append 'Monitor: stop...'; script:Invoke-Action 'Mon' $script:RsMon { Stop-MonitorTask (Read-Config) } @() $script:RefreshMon })
+    $script:BtnMonEnable.Add_Click({ & $script:Append 'Monitor: enabling service...'; script:Invoke-Action 'Mon' $script:RsMon { $script:Force = $true; Enable-Service } @() $script:RefreshMon })
+    $script:BtnMonStart.Add_Click({ & $script:Append 'Monitor: starting... (live attach/dump activity shows in the "Monitor log (live)" panel below)'; script:Invoke-Action 'Mon' $script:RsMon { Start-Monitor } @() $script:RefreshMon })
+    $script:BtnMonStop.Add_Click({ & $script:Append 'Monitor: stopping...'; script:Invoke-Action 'Mon' $script:RsMon { Stop-Monitor (Read-Config) } @() $script:RefreshMon })
     $script:BtnMonStatus.Add_Click({ & $script:RefreshMon })
-    $script:BtnMonUninstall.Add_Click({ & $script:Append 'Monitor: disabling...'; script:Invoke-Action 'Mon' $script:RsMon { Invoke-Uninstall } @() $script:RefreshMon })
+    $script:BtnMonDisable.Add_Click({ & $script:Append 'Monitor: disabling service...'; script:Invoke-Action 'Mon' $script:RsMon { Disable-Service } @() $script:RefreshMon })
     $script:BtnMonVerify.Add_Click({
         if ($script:Busy['Mon']) { & $script:Append 'Monitor: busy - try again in a moment.'; return }
         $script:LblMonVerify.Text = 'Verifying dependencies for the monitored apps (attaching briefly to each running app)...'

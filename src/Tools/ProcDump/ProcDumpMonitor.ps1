@@ -743,7 +743,7 @@ function Stop-MonitorProcesses {
 # Graceful: ask the monitor to stop via a request file; it detaches ProcDump and exits by itself. Then
 # GUARANTEE it: force-end any loop process the task left behind (e.g. a conhost-launched PowerShell), and
 # only afterwards detach ProcDump - so nothing re-arms it between detach and loop-death.
-function Stop-MonitorTask($cfg, [int]$TimeoutSec = 60) {
+function Stop-Monitor($cfg, [int]$TimeoutSec = 60) {
     $task = Get-MonitorTask
     $running = ($task -and $task.State -eq 'Running') -or (@(Get-MonitorProcesses).Count -gt 0)
     if (-not $running) {
@@ -814,6 +814,44 @@ function Start-MonitorTask {
     }
 }
 
+# Non-persistent run (what "Start" does): launch the monitor loop as a detached, hidden process in THIS
+# session - NO scheduled task involved. The run lives until Stop (or until the user logs off); it is not
+# re-created at logon. The Global mutex in Invoke-Monitor guarantees a single monitor, so this never
+# collides with an enabled task. For a monitor that survives logon/reboot, use Enable (registers the task).
+function Start-MonitorRun {
+    if (-not (Test-Path -LiteralPath $InstalledScript)) {
+        Write-Log "Monitor script not found at $InstalledScript - the app's src is missing. Reinstall the app." 'ERROR'; return
+    }
+    $taskRunning = (Get-MonitorTask) -and (Get-MonitorTask).State -eq 'Running'
+    if ($taskRunning -or @(Get-MonitorProcesses).Count -gt 0) {
+        Write-Log 'Monitor is already running - nothing to start.'; return
+    }
+    Remove-Item $StopFile -Force -ErrorAction SilentlyContinue   # clear any stale stop request
+    $p = Start-Process powershell.exe -WindowStyle Hidden -PassThru -ArgumentList @(
+        '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-WindowStyle', 'Hidden',
+        '-File', "`"$InstalledScript`"", '-Monitor')
+
+    # Confirm it actually came up: a healthy monitor spawns its loop process and acquires the mutex within a
+    # few seconds. If the launched process died immediately, say so instead of claiming success.
+    $deadline = (Get-Date).AddSeconds(6); $up = $false
+    while ((Get-Date) -lt $deadline) {
+        Start-Sleep -Milliseconds 400
+        if (-not $p.HasExited -and @(Get-MonitorProcesses).Count -gt 0) { $up = $true; break }
+    }
+    if ($up) {
+        Write-Log "Monitor started (this session, PID $($p.Id)). Runs until you click Stop or log off. Click Enable for a monitor that survives logon/reboot."
+    } else {
+        Write-Log "Monitor exited immediately after start - see the newest monitor log in $LogDir for why." 'ERROR'
+    }
+}
+
+# What the "Start Monitor" button/menu does. If the service is enabled (the scheduled task exists), Start acts
+# on the service - it starts that task (persistent). If no service is enabled, it is simply a non-persistent
+# run in this session. Stopping is symmetric: Stop-Monitor ends whichever is running (task and/or process).
+function Start-Monitor {
+    if (Get-MonitorTask) { Start-MonitorTask } else { Start-MonitorRun }
+}
+
 # =============================== VERSION / UPDATE ========================
 # Get-ScriptVersionFromFile and Format-Version come from the shared Common component.
 function Confirm-Step([string]$Question) {
@@ -824,11 +862,12 @@ function Confirm-Step([string]$Question) {
     (Read-Host "$Question (y/N)") -eq 'y'
 }
 
-# =============================== INSTALL / UNINSTALL =====================
-# "Install" / "Enable" = register the scheduled task to run THIS script in place from src, and start it.
-# It copies NO scripts anywhere (src is the one correct location; an app update refreshes src directly). It
-# only ensures config/dirs/tools exist, (re)registers the task, and starts it.
-function Invoke-Install {
+# =============================== ENABLE / DISABLE SERVICE ===============
+# Enable Service = register the scheduled task to run THIS script in place from src (persistent across
+# logon/reboot), and start it. It copies NO scripts anywhere (src is the one correct location; an app update
+# refreshes src directly). It only ensures config/dirs/tools exist, (re)registers the task, and starts it.
+# (A non-persistent run that needs no task is Start-MonitorRun.)
+function Enable-Service {
     $cfg = Read-Config
     if (-not (Test-Path $ConfigFile)) {
         if ($script:Interactive) { Write-Host 'No config yet - running setup first.'; $cfg = Edit-Config $cfg }
@@ -839,24 +878,24 @@ function Invoke-Install {
     Install-KnownIssuesDeps $cfg
     Save-Config $cfg                        # merge defaults (new keys appear in the editor); preserves edits
 
-    Stop-MonitorTask $cfg                   # stop any running instance so the fresh start picks up current src
+    Stop-Monitor $cfg                   # stop any running instance so the fresh start picks up current src
     Register-MonitorTask $cfg               # task runs "$InstalledScript -Monitor" in place - nothing copied
     Start-MonitorTask
-    Write-Log "Monitor enabled: task registered to run $InstalledScript in place (version $ScriptVersion). No scripts copied."
+    Write-Log "Service enabled: task registered to run $InstalledScript in place (version $ScriptVersion). No scripts copied."
 }
 
 # Scripts run in place from src, so an app update already refreshed them. "Update" just re-registers the task
 # (its definition may have changed between versions) and restarts to pick up the current src.
-function Invoke-Update { Invoke-Install }
+function Invoke-Update { Enable-Service }
 
-function Invoke-Uninstall {
-    # Uninstall removes ONLY the scheduled task. Config, logs and the installed script are kept so a later
-    # reinstall reuses the same configuration - uninstall must never clear config. Dumps live in C:\dumps
+function Disable-Service {
+    # Disable removes ONLY the scheduled task. Config, logs and the installed script are kept so a later
+    # re-enable reuses the same configuration - disable must never clear config. Dumps live in C:\dumps
     # (outside BaseDir) and are untouched regardless.
     $cfg = Read-Config
-    Stop-MonitorTask $cfg
+    Stop-Monitor $cfg
     if (Get-MonitorTask) {
-        # Disable first so no trigger (logon / StartWhenAvailable) can fire it mid-uninstall, then remove it.
+        # Disable the trigger first so no logon / StartWhenAvailable event can fire it mid-removal, then remove it.
         Disable-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue | Out-Null
         Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false
         Write-Log 'Scheduled task removed.'
@@ -864,8 +903,8 @@ function Invoke-Uninstall {
     $left = Stop-MonitorProcesses      # belt and suspenders: nothing left to re-arm ProcDump
     if ($left) { Write-Log "Ended $left monitor process(es) still running after task removal." 'WARN' }
     Stop-ProcDumpInstances $cfg
-    Write-Log "Configuration preserved at $ConfigFile. Uninstall removes only the scheduled task; delete $BaseDir by hand if you want config/logs gone."
-    Write-Host 'Uninstall complete - scheduled task removed; configuration preserved.'
+    Write-Log "Configuration preserved at $ConfigFile. Disable removes only the scheduled task; delete $BaseDir by hand if you want config/logs gone."
+    Write-Host 'Service disabled - scheduled task removed; configuration preserved.'
 }
 
 # =============================== INTERACTIVE =============================
@@ -903,7 +942,7 @@ function Edit-Config($cfg) {
     Save-Config $cfg
     if (Get-MonitorTask) {
         if ((Read-Host 'Re-register task and restart monitor with new settings? (Y/n)') -ne 'n') {
-            Stop-MonitorTask $cfg
+            Stop-Monitor $cfg
             Register-MonitorTask $cfg
             Start-MonitorTask
         }
@@ -954,29 +993,29 @@ function Show-Menu {
             Write-Host "   >> Update available: $(Format-Version $iv) -> $ScriptVersion  (choose U)" -ForegroundColor Green
         }
         Write-Host ' 1) Setup / edit configuration'
-        Write-Host ' 2) Install (download ProcDump, copy script, create scheduled task, start)'
+        Write-Host ' 2) Enable Service (download ProcDump, register the persistent scheduled task, start)'
         Write-Host ' 3) Status'
-        Write-Host ' 4) Start monitor'
+        Write-Host ' 4) Start monitor (starts the service if enabled, otherwise a non-persistent run)'
         Write-Host ' 5) Stop monitor'
         Write-Host ' 6) Run monitor in this window (testing, Ctrl+C to stop)'
         Write-Host ' 7) Update Sysinternals Suite to latest'
         Write-Host ' 8) Open dump folder'
-        Write-Host ' 9) Uninstall'
+        Write-Host ' 9) Disable Service (remove the scheduled task)'
         Write-Host ' U) Update installed copy from this script (version check, backup, keeps config)'
         Write-Host ' Q) Quit'
         switch ((Read-Host 'Select').Trim().ToUpper()) {
             '1' { $null = Edit-Config (Read-Config) }
-            '2' { Invoke-Install }
+            '2' { Enable-Service }
             '3' { Show-Status }
-            '4' { Start-MonitorTask }
-            '5' { Stop-MonitorTask (Read-Config) }
+            '4' { Start-Monitor }
+            '5' { Stop-Monitor (Read-Config) }
             '6' { Invoke-Monitor; $script:LogPrefix = "$AppName-Setup"; New-LogFile }
             '7' { $cfg = Read-Config; $was = $installed -and (Get-MonitorTask).State -eq 'Running'
-                  if ($was) { Stop-MonitorTask $cfg }
+                  if ($was) { Stop-Monitor $cfg }
                   $null = Install-Sysinternals -Force
                   if ($was) { Start-MonitorTask } }
             '8' { $d = (Read-Config).DumpDir; if (Test-Path $d) { Start-Process explorer.exe $d } else { Write-Host 'Folder does not exist yet.' } }
-            '9' { if ((Read-Host 'Really uninstall? (y/N)') -eq 'y') { Invoke-Uninstall } }
+            '9' { if ((Read-Host 'Really disable the service? (y/N)') -eq 'y') { Disable-Service } }
             'U' { Invoke-Update }
             'Q' { return }
             default { Write-Host 'Unknown choice.' -ForegroundColor Yellow }
@@ -1197,7 +1236,7 @@ $script:EchoLog = -not ($Install -or $Update -or $Uninstall)   # menu mode print
 $script:Interactive = $script:EchoLog                          # only the console menu can Read-Host
 Write-Log "Setup session (v$ScriptVersion) started by $env:USERDOMAIN\$env:USERNAME from $PSCommandPath"
 
-if     ($Install)   { Invoke-Install }
+if     ($Install)   { Enable-Service }
 elseif ($Update)    { Invoke-Update }
-elseif ($Uninstall) { Invoke-Uninstall }
+elseif ($Uninstall) { Disable-Service }
 else                { Show-Menu }
