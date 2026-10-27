@@ -24,6 +24,20 @@ param(
     [switch]$Quiet
 )
 
+# The monitor runs this DETACHED + hidden + -Quiet, so a crash (e.g. an incomplete engine deploy) would be
+# invisible - which looks exactly like "dumps appear but no JSON/registry". Log any terminating error to a
+# file so it is never silent.
+trap {
+    try {
+        $__ld = Join-Path $env:ProgramData 'ReportingTroubleshooting\Monitor\Logs'
+        if (-not (Test-Path $__ld)) { New-Item -ItemType Directory -Path $__ld -Force | Out-Null }
+        Add-Content -LiteralPath (Join-Path $__ld 'DumpTriage-error.log') -Encoding UTF8 `
+            -Value ('{0}  FAILED: {1}`n{2}' -f (Get-Date -Format o), $_.Exception.Message, $_.ScriptStackTrace)
+    } catch {}
+    if (-not $Quiet) { Write-Host "DumpTriage failed: $($_.Exception.Message)" -ForegroundColor Red }
+    exit 1
+}
+
 $ScriptDir = if ($PSCommandPath) { Split-Path -Parent $PSCommandPath } else { (Get-Location).Path }
 
 # locate Common\ upward (same probe the other tools use)
