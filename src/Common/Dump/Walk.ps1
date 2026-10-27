@@ -180,24 +180,17 @@ function Invoke-DumpWalk {
         if ($allText -match 'MeasureOverride|ArrangeOverride|MeasureCore|ArrangeCore|ContextLayoutManager|UpdateLayout') { $stormOps += 'layout' }
         $dom = $null; $domN = 0
         foreach ($k in $freq.Keys) { if ((Test-FrameworkFrame $k) -and [int]$freq[$k] -gt $domN) { $dom = $k; $domN = [int]$freq[$k] } }
-        # Collect frames leaf-first: keep the top $Max for leaf context, THEN keep going but retain only the
-        # APPLICATION frames (the vendor evidence), collapsing runs of deeper framework frames into one honest
-        # "... N framework frame(s) omitted ..." marker. This guarantees vendor frames appear in the stack even
-        # when a deep framework recursion (e.g. WPF layout/binding) would otherwise push them past the cut.
-        $frames = @(); $omit = 0; $hardCap = 120
+        # Collect the WHOLE managed stack leaf-first (no omission) so every frame is visible - the deep WPF
+        # recursion AND the vendor root. $Max is the soft intent; $hardCap is a safety bound for a pathological
+        # stack. The compact view (what repeats, how deep) lives in the structured storm fields, not by hiding
+        # frames here.
+        $hardCap = [Math]::Max($Max, 400)
+        $frames = @()
         foreach ($fr in @($target.StackTrace)) {
             if ($fr.Kind -ne [Microsoft.Diagnostics.Runtime.ClrStackFrameType]::ManagedMethod) { continue }
             $n = Normalize-DumpFrame $fr.DisplayString
             if (Test-InfraFrame $n) { continue }
-            $isApp = (-not (Test-FrameworkFrame $n)) -and (-not (Test-BootstrapFrame $n))
-            if ($frames.Count -lt $Max) {
-                $frames += $n
-            } elseif ($isApp) {
-                if ($omit -gt 0) { $frames += ('... {0} framework frame(s) omitted ...' -f $omit); $omit = 0 }
-                $frames += $n
-            } else {
-                $omit++
-            }
+            $frames += $n
             if ($frames.Count -ge $hardCap) { break }
         }
         @{ Frames = $frames; ExceptionType = $excType; ThreadOSID = $target.OSThreadId; UiConfirmed = $uiConfirmed
