@@ -18,11 +18,12 @@
   $ScriptVersion is stamped automatically from the repo VERSION by scripts\New-Release.ps1 at release time -
   NEVER edit it by hand. Release history lives in CHANGELOG.md and the GitHub releases.
   Monitor mode (what the scheduled task runs - not meant to be started by hand):
-      ... -File "%ProgramData%\ReportingTroubleshooting\Monitor\ProcDumpMonitor.ps1" -Monitor
+      ... -File "%ProgramData%\ReportingTroubleshooting\src\Tools\ProcDump\ProcDumpMonitor.ps1" -Monitor
 
 .FILES
-  App data under the one app root %ProgramData%\ReportingTroubleshooting\Monitor\ :
-      ProcDumpMonitor.ps1                 installed copy of this script
+  Scripts run in place from the installed src; the scheduled task and the detached workers point at that src
+  path, so an app update refreshes them with no copy to go stale. %ProgramData%\ReportingTroubleshooting\Monitor\
+  holds DATA only:
       config.json                         settings
       Logs\ProcDumpMonitor_<datetime>.log         one per monitor launch
       Logs\ProcDumpMonitor-Setup_<datetime>.log   one per setup/menu session
@@ -442,11 +443,10 @@ function Get-DumpApp($cfg, [string]$FileName) {
 
 # Launch the fault-identification + dedupe worker for one freshly written dump, DETACHED and at
 # below-normal priority, so the slow managed stack walk never blocks the monitor loop. The worker
-# (DumpTriage.ps1, installed beside this script) computes the stable id, counts the occurrence, and
-# soft-suppresses recurrences of an already-kept/known id.
+# (DumpTriage.ps1, run in place from src next to this script) computes the stable id, counts the
+# occurrence, and soft-suppresses recurrences of an already-kept/known id.
 function Enqueue-DumpTriage([string]$DumpPath) {
-    $worker = Join-Path $BaseDir 'DumpTriage.ps1'
-    if (-not (Test-Path $worker)) { $worker = Join-Path $MonScriptDir 'DumpTriage.ps1' }
+    $worker = $InstalledTriage
     if (-not (Test-Path $worker)) { Write-Log 'DumpTriage.ps1 not found - fault-id skipped for this dump.' 'WARN'; return }
     try {
         $p = Start-Process powershell.exe -WindowStyle Hidden -PassThru -ArgumentList @(

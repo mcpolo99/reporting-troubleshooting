@@ -1,16 +1,10 @@
 <#
-  Online installer: elevate, resolve the latest GitHub release (stable) and when it differs from the
-  installed .version (or -Force) download + install to %ProgramData%\ReportingTroubleshooting, then launch
-  ReportingToolkit.ps1.
-
-  Branch builds (for testing): -Branch <name> installs that branch's head instead of the stable release;
-  -Dev is shorthand for -Branch develop. A branch build is ISOLATED - it installs to
-  %ProgramData%\ReportingTroubleshooting\branch\<name> and runs from there, so it never overwrites the stable
-  install. The shared tool store (...\Packages) and per-tool data (...\Monitor, ...\PerfView) stay machine-wide,
-  so a branch build reuses already-installed tools rather than re-downloading them.
+  Downloads + installs the toolset to %ProgramData%\ReportingTroubleshooting and launches it.
+  -Branch <name> installs that branch's head instead of the latest release; -Dev = -Branch develop;
+  -Force reinstalls.
 #>
 param(
-    [string]$Branch,     # install this branch's head (isolated), e.g. -Branch develop / -Branch feature/foo
+    [string]$Branch,     # install this branch's head, e.g. -Branch develop / -Branch feature/foo
     [switch]$Dev,        # shorthand for -Branch develop
     [switch]$Force
 )
@@ -150,12 +144,9 @@ else {
     }
 }
 
-# Heal a task left disabled by an earlier (isolated) branch build, so the monitor's Start/Enable work.
-try { Enable-ScheduledTask -TaskName 'ProcDumpMonitor' -ErrorAction SilentlyContinue | Out-Null } catch {}
-
 $entry = Join-Path $InstallDir $EntryScript
 if (-not (Test-Path $entry)) { Write-Error "Entry script not found after install: $entry"; return }
-if ($EffBranch) { Write-Host '  Branch installed to the normal location. On the Monitor tab click Enable (redeploys + registers the task), then Start.' -ForegroundColor Yellow }
+if ($EffBranch) { Write-Host '  Branch installed. Monitor tab: Enable registers the task, Start runs it, Disable removes it.' -ForegroundColor Yellow }
 Write-Host '> Launching...'
 Write-Host ''
 & $entry
