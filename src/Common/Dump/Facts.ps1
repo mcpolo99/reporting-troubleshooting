@@ -75,6 +75,27 @@ function Get-DumpFacts {
     $diag = Get-DumpDiagnosis $Sig
 
     $fi = $null; try { $fi = Get-Item -LiteralPath $DumpPath -ErrorAction Stop } catch {}
+
+    # Computer: prefer what the DUMP records (ProcDump comment on newer dumps, else the ".info.txt" sidecar
+    # beside it) over this host - so an off-box re-scan reports the machine that captured, not the analyst box.
+    # The stable deviceId (MachineGuid) only exists for THIS host; if the dump is from another machine we do
+    # not know its guid, so leave it null rather than stamp the wrong one.
+    $hostComputer = $env:COMPUTERNAME
+    $dumpComputer = $null
+    if ($Sig.ProcDumpComment -and $Sig.ProcDumpComment -match '(?im)^\s*computer\s*[:=]\s*(\S+)') { $dumpComputer = $matches[1] }
+    if (-not $dumpComputer) {
+        $info = $DumpPath -replace '\.dmp$', '.info.txt'
+        if (Test-Path -LiteralPath $info) {
+            try {
+                $m = Select-String -LiteralPath $info -Pattern '^\s*Computer\s*[:=]\s*(\S+)' -ErrorAction Stop | Select-Object -First 1
+                if ($m) { $dumpComputer = $m.Matches[0].Groups[1].Value }
+            } catch {}
+        }
+    }
+    $computer = if ($dumpComputer) { $dumpComputer } else { $hostComputer }
+    $computerSource = if ($dumpComputer) { 'dump' } else { 'host' }
+    $offBox = $dumpComputer -and ($dumpComputer -ne $hostComputer)
+    $deviceId = if ($offBox) { $null } else { Get-MachineKey }
     $sha = $null
     if ($escalate -and $fi) {
         if ($Sha256) { $sha = $Sha256.ToLowerInvariant() }
@@ -115,8 +136,9 @@ function Get-DumpFacts {
         emittedAtUtc = (Get-Date).ToUniversalTime().ToString('o')
         ids          = [ordered]@{
             eventId            = (New-DumpEventId)
-            deviceId           = (Get-MachineKey)
-            computer           = $env:COMPUTERNAME
+            deviceId           = $deviceId
+            computer           = $computer
+            computerSource     = $computerSource
             signatureId        = $IdObj.Id
             signatureScheme    = $IdObj.Scheme
             signatureCanonical = $IdObj.Canonical
