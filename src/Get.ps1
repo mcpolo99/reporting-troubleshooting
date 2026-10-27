@@ -1,16 +1,10 @@
 <#
-  Online installer: elevate, resolve the latest GitHub release (stable) and when it differs from the
-  installed .version (or -Force) download + install to %ProgramData%\ReportingTroubleshooting, then launch
-  ReportingToolkit.ps1.
-
-  Branch builds (for testing): -Branch <name> installs that branch's head instead of the stable release;
-  -Dev is shorthand for -Branch develop. A branch build is ISOLATED - it installs to
-  %ProgramData%\ReportingTroubleshooting\branch\<name> and runs from there, so it never overwrites the stable
-  install. The shared tool store (...\Packages) and per-tool data (...\Monitor, ...\PerfView) stay machine-wide,
-  so a branch build reuses already-installed tools rather than re-downloading them.
+  Downloads + installs the toolset to %ProgramData%\ReportingTroubleshooting and launches it.
+  -Branch <name> installs that branch's head instead of the latest release; -Dev = -Branch develop;
+  -Force reinstalls.
 #>
 param(
-    [string]$Branch,     # install this branch's head (isolated), e.g. -Branch develop / -Branch feature/foo
+    [string]$Branch,     # install this branch's head, e.g. -Branch develop / -Branch feature/foo
     [switch]$Dev,        # shorthand for -Branch develop
     [switch]$Force
 )
@@ -28,16 +22,12 @@ $RawGet      = "https://raw.githubusercontent.com/$Owner/$Repo/main/src/Get.ps1"
 $StableDir   = Join-Path $env:ProgramData 'ReportingTroubleshooting'
 $EntryScript = 'src\ReportingToolkit.ps1'
 
-# Effective branch: -Branch wins, -Dev means develop, otherwise stable (latest release).
-$EffBranch = if ($Branch) { $Branch.Trim() } elseif ($Dev) { 'develop' } else { '' }
-if ($EffBranch) {
-    # Isolate branch builds under ...\branch\<name> so they never overwrite the stable install. The name is
-    # sanitised for a folder (feature/foo -> feature-foo); the real branch ref keeps its slashes for GitHub.
-    $safeBranch  = ($EffBranch -replace '[^\w.-]', '-')
-    $InstallDir  = Join-Path $StableDir "branch\$safeBranch"
-} else {
-    $InstallDir  = $StableDir
-}
+# Effective branch: -Branch wins, -Dev means develop, otherwise stable (latest release). A branch build is NOT
+# isolated - it installs to the SAME location as a normal install and replaces it (the monitor task, tool store
+# and data are machine-wide anyway, so isolating only the scripts was illusory and caused "which copy runs?"
+# confusion). To return a machine to the release build, reinstall stable (no -Branch).
+$EffBranch   = if ($Branch) { $Branch.Trim() } elseif ($Dev) { 'develop' } else { '' }
+$InstallDir  = $StableDir
 $VersionFile = Join-Path $InstallDir '.version'
 
 if ($ExecutionContext.SessionState.LanguageMode -ne 'FullLanguage') {
@@ -57,7 +47,10 @@ function Test-Admin {
 if (-not (Test-Admin)) {
     Write-Host '> Requesting administrator rights...'
     $self = Join-Path $env:TEMP 'ReportingTroubleshooting-Get.ps1'
-    try { Invoke-RestMethod $RawGet -OutFile $self } catch { Write-Error "Could not download the bootstrap: $_"; return }
+    # Re-fetch THIS bootstrap for the elevated relaunch - from the branch when installing a branch, so the
+    # branch's own Get.ps1 (this logic) runs elevated, not main's.
+    $selfUrl = if ($EffBranch) { "https://raw.githubusercontent.com/$Owner/$Repo/$EffBranch/src/Get.ps1" } else { $RawGet }
+    try { Invoke-RestMethod $selfUrl -OutFile $self } catch { Write-Error "Could not download the bootstrap: $_"; return }
     $a = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', "`"$self`"")
     if ($Branch) { $a += @('-Branch', "`"$Branch`"") }
     if ($Dev)    { $a += '-Dev' }
@@ -70,7 +63,7 @@ if (-not (Test-Admin)) {
 Clear-Host
 Write-Host '-------------------------------------------------------------------------------------------'
 Write-Host ' Reporting & Troubleshooting toolset'
-if ($EffBranch) { Write-Host " BRANCH BUILD: $EffBranch  (isolated at $InstallDir)" -ForegroundColor Yellow }
+if ($EffBranch) { Write-Host " BRANCH BUILD: $EffBranch  (replaces the release install at $InstallDir)" -ForegroundColor Yellow }
 Write-Host '-------------------------------------------------------------------------------------------'
 
 $headers = @{ 'User-Agent' = 'reporting-troubleshooting-bootstrap' }
@@ -125,12 +118,11 @@ else {
         if (-not $root) { throw 'Unexpected archive layout (no top-level folder).' }
 
         New-Item -ItemType Directory -Path $InstallDir -Force | Out-Null
-        # Replace the installed scripts, but PRESERVE runtime data that lives under the install dir: the
-        # shared package store (installed tools) and logs. Wiping these made installed packages vanish on
-        # every update. (Other tools keep their own state under %ProgramData%\<tool>.)
-        # Stable keeps its machine-wide runtime data (shared tool store, logs, per-tool data) across updates.
-        # A branch dir holds only scripts - that data lives under the stable root - so only .version is kept.
-        $preserve = if ($EffBranch) { @('.version', '.branch') } else { @('.version', 'Packages', 'Logs', 'PerfView', 'Monitor', 'Case', 'Icons') }
+        # Replace the installed scripts, but PRESERVE the machine-wide runtime data under the install dir: the
+        # shared tool store, logs and per-tool data (wiping these made installed packages vanish on every
+        # update). Same for a branch build now that it installs to this same location; .branch records that
+        # this install came from a branch so the in-app updater re-pulls it.
+        $preserve = @('.version', '.branch', 'Packages', 'Logs', 'PerfView', 'Monitor', 'Case', 'Icons')
         Get-ChildItem $InstallDir -Force | Where-Object { $preserve -notcontains $_.Name } |
             Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
         Get-ChildItem $root.FullName -Force | Copy-Item -Destination $InstallDir -Recurse -Force
@@ -138,9 +130,11 @@ else {
             ForEach-Object { Unblock-File $_.FullName -ErrorAction SilentlyContinue }
 
         Set-Content -Path $VersionFile -Value $ref -Encoding ASCII
-        # Record the real branch name (the folder name is sanitised and may differ, e.g. feature/foo ->
-        # feature-foo) so the in-app updater can re-install the same branch.
-        if ($EffBranch) { Set-Content -Path (Join-Path $InstallDir '.branch') -Value $EffBranch -Encoding ASCII }
+        # Record the branch so the in-app updater re-pulls it; clear the marker on a stable/release install so
+        # the machine is no longer treated as a branch build.
+        $branchMarker = Join-Path $InstallDir '.branch'
+        if ($EffBranch) { Set-Content -Path $branchMarker -Value $EffBranch -Encoding ASCII }
+        elseif (Test-Path $branchMarker) { Remove-Item $branchMarker -Force -ErrorAction SilentlyContinue }
         Write-Host "> Installed to $InstallDir"
     }
     catch { Write-Error "Install failed: $_"; return }
@@ -152,6 +146,7 @@ else {
 
 $entry = Join-Path $InstallDir $EntryScript
 if (-not (Test-Path $entry)) { Write-Error "Entry script not found after install: $entry"; return }
+if ($EffBranch) { Write-Host '  Branch installed. Monitor tab: Enable registers the task, Start runs it, Disable removes it.' -ForegroundColor Yellow }
 Write-Host '> Launching...'
 Write-Host ''
 & $entry
