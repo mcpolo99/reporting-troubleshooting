@@ -64,10 +64,17 @@ function Get-DumpSignature([string]$Path) {
         $dirs = @(for ($i = 0; $i -lt $nStreams; $i++) { ,@($br.ReadUInt32(), $br.ReadUInt32(), $br.ReadUInt32()) })
 
         $code = $null; $threadId = $null; $address = $null; $procId = $null
+        $osMajor = $null; $osMinor = $null; $osBuild = $null; $numProc = $null; $archCode = $null
         $modules = @()
         foreach ($d in $dirs) {
             $type = $d[0]; $size = $d[1]; $rva = $d[2]
-            if ($type -eq 6 -and $size -ge 40) {                   # ExceptionStream
+            if ($type -eq 7 -and $size -ge 24) {                   # SystemInfoStream (OS + CPU of the DUMPED box)
+                $fs.Position = $rva
+                $archCode = $br.ReadUInt16(); [void]$br.ReadUInt16(); [void]$br.ReadUInt16()   # arch, level, revision
+                $numProc = $br.ReadByte(); [void]$br.ReadByte()                                 # NumberOfProcessors, ProductType
+                $osMajor = $br.ReadUInt32(); $osMinor = $br.ReadUInt32(); $osBuild = $br.ReadUInt32()
+            }
+            elseif ($type -eq 6 -and $size -ge 40) {               # ExceptionStream
                 $fs.Position = $rva
                 $threadId = $br.ReadUInt32(); [void]$br.ReadUInt32()
                 $code = $br.ReadUInt32(); [void]$br.ReadUInt32(); [void]$br.ReadUInt64()
@@ -125,6 +132,10 @@ function Get-DumpSignature([string]$Path) {
         $imageMod = if ($modules.Count) { $modules[0] } else { $null }
         $clrMod   = $modules | Where-Object { $_.Name -match '(?i)^(clr|coreclr|mscorwks)$' } | Select-Object -First 1
 
+        # OS + CPU read from the dump itself (correct wherever analysis runs, unlike the local machine).
+        $arch = switch ($archCode) { 9 { 'x64' } 0 { 'x86' } 12 { 'arm64' } 5 { 'arm' } 6 { 'ia64' } default { if ($null -ne $archCode) { "arch$archCode" } else { $null } } }
+        $os   = if ($null -ne $osMajor) { 'Windows NT {0}.{1}.{2}' -f $osMajor, $osMinor, $osBuild } else { $null }
+
         [pscustomobject]@{
             Kind       = $kind
             Code       = if ($null -ne $code) { '{0:X8}' -f $code } else { $null }
@@ -139,6 +150,9 @@ function Get-DumpSignature([string]$Path) {
             ImageVer   = if ($imageMod) { & $fmtVer $imageMod } else { $null }
             ClrName    = if ($clrMod) { $clrMod.Name } else { $null }
             ClrVer     = if ($clrMod) { & $fmtVer $clrMod } else { $null }
+            Os         = $os
+            Cpus       = $numProc
+            Arch       = $arch
             Frames     = @()          # filled by Invoke-DumpWalk for Tier-2 kinds
             ExceptionType = $null     # filled by Invoke-DumpWalk for managed-exception dumps
         }
@@ -607,7 +621,10 @@ function Invoke-DumpTriage {
     if ($sig.Kind -ne 'crash' -and $ClrMdDll -and (Test-Path -LiteralPath $ClrMdDll)) {
         $tos = if ($sig.ThreadId) { [int]$sig.ThreadId } else { 0 }
         $walk = Invoke-DumpWalk -Path $DumpPath -ClrMdDll $ClrMdDll -TargetOSID $tos
-        if ($walk) { $sig.Frames = $walk.Frames; $sig.ExceptionType = $walk.ExceptionType }
+        if ($walk) {
+            $sig.Frames = $walk.Frames; $sig.ExceptionType = $walk.ExceptionType
+            if (-not $sig.ThreadId -and $walk.ThreadOSID) { $sig.ThreadId = $walk.ThreadOSID }   # hang: the walked UI/dispatcher thread
+        }
     }
 
     $idObj = Get-DumpStableId $sig

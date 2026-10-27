@@ -108,6 +108,16 @@ function Get-DumpFacts {
     if ($Sig.Kind -eq 'crash') { $notes += 'native stack, nearest-export names and any heap-failure record require central cdb enrichment (not read at the edge)' }
     if ($IdObj.WalkPending)    { $notes += 'managed stack walk unavailable (ClrMD missing or failed) - signature is provisional, dump kept for central analysis' }
 
+    # Environment: prefer values read from the DUMP (correct wherever analysis runs); fall back to this machine
+    # (valid only when analysis runs on the box that captured). Keep both friendly OS and the dump build.
+    $hostEnv = Get-MachineEnvironment
+    $environment = [ordered]@{
+        os    = if ($Sig.Os) { $Sig.Os } else { $hostEnv.os }
+        cpus  = if ($null -ne $Sig.Cpus) { [int]$Sig.Cpus } else { $hostEnv.cpus }
+        arch  = if ($Sig.Arch) { $Sig.Arch } else { $hostEnv.arch }
+        osSource = if ($Sig.Os) { 'dump' } else { 'host' }
+    }
+
     [ordered]@{
         schema       = $script:FACTS_SCHEMA
         emittedAtUtc = (Get-Date).ToUniversalTime().ToString('o')
@@ -129,7 +139,7 @@ function Get-DumpFacts {
         escalateDump   = $escalate
         occurrenceCount = $(if ($Decision) { [int]$Decision.Count } else { $null })
         product      = [ordered]@{ image = $Sig.ImageName; imageVersion = $Sig.ImageVer }
-        environment  = (Get-MachineEnvironment)
+        environment  = $environment
         dump         = [ordered]@{
             file         = [IO.Path]::GetFileName($DumpPath)
             bytes        = $(if ($fi) { $fi.Length } else { $null })
