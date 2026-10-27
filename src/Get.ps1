@@ -135,7 +135,7 @@ else {
         $branchMarker = Join-Path $InstallDir '.branch'
         if ($EffBranch) { Set-Content -Path $branchMarker -Value $EffBranch -Encoding ASCII }
         elseif (Test-Path $branchMarker) { Remove-Item $branchMarker -Force -ErrorAction SilentlyContinue }
-        Write-Host "> Installed to $InstallDir"
+        Write-Host "> Downloaded to $InstallDir"
     }
     catch { Write-Error "Install failed: $_"; return }
     finally {
@@ -145,8 +145,7 @@ else {
 }
 
 $entry = Join-Path $InstallDir $EntryScript
-if (-not (Test-Path $entry)) { Write-Error "Entry script not found after install: $entry"; return }
-if ($EffBranch) { Write-Host '  Branch installed. Monitor tab: Enable registers the task, Start runs it, Disable removes it.' -ForegroundColor Yellow }
+if (-not (Test-Path $entry)) { Write-Error "Entry script not found: $entry"; return }
 Write-Host '> Launching...'
 Write-Host ''
 & $entry
