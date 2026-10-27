@@ -111,6 +111,12 @@ function Get-DumpSignature([string]$Path) {
                 elseif ($code -eq $script:CLR_EXCEPTION_CODE) { 'managed-exception' }
                 else { 'crash' }
 
+        # Process image (minidumps list the main module first) and the CLR, with exact file versions - the
+        # version facts a report's Environment table needs. Pure read of the already-parsed module list.
+        $fmtVer = { param($m) '{0}.{1}.{2}.{3}' -f ($m.VerMS -shr 16), ($m.VerMS -band 0xffff), ($m.VerLS -shr 16), ($m.VerLS -band 0xffff) }
+        $imageMod = if ($modules.Count) { $modules[0] } else { $null }
+        $clrMod   = $modules | Where-Object { $_.Name -match '(?i)^(clr|coreclr|mscorwks)$' } | Select-Object -First 1
+
         [pscustomobject]@{
             Kind       = $kind
             Code       = if ($null -ne $code) { '{0:X8}' -f $code } else { $null }
@@ -121,6 +127,10 @@ function Get-DumpSignature([string]$Path) {
             Address    = $address
             ProcessId  = $procId
             ThreadId   = $threadId
+            ImageName  = if ($imageMod) { $imageMod.Name } else { $null }
+            ImageVer   = if ($imageMod) { & $fmtVer $imageMod } else { $null }
+            ClrName    = if ($clrMod) { $clrMod.Name } else { $null }
+            ClrVer     = if ($clrMod) { & $fmtVer $clrMod } else { $null }
             Frames     = @()          # filled by Invoke-DumpWalk for Tier-2 kinds
             ExceptionType = $null     # filled by Invoke-DumpWalk for managed-exception dumps
         }
@@ -598,6 +608,15 @@ function Invoke-DumpTriage {
     $res.Kind = $sig.Kind
     $res.Leaf = if ($sig.Frames -and $sig.Frames.Count) { $sig.Frames[0] } elseif ($sig.Module) { '{0}+0x{1:x}' -f $sig.Module, $sig.Offset } else { '' }
 
+    # Emit ONE procdump-facts/v1 event for this capture (every event, no exceptions) to the local outbox,
+    # while the dump still exists at $DumpPath. Guarded so a missing/failing emitter never breaks triage.
+    if (Get-Command Get-DumpFacts -ErrorAction SilentlyContinue) {
+        try {
+            $facts = Get-DumpFacts -Sig $sig -IdObj $idObj -DumpPath $DumpPath -Decision $res
+            $res.EventPath = Write-DumpFactsEvent -Facts $facts -Dir $Dir
+        } catch { Add-DepGap 'facts-emit' ("event emission failed for $([IO.Path]::GetFileName($DumpPath)): $($_.Exception.Message)") $Dir }
+    }
+
     if ($res.Action -eq 'suppress') {
         $sidecars = @($DumpPath) + @('.info.txt', '.versions.txt' | ForEach-Object { $DumpPath -replace '\.dmp$', $_ })
         if ($SuppressAction -eq 'Delete') {
@@ -627,3 +646,10 @@ function Invoke-WithRegistryLock([scriptblock]$Body) {
     try { $held = $mtx.WaitOne(10000) } catch [System.Threading.AbandonedMutexException] { $held = $true }
     try { & $Body } finally { if ($held) { try { $mtx.ReleaseMutex() } catch {} }; $mtx.Dispose() }
 }
+
+# Load the per-event fact emitter (same Common dir). Guarded so this engine still works if it is absent,
+# and so a bitness-redirected child (which reloads DumpId.ps1 via $DumpIdPath) picks it up too.
+try {
+    $__factsPath = Join-Path (Split-Path -Parent $script:DumpIdPath) 'DumpFacts.ps1'
+    if (Test-Path -LiteralPath $__factsPath) { . $__factsPath }
+} catch {}
