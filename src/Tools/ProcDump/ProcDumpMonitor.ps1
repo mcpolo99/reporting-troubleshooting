@@ -1213,8 +1213,11 @@ function Invoke-Monitor {
 }
 
 # =============================== ENTRY POINT =============================
-# Loaded as a library (RT_LIBRARY=1, e.g. the GUI runspace): expose functions only, no auto-run.
-if ($env:RT_LIBRARY -eq '1') { return }
+# Loaded as a library (RT_LIBRARY=1, e.g. the GUI runspace dot-sources this for its functions): expose
+# functions only, no auto-run. BUT an explicit action switch must still run: a monitor/worker the GUI
+# launches as its own process (Start-MonitorRun, Enqueue-DumpTriage) inherits RT_LIBRARY=1 from the GUI's
+# process environment, and must not be silenced by it - that would "start" a process that does nothing.
+if ($env:RT_LIBRARY -eq '1' -and -not ($Monitor -or $Install -or $Update -or $Uninstall -or $Triage)) { return }
 
 if ($Monitor) {
     Invoke-Monitor
