@@ -18,6 +18,7 @@ function Get-TelemetryConfig {
         EventSink      = Val 'TelemetryEventSink'       (Join-Path $ki 'sent')                 # local archive stands in for the ingest API
         KnownSource    = Val 'KnownSignaturesSource'    (Join-Path $ki 'known-signatures.json') # local file stands in for the registry service
         DumpTarget     = Val 'TelemetryDumpTarget'      (Join-Path $ki 'upload')               # local dir stands in for the silo
+        DumpDir        = Val 'DumpDir'                  'C:\dumps'                             # where captured dumps live, to upload an escalated one
         BaselinePath   = Val 'BaselinePath'             (Join-Path $ki 'known-issues.baseline.json')
         DeviceKey      = Val 'TelemetryDeviceKey'       $null
     }
@@ -37,9 +38,20 @@ function Send-OutboxEvents {
     $http = Test-IsHttp $Config.EventSink
     if (-not $http -and -not (Test-Path -LiteralPath $Config.EventSink)) { New-Item -ItemType Directory -Path $Config.EventSink -Force | Out-Null }
 
-    $sent = 0; $failed = 0
+    $sent = 0; $failed = 0; $dumps = 0
     foreach ($f in @(Get-ChildItem -LiteralPath $outbox -Filter *.json -File -ErrorAction SilentlyContinue)) {
         try {
+            $evt = Get-Content -LiteralPath $f.FullName -Raw | ConvertFrom-Json
+            # A NEW signature needs the full dump too: upload it (if still present locally) and stamp the key
+            # into the event before forwarding. Known recurrences (escalateDump=false) send the event only.
+            if ($evt.escalateDump -and -not $evt.ids.dumpObjectKey -and $evt.dump.file) {
+                $dumpPath = Join-Path $Config.DumpDir $evt.dump.file
+                if (Test-Path -LiteralPath $dumpPath) {
+                    $key = Send-EscalatedDump -DumpPath $dumpPath -Config $Config
+                    if ($key) { $evt.ids.dumpObjectKey = $key; $dumps++ }
+                }
+                $evt | ConvertTo-Json -Depth 12 | Set-Content -LiteralPath $f.FullName -Encoding UTF8
+            }
             $body = Get-Content -LiteralPath $f.FullName -Raw
             if ($http) {
                 $headers = @{}; if ($Config.DeviceKey) { $headers['X-Device-Key'] = $Config.DeviceKey }
@@ -51,7 +63,7 @@ function Send-OutboxEvents {
             $sent++
         } catch { $failed++ }     # left in the outbox; retried next run
     }
-    @{ Sent = $sent; Failed = $failed; Skipped = 0 }
+    @{ Sent = $sent; Failed = $failed; Dumps = $dumps; Skipped = 0 }
 }
 
 # Pull the central known-signature list into the local baseline the triage consults (so a signature already
