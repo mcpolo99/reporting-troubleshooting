@@ -66,7 +66,8 @@ function Get-DumpFacts {
         [Parameter(Mandatory)][string]$DumpPath,
         $Decision,                 # from Register-DumpOccurrence: @{ Action; Count; ... }
         [string]$DumpTool,
-        [string]$DumpType
+        [string]$DumpType,
+        [string]$Sha256            # precomputed hash to reuse (re-analysis) - avoids re-hashing a multi-GB dump
     )
     $action = if ($Decision) { "$($Decision.Action)" } else { 'keep' }
     $escalate = ($action -ne 'suppress')                 # upload the dump only on first sample / provisional
@@ -75,7 +76,10 @@ function Get-DumpFacts {
 
     $fi = $null; try { $fi = Get-Item -LiteralPath $DumpPath -ErrorAction Stop } catch {}
     $sha = $null
-    if ($escalate -and $fi) { try { $sha = (Get-FileHash -LiteralPath $DumpPath -Algorithm SHA256).Hash.ToLowerInvariant() } catch {} }
+    if ($escalate -and $fi) {
+        if ($Sha256) { $sha = $Sha256.ToLowerInvariant() }
+        else { try { $sha = (Get-FileHash -LiteralPath $DumpPath -Algorithm SHA256).Hash.ToLowerInvariant() } catch {} }
+    }
 
     # Build arrays with STATEMENT-FORM assignments. Windows PowerShell 5.1 unwraps a single-element array
     # returned from an `if`-expression (or a $() subexpression) to a scalar, which would emit `"x"` instead

@@ -31,7 +31,7 @@ function Invoke-DumpTriage {
         if ($walk) {
             $sig.Frames = $walk.Frames; $sig.ExceptionType = $walk.ExceptionType
             if (-not $sig.ThreadId -and $walk.ThreadOSID) { $sig.ThreadId = $walk.ThreadOSID }   # hang: the walked UI/dispatcher thread
-            $sig.UiConfirmed = [bool]$walk.UiConfirmed; $sig.DispatcherFrame = $walk.DispatcherFrame
+            $sig.UiConfirmed = [bool]$walk.UiConfirmed; $sig.DispatcherFrame = $walk.DispatcherFrame; $sig.AppFrame = $walk.AppFrame
         }
     }
 

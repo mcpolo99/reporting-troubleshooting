@@ -92,15 +92,30 @@ function Get-DumpDiagnosis($Sig) {
             if (-not $Sig.ExceptionType) { $d.confidence = 'low' }
         }
         'hang' {
-            $d.category = if ($uiConfirmed) { 'ui-thread-busy' } else { 'thread-busy' }
-            if ($leaf) {
-                $who = if ($uiConfirmed) { 'The WPF UI/Dispatcher thread' } else { 'A thread' }
-                $d.problem = '{0} was executing {1} when the window became unresponsive. Long-running work on the UI thread blocks the message loop, so the window cannot respond.' -f $who, $leaf
-            } else {
+            $who = if ($uiConfirmed) { 'The WPF UI/Dispatcher thread' } else { 'A thread' }
+            $app = $Sig.AppFrame                                   # the vendor's own frame driving the work
+            $appFrames = @(); if ($Sig.Frames) { $appFrames = @($Sig.Frames | Where-Object { $_ -notmatch '^\.\.\.' -and -not (Test-FrameworkFrame $_) -and -not (Test-BootstrapFrame $_) }) }
+            if (-not $leaf) {
+                $d.category = 'hang'; $d.confidence = 'low'
                 $d.problem = 'The process hung with no managed stack available (walk could not run).'
-                $d.confidence = 'low'
             }
-            if (-not $uiConfirmed) { $d.confidence = 'low' }   # could not prove the stuck thread is the UI thread
+            elseif ($app) {
+                # vendor code is on the hung UI-thread stack -> this points at the application
+                $d.category = if ($uiConfirmed) { 'ui-thread-busy' } else { 'thread-busy' }
+                if ($app -eq $leaf) {
+                    $d.problem = '{0} was running application code {1} when the window became unresponsive. Long-running work on the UI thread blocks the message loop, so the window cannot respond.' -f $who, $app
+                } else {
+                    $d.problem = '{0} was running application code {1} (currently inside framework call {2}) when the window became unresponsive. Long-running work on the UI thread blocks the message loop, so the window cannot respond.' -f $who, $app, $leaf
+                }
+                if (-not $uiConfirmed) { $d.confidence = 'medium' }   # busy with app code, but UI thread not proven
+            }
+            else {
+                # framework-only stack: no application frame captured -> does NOT by itself implicate the vendor
+                $d.category = 'hang-framework-only'; $d.confidence = 'low'
+                $d.problem = '{0} was inside framework code ({1}) with no application frame on the captured stack when the window became unresponsive; attributing this to application code needs the full stack (escalate the dump).' -f $who, $leaf
+            }
+            $d.applicationFrame = $app
+            $d.applicationFrames = $appFrames
             $d.uiThreadConfirmed = $uiConfirmed
             $d.dispatcherFrame = $Sig.DispatcherFrame
             $d.windowUnresponsive = $unresponsive

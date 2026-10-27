@@ -121,6 +121,7 @@ function Get-DumpSignature([string]$Path) {
             ExceptionType = $null     # filled by Invoke-DumpWalk for managed-exception dumps
             UiConfirmed    = $false   # set by Invoke-DumpWalk: the walked thread is the WPF Dispatcher thread
             DispatcherFrame = $null   # the Dispatcher frame that proves it (survives frame truncation)
+            AppFrame       = $null    # the application (non-framework) frame nearest the leaf - what implicates the software
         }
     } finally { $fs.Dispose() }
 }

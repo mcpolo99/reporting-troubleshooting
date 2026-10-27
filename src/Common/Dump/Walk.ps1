@@ -75,6 +75,24 @@ function Test-InfraFrame([string]$Norm) {
             $Norm -match '^System\.Threading\.ExecutionContext\.Run')
 }
 
+# Is this a .NET / WPF framework (or runtime) frame, i.e. NOT the analysed application's own code? A frame
+# that is only framework does not by itself implicate the vendor; the APPLICATION frame driving it does.
+# Classified by namespace root (framework/runtime only) - everything else (vendor code, native-interop
+# wrappers, third-party libraries the vendor ships) counts as application. No per-vendor names hardcoded.
+function Test-FrameworkFrame([string]$Norm) {
+    if (-not $Norm) { return $true }
+    return ($Norm -match '^(System\.|Microsoft\.|MS\.Internal|MS\.Win32|Windows\.|Presentation(Core|Framework)|WindowsBase|mscorlib|netstandard|Internal\.|<CrtImplementationDetails>|Accessibility\.)')
+}
+
+# Process bootstrap / message-pump roots - application frames that are ALWAYS present and do no real work, so
+# they must NOT be reported as "the application code driving the hang". If the only non-framework frame on the
+# stack is one of these, the UI thread is churning framework code with no active application work (weaker
+# attribution - say so, don't name Main).
+function Test-BootstrapFrame([string]$Norm) {
+    if (-not $Norm) { return $true }
+    return ($Norm -match '(\.Main$|EntryPoint|Application\.Run$|\.RunInternal$|\.RunDispatcher$)')
+}
+
 
 # Walk a dump's faulting/UI thread managed stack. Returns @{ Frames=@(normalised, leaf-first);
 # ExceptionType; ThreadOSID } or $null if no managed stack could be read (caller then leaves the id
@@ -96,7 +114,7 @@ function Invoke-DumpWalk {
             $j = Invoke-InMatchingHost -Bits $tb -Command $cmd
             if ($j) {
                 $fr = if ($j.Frames) { @($j.Frames) } else { @() }
-                return @{ Frames = $fr; ExceptionType = $j.ExceptionType; ThreadOSID = $j.ThreadOSID; UiConfirmed = [bool]$j.UiConfirmed; DispatcherFrame = $j.DispatcherFrame }
+                return @{ Frames = $fr; ExceptionType = $j.ExceptionType; ThreadOSID = $j.ThreadOSID; UiConfirmed = [bool]$j.UiConfirmed; DispatcherFrame = $j.DispatcherFrame; AppFrame = $j.AppFrame }
             }
             return $null
         }
@@ -129,24 +147,44 @@ function Invoke-DumpWalk {
         if (-not $target) { return $null }
         if ($target.CurrentException) { $excType = $target.CurrentException.Type.Name }
 
-        # Scan the FULL stack (before truncation) for the Dispatcher root: it proves the thread is the WPF UI
-        # thread even when the message-loop frames sit past the $Max cut.
-        $uiConfirmed = $false; $dispFrame = $null
+        # Scan the FULL stack (before truncation) for two things that survive the $Max cut:
+        #  - the Dispatcher root -> proves the thread is the WPF UI thread
+        #  - the application frame nearest the leaf -> the vendor's own code driving the work (what actually
+        #    implicates the software; a framework-only stack does not).
+        $uiConfirmed = $false; $dispFrame = $null; $appFrame = $null
         foreach ($fr in @($target.StackTrace)) {
+            if ($fr.Kind -ne [Microsoft.Diagnostics.Runtime.ClrStackFrameType]::ManagedMethod) { continue }
             $ds = "$($fr.DisplayString)"
-            if ($ds -match 'System\.Windows\.Threading\.Dispatcher\.(Run|PushFrame|PushFrameImpl|InvokeImpl|ProcessQueue)') {
-                $uiConfirmed = $true; $dispFrame = Normalize-DumpFrame $ds; break
+            if (-not $uiConfirmed -and $ds -match 'System\.Windows\.Threading\.Dispatcher\.(Run|PushFrame|PushFrameImpl|InvokeImpl|ProcessQueue)') {
+                $uiConfirmed = $true; $dispFrame = Normalize-DumpFrame $ds
             }
+            if (-not $appFrame) {
+                $n = Normalize-DumpFrame $ds
+                if ($n -and -not (Test-InfraFrame $n) -and -not (Test-FrameworkFrame $n) -and -not (Test-BootstrapFrame $n)) { $appFrame = $n }
+            }
+            if ($uiConfirmed -and $appFrame) { break }
         }
-        $frames = @()
+        # Collect frames leaf-first: keep the top $Max for leaf context, THEN keep going but retain only the
+        # APPLICATION frames (the vendor evidence), collapsing runs of deeper framework frames into one honest
+        # "... N framework frame(s) omitted ..." marker. This guarantees vendor frames appear in the stack even
+        # when a deep framework recursion (e.g. WPF layout/binding) would otherwise push them past the cut.
+        $frames = @(); $omit = 0; $hardCap = 120
         foreach ($fr in @($target.StackTrace)) {
             if ($fr.Kind -ne [Microsoft.Diagnostics.Runtime.ClrStackFrameType]::ManagedMethod) { continue }
             $n = Normalize-DumpFrame $fr.DisplayString
             if (Test-InfraFrame $n) { continue }
-            $frames += $n
-            if ($frames.Count -ge $Max) { break }
+            $isApp = (-not (Test-FrameworkFrame $n)) -and (-not (Test-BootstrapFrame $n))
+            if ($frames.Count -lt $Max) {
+                $frames += $n
+            } elseif ($isApp) {
+                if ($omit -gt 0) { $frames += ('... {0} framework frame(s) omitted ...' -f $omit); $omit = 0 }
+                $frames += $n
+            } else {
+                $omit++
+            }
+            if ($frames.Count -ge $hardCap) { break }
         }
-        @{ Frames = $frames; ExceptionType = $excType; ThreadOSID = $target.OSThreadId; UiConfirmed = $uiConfirmed; DispatcherFrame = $dispFrame }
+        @{ Frames = $frames; ExceptionType = $excType; ThreadOSID = $target.OSThreadId; UiConfirmed = $uiConfirmed; DispatcherFrame = $dispFrame; AppFrame = $appFrame }
     } catch {
         return $null
     } finally {
