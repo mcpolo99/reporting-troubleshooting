@@ -114,7 +114,9 @@ function Invoke-DumpWalk {
             $j = Invoke-InMatchingHost -Bits $tb -Command $cmd
             if ($j) {
                 $fr = if ($j.Frames) { @($j.Frames) } else { @() }
-                return @{ Frames = $fr; ExceptionType = $j.ExceptionType; ThreadOSID = $j.ThreadOSID; UiConfirmed = [bool]$j.UiConfirmed; DispatcherFrame = $j.DispatcherFrame; AppFrame = $j.AppFrame }
+                return @{ Frames = $fr; ExceptionType = $j.ExceptionType; ThreadOSID = $j.ThreadOSID; UiConfirmed = [bool]$j.UiConfirmed
+                          DispatcherFrame = $j.DispatcherFrame; AppFrame = $j.AppFrame
+                          StormOperations = @($j.StormOperations); StormDominantFrame = $j.StormDominantFrame; StormDominantCount = [int]$j.StormDominantCount; StackDepth = [int]$j.StackDepth }
             }
             return $null
         }
@@ -152,18 +154,30 @@ function Invoke-DumpWalk {
         #  - the application frame nearest the leaf -> the vendor's own code driving the work (what actually
         #    implicates the software; a framework-only stack does not).
         $uiConfirmed = $false; $dispFrame = $null; $appFrame = $null
+        $freq = @{}; $depth = 0                         # frame frequency + true managed depth (whole stack)
         foreach ($fr in @($target.StackTrace)) {
             if ($fr.Kind -ne [Microsoft.Diagnostics.Runtime.ClrStackFrameType]::ManagedMethod) { continue }
             $ds = "$($fr.DisplayString)"
             if (-not $uiConfirmed -and $ds -match 'System\.Windows\.Threading\.Dispatcher\.(Run|PushFrame|PushFrameImpl|InvokeImpl|ProcessQueue)') {
                 $uiConfirmed = $true; $dispFrame = Normalize-DumpFrame $ds
             }
-            if (-not $appFrame) {
-                $n = Normalize-DumpFrame $ds
-                if ($n -and -not (Test-InfraFrame $n) -and -not (Test-FrameworkFrame $n) -and -not (Test-BootstrapFrame $n)) { $appFrame = $n }
+            $n = Normalize-DumpFrame $ds
+            if ($n -and -not (Test-InfraFrame $n)) {
+                $depth++
+                $freq[$n] = [int]$freq[$n] + 1
+                if (-not $appFrame -and -not (Test-FrameworkFrame $n) -and -not (Test-BootstrapFrame $n)) { $appFrame = $n }
             }
-            if ($uiConfirmed -and $appFrame) { break }
         }
+        # classify the dominant framework activity ("storm") and its recursion depth - the dump-backed WHY for a
+        # framework-only hang (a deep repeating WPF pass = an oversized/over-nested UI or a mass re-bind).
+        $stormOps = @()
+        $allText = ($freq.Keys -join '|')
+        if ($allText -match 'DescendentsWalker|TreeWalkHelper') { $stormOps += 'visual-tree-walk' }
+        if ($allText -match 'BindingExpression|PropertyPathWorker|ClrBindingWorker|DataBindEngine') { $stormOps += 'data-binding' }
+        if ($allText -match 'ResourceDictionary|FindResource|ResourceReferenceExpression') { $stormOps += 'resource-lookup' }
+        if ($allText -match 'MeasureOverride|ArrangeOverride|MeasureCore|ArrangeCore|ContextLayoutManager|UpdateLayout') { $stormOps += 'layout' }
+        $dom = $null; $domN = 0
+        foreach ($k in $freq.Keys) { if ((Test-FrameworkFrame $k) -and [int]$freq[$k] -gt $domN) { $dom = $k; $domN = [int]$freq[$k] } }
         # Collect frames leaf-first: keep the top $Max for leaf context, THEN keep going but retain only the
         # APPLICATION frames (the vendor evidence), collapsing runs of deeper framework frames into one honest
         # "... N framework frame(s) omitted ..." marker. This guarantees vendor frames appear in the stack even
@@ -184,7 +198,9 @@ function Invoke-DumpWalk {
             }
             if ($frames.Count -ge $hardCap) { break }
         }
-        @{ Frames = $frames; ExceptionType = $excType; ThreadOSID = $target.OSThreadId; UiConfirmed = $uiConfirmed; DispatcherFrame = $dispFrame; AppFrame = $appFrame }
+        @{ Frames = $frames; ExceptionType = $excType; ThreadOSID = $target.OSThreadId; UiConfirmed = $uiConfirmed
+           DispatcherFrame = $dispFrame; AppFrame = $appFrame
+           StormOperations = $stormOps; StormDominantFrame = $dom; StormDominantCount = $domN; StackDepth = $depth }
     } catch {
         return $null
     } finally {

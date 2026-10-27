@@ -122,6 +122,10 @@ function Get-DumpSignature([string]$Path) {
             UiConfirmed    = $false   # set by Invoke-DumpWalk: the walked thread is the WPF Dispatcher thread
             DispatcherFrame = $null   # the Dispatcher frame that proves it (survives frame truncation)
             AppFrame       = $null    # the application (non-framework) frame nearest the leaf - what implicates the software
+            StormOperations = @()     # WPF activity classes on the stack (data-binding / resource-lookup / layout / visual-tree-walk)
+            StormDominantFrame = $null # the most-repeated framework frame (the recursion driver)
+            StormDominantCount = 0     # how many times it repeats (recursion depth signal)
+            StackDepth     = 0         # total managed frames on the thread (true depth, not truncated)
         }
     } finally { $fs.Dispose() }
 }

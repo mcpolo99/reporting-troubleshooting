@@ -100,19 +100,36 @@ function Get-DumpDiagnosis($Sig) {
                 $d.problem = 'The process hung with no managed stack available (walk could not run).'
             }
             elseif ($app) {
-                # vendor code is on the hung UI-thread stack -> this points at the application
+                # vendor code is on the hung UI-thread stack -> this points at the application. State the fact;
+                # the category already encodes "work on the UI thread", so no editorial explanation is added.
                 $d.category = if ($uiConfirmed) { 'ui-thread-busy' } else { 'thread-busy' }
                 if ($app -eq $leaf) {
-                    $d.problem = '{0} was running application code {1} when the window became unresponsive. Long-running work on the UI thread blocks the message loop, so the window cannot respond.' -f $who, $app
+                    $d.problem = '{0} was running application code {1}; the window was unresponsive.' -f $who, $app
                 } else {
-                    $d.problem = '{0} was running application code {1} (currently inside framework call {2}) when the window became unresponsive. Long-running work on the UI thread blocks the message loop, so the window cannot respond.' -f $who, $app, $leaf
+                    $d.problem = '{0} was running application code {1} (inside framework call {2}); the window was unresponsive.' -f $who, $app, $leaf
                 }
                 if (-not $uiConfirmed) { $d.confidence = 'medium' }   # busy with app code, but UI thread not proven
             }
             else {
-                # framework-only stack: no application frame captured -> does NOT by itself implicate the vendor
-                $d.category = 'hang-framework-only'; $d.confidence = 'low'
-                $d.problem = '{0} was inside framework code ({1}) with no application frame on the captured stack when the window became unresponsive; attributing this to application code needs the full stack (escalate the dump).' -f $who, $leaf
+                # framework-only stack: no application frame. Report ONLY what was measured (classified WPF pass,
+                # depth, recursion). No canned root cause - the cause is for the human / central (heap counts) to
+                # conclude. "storm" is just a label for a real deep repeating pass, not an interpretation.
+                $isStorm = (@($Sig.StormOperations).Count -gt 0) -and ([int]$Sig.StormDominantCount -ge 3)
+                $dom = if ($Sig.StormDominantFrame) { ', dominated by {0} (x{1})' -f $Sig.StormDominantFrame, $Sig.StormDominantCount } else { '' }
+                if ($isStorm) {
+                    $d.category = 'hang-wpf-storm'; $d.confidence = 'medium'
+                    $ops = $Sig.StormOperations -join ' + '
+                    $d.problem = '{0} was in a WPF {1} pass ({2} managed frames deep{3}); no application frame on the captured stack; the window was unresponsive.' -f $who, $ops, $Sig.StackDepth, $dom
+                } else {
+                    $d.category = 'hang-framework-only'; $d.confidence = 'low'
+                    $d.problem = '{0} was in framework code {1} ({2} managed frames deep); no application frame on the captured stack; the window was unresponsive.' -f $who, $leaf, $Sig.StackDepth
+                }
+            }
+            $d.storm = [ordered]@{
+                operations    = @($Sig.StormOperations)
+                dominantFrame = $Sig.StormDominantFrame
+                dominantCount = [int]$Sig.StormDominantCount
+                stackDepth    = [int]$Sig.StackDepth
             }
             $d.applicationFrame = $app
             $d.applicationFrames = $appFrames
