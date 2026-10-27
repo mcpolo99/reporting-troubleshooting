@@ -54,6 +54,7 @@ $ConfigFile      = Join-Path $BaseDir 'config.json'
 $LogDir          = Join-Path $BaseDir 'Logs'
 $InstalledScript = Join-Path $BaseDir "$AppName.ps1"
 $InstalledTriage = Join-Path $BaseDir 'DumpTriage.ps1'   # fault-id worker deployed beside the monitor
+$InstalledTelemetry = Join-Path $BaseDir 'Send-Telemetry.ps1'  # telemetry forwarder deployed beside the monitor
 $MutexName       = "Global\$AppName"
 $StopFile        = Join-Path $BaseDir 'stop.request'    # created to ask the running monitor to stop gracefully
 # $ToolsDir / $ProcDumpExeName / $ProcDumpExe come from the shared package store, set after Packages.ps1 below.
@@ -111,6 +112,8 @@ function Get-DefaultConfig {
         SuppressKnown    = $true        # keep the FIRST dump of each id, count + soft-suppress later recurrences
         SuppressAction   = 'Recycle'    # Recycle = move recurrences to KnownIssues\Suppressed | Delete
         BaselinePath     = ''           # optional: JSON of already-analysed ids to suppress even the first time (blank = installed baseline beside the script)
+        TelemetryEnabled = $false       # OFF until endpoints are set: periodically forward events / sync known-sigs / upload new-signature dumps
+        TelemetrySeconds = 300          # how often the monitor flushes telemetry (when enabled)
         LogKeep          = 20
         LogMaxMB         = 10
         RunMode          = 'Logon'      # Logon = as user at logon (GUI apps, hang detection) | Startup = SYSTEM at boot
@@ -175,6 +178,28 @@ function Install-TriageWorker {
     Copy-Item $src $InstalledTriage -Force
     Unblock-File $InstalledTriage -ErrorAction SilentlyContinue
     Write-Log "Fault-id worker copied to $InstalledTriage"
+}
+
+# Deploy the telemetry forwarder (sibling Tools\Telemetry\) beside the installed monitor.
+function Install-TelemetryWorker {
+    $src = Join-Path (Split-Path $MonScriptDir -Parent) 'Telemetry\Send-Telemetry.ps1'
+    if (-not (Test-Path $src)) { return }                            # optional - absent in older layouts
+    if ((Resolve-Path $src).Path -ieq $InstalledTelemetry) { return }
+    Copy-Item $src $InstalledTelemetry -Force
+    Unblock-File $InstalledTelemetry -ErrorAction SilentlyContinue
+    Write-Log "Telemetry forwarder copied to $InstalledTelemetry"
+}
+
+# Launch the telemetry forwarder detached + below-normal (sync known-sigs, forward events, upload new-signature
+# dumps) so network egress never blocks the monitor loop. No-op if the forwarder is not deployed.
+function Enqueue-Telemetry {
+    $worker = if (Test-Path $InstalledTelemetry) { $InstalledTelemetry } else { Join-Path (Split-Path $MonScriptDir -Parent) 'Telemetry\Send-Telemetry.ps1' }
+    if (-not (Test-Path $worker)) { return }
+    try {
+        $p = Start-Process powershell.exe -WindowStyle Hidden -PassThru -ArgumentList @(
+            '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', "`"$worker`"", '-Quiet')
+        try { $p.PriorityClass = [System.Diagnostics.ProcessPriorityClass]::BelowNormal } catch {}
+    } catch { Write-Log "Could not launch telemetry forwarder: $($_.Exception.Message)" 'WARN' }
 }
 
 # Verify the fault-id dependencies for the CONFIGURED apps on this machine (no dump needed) and emit a
@@ -870,6 +895,7 @@ function Invoke-Update {
         Unblock-File -Path $InstalledScript -ErrorAction SilentlyContinue
         Install-CommonComponents
         Install-TriageWorker
+        Install-TelemetryWorker
     } catch {
         Write-Log "Copy failed: $($_.Exception.Message) - restarting the previous version." 'ERROR'
         Start-MonitorTask; return
@@ -906,6 +932,7 @@ function Invoke-Install {
         Unblock-File -Path $InstalledScript -ErrorAction SilentlyContinue
         Install-CommonComponents
         Install-TriageWorker
+        Install-TelemetryWorker
         Write-Log "Script copied to $InstalledScript"
     }
     Install-KnownIssuesDeps $cfg
@@ -1066,6 +1093,7 @@ function Invoke-Monitor {
     $monitors    = @{}
     $stopRequested = $false
     $lastCleanup = [datetime]::MinValue
+    $lastTelemetry = Get-Date      # don't flush immediately on startup; wait one interval
     $cfgStamp    = if (Test-Path $ConfigFile) { (Get-Item $ConfigFile).LastWriteTimeUtc } else { $null }
 
     try {
@@ -1194,6 +1222,13 @@ function Invoke-Monitor {
                     $lastCleanup = [datetime]::MinValue
                     continue
                 }
+            }
+
+            # 3) Telemetry flush on its own timer (off unless enabled + endpoints configured). Detached, so
+            #    network egress never blocks the loop; forwards events, syncs known-sigs, uploads new-sig dumps.
+            if ($cfg.TelemetryEnabled -and ((Get-Date) - $lastTelemetry).TotalSeconds -ge $cfg.TelemetrySeconds) {
+                $lastTelemetry = Get-Date
+                Enqueue-Telemetry
             }
 
             Start-Sleep -Seconds $cfg.CheckSeconds
