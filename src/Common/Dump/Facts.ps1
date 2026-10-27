@@ -1,30 +1,17 @@
-# Per-event fact emitter. Dot-sourced by DumpId.ps1 (needs its Get-ShortHash / Get-MachineKey helpers).
+# Dump engine: per-event fact emitter. Turns one triaged dump into ONE self-contained `procdump-facts/v1`
+# JSON event and writes it to the local outbox (KnownIssues\outbox\<eventId>.json), one blob per capture -
+# no exceptions. The event leads with a `diagnosis` (the plain-language verdict from Diagnosis.ps1) and
+# carries every MEASURED fact the edge can read (ids, class, exception, faulting location, managed chain,
+# module versions, environment, integrity) plus the triage decision. It is the Layer-1 "facts" half of a
+# vendor report; Layer-2 judgement (requests, architectural standard, severity wording) is authored once
+# per signature and merged by the renderer. Fields that need public Microsoft tools at the centre (full
+# native stack, heap-failure record, per-thread table) are left null and noted - central cdb enrichment
+# fills them later, keyed by the same ids.
 #
-# Turns one triaged dump into ONE self-contained `procdump-facts/v1` JSON event and writes it to the
-# local outbox (KnownIssues\outbox\<eventId>.json), one blob per capture - no exceptions. The event
-# carries every MEASURED fact the edge can read (ids, class, exception, faulting location, managed
-# chain, involved module versions, environment, integrity) plus the triage decision. It is the Layer-1
-# "facts" half of a vendor report; Layer-2 judgement (title, severity text, cause, requests) is authored
-# once per signature and merged by the renderer. Fields that need public Microsoft tools at the centre
-# (full native stack, heap-failure record, per-thread table) are left null and noted - central cdb
-# enrichment fills them later, keyed by the same ids.
-#
-# SCHEMA IS FROZEN. Changing `procdump-facts/v1` or the signature recipe (DumpId.ps1 Get-DumpStableId)
+# SCHEMA IS FROZEN. Changing `procdump-facts/v1` or the signature recipe (Signature.ps1 Get-DumpStableId)
 # breaks historical grouping - bump the version instead.
 
 $script:FACTS_SCHEMA = 'procdump-facts/v1'
-
-# Common NT / CLR exception codes -> readable names (hex code string, no 0x).
-$script:EXC_NAMES = @{
-    'C0000005' = 'ACCESS_VIOLATION'; 'C0000374' = 'STATUS_HEAP_CORRUPTION'; 'C00000FD' = 'STACK_OVERFLOW'
-    'C0000409' = 'STACK_BUFFER_OVERRUN'; 'C000041D' = 'FATAL_USER_CALLBACK_EXCEPTION'; '80000003' = 'BREAKPOINT'
-    'E0434352' = 'CLR_EXCEPTION'; 'C0000094' = 'INTEGER_DIVIDE_BY_ZERO'; 'C00000FE' = 'STACK_OVERFLOW'
-}
-function Get-ExceptionName([string]$Code) {
-    if (-not $Code) { return $null }
-    if ($script:EXC_NAMES.ContainsKey($Code.ToUpperInvariant())) { return $script:EXC_NAMES[$Code.ToUpperInvariant()] }
-    return $null
-}
 
 # Outbox: one JSON per event, drained later by the transport (Vector -> POST /v1/events). Until then it
 # is the local record of every event.
@@ -47,11 +34,11 @@ function Get-DumpCaptureId($Sig) {
     Get-ShortHash ('{0}|{1}|{2}|{3}' -f $Sig.ProcessId, $Sig.ThreadId, $addr, $Sig.Code)
 }
 
-# Severity from measured facts only. High = memory-safety crash, managed exception, or a hang (ProcDump's
-# -h fires on a window unresponsive past its threshold, i.e. already user-visible). Everything else medium.
+# Severity from measured facts only, no per-code list. A crash is high when its exception code has NTSTATUS
+# error severity (top two bits set) - dynamic, covers every code. Managed exceptions and hangs (ProcDump's
+# -h fires only once a window is unresponsive past its threshold, i.e. already user-visible) are high too.
 function Get-DumpSeverity($Sig) {
-    $high = @('C0000374', 'C0000005', 'C00000FD', 'C0000409', 'C00000FE')
-    if ($Sig.Kind -eq 'crash' -and $Sig.Code -and ($high -contains $Sig.Code.ToUpperInvariant())) { return 'high' }
+    if ($Sig.Kind -eq 'crash') { if (Test-FatalExceptionCode $Sig.Code) { return 'high' } else { return 'medium' } }
     if ($Sig.Kind -eq 'managed-exception' -or $Sig.Kind -eq 'hang') { return 'high' }
     return 'medium'
 }
@@ -84,6 +71,7 @@ function Get-DumpFacts {
     $action = if ($Decision) { "$($Decision.Action)" } else { 'keep' }
     $escalate = ($action -ne 'suppress')                 # upload the dump only on first sample / provisional
     $confidence = if ($IdObj.WalkPending) { 'low' } else { 'high' }
+    $diag = Get-DumpDiagnosis $Sig
 
     $fi = $null; try { $fi = Get-Item -LiteralPath $DumpPath -ErrorAction Stop } catch {}
     $sha = $null
@@ -132,7 +120,10 @@ function Get-DumpFacts {
             captureId          = (Get-DumpCaptureId $Sig)
             dumpObjectKey      = $null                 # set when the dump is uploaded to the silo (Phase 1)
         }
+        diagnosis    = $diag                           # the plain-language verdict - read this first
         class          = $Sig.Kind
+        captureReason  = $diag.captureReason
+        captureComment = $Sig.ProcDumpComment
         confidence     = $confidence
         severity       = (Get-DumpSeverity $Sig)
         isNewSignature = ($action -ne 'suppress')
