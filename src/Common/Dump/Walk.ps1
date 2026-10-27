@@ -115,7 +115,7 @@ function Invoke-DumpWalk {
             if ($j) {
                 $fr = if ($j.Frames) { @($j.Frames) } else { @() }
                 return @{ Frames = $fr; ExceptionType = $j.ExceptionType; ThreadOSID = $j.ThreadOSID; UiConfirmed = [bool]$j.UiConfirmed
-                          DispatcherFrame = $j.DispatcherFrame; AppFrame = $j.AppFrame
+                          DispatcherFrame = $j.DispatcherFrame; AppFrame = $j.AppFrame; AppFrameDepth = [int]$j.AppFrameDepth
                           StormOperations = @($j.StormOperations); StormDominantFrame = $j.StormDominantFrame; StormDominantCount = [int]$j.StormDominantCount; StackDepth = [int]$j.StackDepth }
             }
             return $null
@@ -153,7 +153,7 @@ function Invoke-DumpWalk {
         #  - the Dispatcher root -> proves the thread is the WPF UI thread
         #  - the application frame nearest the leaf -> the vendor's own code driving the work (what actually
         #    implicates the software; a framework-only stack does not).
-        $uiConfirmed = $false; $dispFrame = $null; $appFrame = $null
+        $uiConfirmed = $false; $dispFrame = $null; $appFrame = $null; $appDepth = 0
         $freq = @{}; $depth = 0                         # frame frequency + true managed depth (whole stack)
         foreach ($fr in @($target.StackTrace)) {
             if ($fr.Kind -ne [Microsoft.Diagnostics.Runtime.ClrStackFrameType]::ManagedMethod) { continue }
@@ -165,7 +165,9 @@ function Invoke-DumpWalk {
             if ($n -and -not (Test-InfraFrame $n)) {
                 $depth++
                 $freq[$n] = [int]$freq[$n] + 1
-                if (-not $appFrame -and -not (Test-FrameworkFrame $n) -and -not (Test-BootstrapFrame $n)) { $appFrame = $n }
+                # appFrame = nearest-leaf application frame; appDepth = its 1-based position (1 = leaf). A large
+                # depth means the app frame only TRIGGERED a framework storm, it is not what is executing now.
+                if (-not $appFrame -and -not (Test-FrameworkFrame $n) -and -not (Test-BootstrapFrame $n)) { $appFrame = $n; $appDepth = $depth }
             }
         }
         # classify the dominant framework activity ("storm") and its recursion depth - the dump-backed WHY for a
@@ -199,7 +201,7 @@ function Invoke-DumpWalk {
             if ($frames.Count -ge $hardCap) { break }
         }
         @{ Frames = $frames; ExceptionType = $excType; ThreadOSID = $target.OSThreadId; UiConfirmed = $uiConfirmed
-           DispatcherFrame = $dispFrame; AppFrame = $appFrame
+           DispatcherFrame = $dispFrame; AppFrame = $appFrame; AppFrameDepth = $appDepth
            StormOperations = $stormOps; StormDominantFrame = $dom; StormDominantCount = $domN; StackDepth = $depth }
     } catch {
         return $null

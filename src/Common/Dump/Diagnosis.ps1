@@ -95,35 +95,40 @@ function Get-DumpDiagnosis($Sig) {
             $who = if ($uiConfirmed) { 'The WPF UI/Dispatcher thread' } else { 'A thread' }
             $app = $Sig.AppFrame                                   # the vendor's own frame driving the work
             $appFrames = @(); if ($Sig.Frames) { $appFrames = @($Sig.Frames | Where-Object { $_ -notmatch '^\.\.\.' -and -not (Test-FrameworkFrame $_) -and -not (Test-BootstrapFrame $_) }) }
+            # Where is the application frame? At/near the leaf = vendor code is EXECUTING now. Only deep at the
+            # root = the vendor handler TRIGGERED a framework pass that is what's actually running.
+            $appNearLeaf = $app -and ([int]$Sig.AppFrameDepth -ge 1) -and ([int]$Sig.AppFrameDepth -le 3)
+            $isStorm = (@($Sig.StormOperations).Count -gt 0) -and ([int]$Sig.StormDominantCount -ge 3)
+            $ops = if (@($Sig.StormOperations).Count) { $Sig.StormOperations -join ' + ' } else { $null }
+            $dom = if ($Sig.StormDominantFrame) { ', dominated by {0} (x{1})' -f $Sig.StormDominantFrame, $Sig.StormDominantCount } else { '' }
             if (-not $leaf) {
                 $d.category = 'hang'; $d.confidence = 'low'
                 $d.problem = 'The process hung with no managed stack available (walk could not run).'
             }
-            elseif ($app) {
-                # vendor code is on the hung UI-thread stack -> this points at the application. State the fact;
-                # the category already encodes "work on the UI thread", so no editorial explanation is added.
+            elseif ($appNearLeaf) {
+                # vendor code is at/near the leaf -> actively executing on the UI thread
                 $d.category = if ($uiConfirmed) { 'ui-thread-busy' } else { 'thread-busy' }
-                if ($app -eq $leaf) {
-                    $d.problem = '{0} was running application code {1}; the window was unresponsive.' -f $who, $app
+                if ($app -eq $leaf) { $d.problem = '{0} was running application code {1}; the window was unresponsive.' -f $who, $app }
+                else { $d.problem = '{0} was running application code {1} (inside framework call {2}); the window was unresponsive.' -f $who, $app, $leaf }
+                if (-not $uiConfirmed) { $d.confidence = 'medium' }
+            }
+            elseif ($isStorm) {
+                # the thread is deep in a framework pass; name the vendor TRIGGER if the only app frame is the
+                # deep root, else report the storm with no captured application frame.
+                $d.confidence = 'medium'
+                if ($app) {
+                    $d.category = 'ui-thread-storm-triggered'
+                    $d.problem = '{0} was in a WPF {1} pass ({2} frames deep{3}) triggered by application code {4} (at the root of the stack); the window was unresponsive.' -f $who, $ops, $Sig.StackDepth, $dom, $app
                 } else {
-                    $d.problem = '{0} was running application code {1} (inside framework call {2}); the window was unresponsive.' -f $who, $app, $leaf
+                    $d.category = 'hang-wpf-storm'
+                    $d.problem = '{0} was in a WPF {1} pass ({2} frames deep{3}); no application frame on the captured stack; the window was unresponsive.' -f $who, $ops, $Sig.StackDepth, $dom
                 }
-                if (-not $uiConfirmed) { $d.confidence = 'medium' }   # busy with app code, but UI thread not proven
             }
             else {
-                # framework-only stack: no application frame. Report ONLY what was measured (classified WPF pass,
-                # depth, recursion). No canned root cause - the cause is for the human / central (heap counts) to
-                # conclude. "storm" is just a label for a real deep repeating pass, not an interpretation.
-                $isStorm = (@($Sig.StormOperations).Count -gt 0) -and ([int]$Sig.StormDominantCount -ge 3)
-                $dom = if ($Sig.StormDominantFrame) { ', dominated by {0} (x{1})' -f $Sig.StormDominantFrame, $Sig.StormDominantCount } else { '' }
-                if ($isStorm) {
-                    $d.category = 'hang-wpf-storm'; $d.confidence = 'medium'
-                    $ops = $Sig.StormOperations -join ' + '
-                    $d.problem = '{0} was in a WPF {1} pass ({2} managed frames deep{3}); no application frame on the captured stack; the window was unresponsive.' -f $who, $ops, $Sig.StackDepth, $dom
-                } else {
-                    $d.category = 'hang-framework-only'; $d.confidence = 'low'
-                    $d.problem = '{0} was in framework code {1} ({2} managed frames deep); no application frame on the captured stack; the window was unresponsive.' -f $who, $leaf, $Sig.StackDepth
-                }
+                # not near-leaf app code and not a deep repeating pass -> shallow framework (likely blocked/waiting)
+                $d.category = 'hang-framework-only'; $d.confidence = 'low'
+                $trig = if ($app) { ' (deep root application frame: {0})' -f $app } else { '' }
+                $d.problem = '{0} was in framework code {1} ({2} managed frames deep){3}; no application frame near the leaf; the window was unresponsive.' -f $who, $leaf, $Sig.StackDepth, $trig
             }
             $d.storm = [ordered]@{
                 operations    = @($Sig.StormOperations)
@@ -132,6 +137,7 @@ function Get-DumpDiagnosis($Sig) {
                 stackDepth    = [int]$Sig.StackDepth
             }
             $d.applicationFrame = $app
+            $d.applicationFrameDepth = [int]$Sig.AppFrameDepth
             $d.applicationFrames = $appFrames
             $d.uiThreadConfirmed = $uiConfirmed
             $d.dispatcherFrame = $Sig.DispatcherFrame
