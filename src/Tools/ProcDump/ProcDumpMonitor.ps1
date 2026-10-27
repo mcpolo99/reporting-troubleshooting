@@ -52,9 +52,9 @@ $TaskName        = 'ProcDumpMonitor'
 $BaseDir         = Join-Path $env:ProgramData 'ReportingTroubleshooting\Monitor'   # all app data under the one app root
 $ConfigFile      = Join-Path $BaseDir 'config.json'
 $LogDir          = Join-Path $BaseDir 'Logs'
-$InstalledScript = Join-Path $BaseDir "$AppName.ps1"
-$InstalledTriage = Join-Path $BaseDir 'DumpTriage.ps1'   # fault-id worker deployed beside the monitor
-$InstalledTelemetry = Join-Path $BaseDir 'Send-Telemetry.ps1'  # telemetry forwarder deployed beside the monitor
+# Scripts run IN PLACE from src (defined after $MonScriptDir below). $BaseDir holds DATA only - config, logs,
+# KnownIssues, dumps - never script copies. The scheduled task points at the src script directly, so an app
+# update refreshes the monitor automatically (no "installed copy" to go stale).
 $MutexName       = "Global\$AppName"
 $StopFile        = Join-Path $BaseDir 'stop.request'    # created to ask the running monitor to stop gracefully
 # $ToolsDir / $ProcDumpExeName / $ProcDumpExe come from the shared package store, set after Packages.ps1 below.
@@ -76,6 +76,10 @@ $script:LogMaxMB   = 10
 #   New-LogFile/Write-Log/Update-LogRoll/Remove-OldLogs, Test-Admin, Get-ConsoleUser,
 #   Test-MicrosoftSignature, Read-Value/Read-Int/Read-Bool, Get-ScriptVersionFromFile, Format-Version.
 $MonScriptDir = if ($PSScriptRoot) { $PSScriptRoot } elseif ($PSCommandPath) { Split-Path -Parent $PSCommandPath } else { (Get-Location).Path }
+# The task runs THIS script and its siblings in place from src - no copying into $BaseDir.
+$InstalledScript    = Join-Path $MonScriptDir "$AppName.ps1"
+$InstalledTriage    = Join-Path $MonScriptDir 'DumpTriage.ps1'
+$InstalledTelemetry = Join-Path (Split-Path $MonScriptDir -Parent) 'Telemetry\Send-Telemetry.ps1'
 $CommonDir = $null; $__probe = $MonScriptDir
 for ($__i = 0; $__i -lt 6 -and -not $CommonDir; $__i++) {
     foreach ($__c in @((Join-Path $__probe 'Common'), (Join-Path $__probe 'Scripts\Common'))) {
@@ -164,43 +168,10 @@ function Save-Config($cfg) {
 # =============================== HELPERS =================================
 # Test-Admin, Get-ConsoleUser and Test-MicrosoftSignature come from the shared Common component.
 
-# Ship Common\ next to the installed script so the detached scheduled-task copy can dot-source it.
-# RECURSIVE: the dump engine lives in Common\Dump\*.ps1 (loaded by the DumpId.ps1 shim), so the subfolders
-# must come along - a top-level-only copy leaves the shim unable to load the engine and silently breaks
-# signature/fact emission in the installed copy.
-function Install-CommonComponents {
-    if (-not $CommonDir) { return }
-    $dst = Join-Path $BaseDir 'Common'
-    if ((Resolve-Path $CommonDir).Path -ieq $dst) { return }   # already the installed copy
-    New-Item -ItemType Directory -Path $dst -Force | Out-Null
-    Copy-Item (Join-Path $CommonDir '*') $dst -Recurse -Force   # includes Dump\*.ps1
-    Write-Log "Shared components copied to $dst (recursive)"
-}
-
-# Deploy the fault-id worker beside the installed monitor so the detached task can launch it.
-function Install-TriageWorker {
-    $src = Join-Path $MonScriptDir 'DumpTriage.ps1'
-    if (-not (Test-Path $src)) { Write-Log 'DumpTriage.ps1 not found next to the monitor - fault-id worker not deployed.' 'WARN'; return }
-    if ((Resolve-Path $src).Path -ieq $InstalledTriage) { return }   # already the installed copy
-    Copy-Item $src $InstalledTriage -Force
-    Unblock-File $InstalledTriage -ErrorAction SilentlyContinue
-    Write-Log "Fault-id worker copied to $InstalledTriage"
-}
-
-# Deploy the telemetry forwarder (sibling Tools\Telemetry\) beside the installed monitor.
-function Install-TelemetryWorker {
-    $src = Join-Path (Split-Path $MonScriptDir -Parent) 'Telemetry\Send-Telemetry.ps1'
-    if (-not (Test-Path $src)) { return }                            # optional - absent in older layouts
-    if ((Resolve-Path $src).Path -ieq $InstalledTelemetry) { return }
-    Copy-Item $src $InstalledTelemetry -Force
-    Unblock-File $InstalledTelemetry -ErrorAction SilentlyContinue
-    Write-Log "Telemetry forwarder copied to $InstalledTelemetry"
-}
-
 # Launch the telemetry forwarder detached + below-normal (sync known-sigs, forward events, upload new-signature
-# dumps) so network egress never blocks the monitor loop. No-op if the forwarder is not deployed.
+# dumps) so network egress never blocks the monitor loop. Runs the forwarder in place from src. No-op if absent.
 function Enqueue-Telemetry {
-    $worker = if (Test-Path $InstalledTelemetry) { $InstalledTelemetry } else { Join-Path (Split-Path $MonScriptDir -Parent) 'Telemetry\Send-Telemetry.ps1' }
+    $worker = $InstalledTelemetry
     if (-not (Test-Path $worker)) { return }
     try {
         $p = Start-Process powershell.exe -WindowStyle Hidden -PassThru -ArgumentList @(
@@ -810,19 +781,19 @@ function Stop-MonitorTask($cfg, [int]$TimeoutSec = 60) {
 
 function Start-MonitorTask {
     $task = Get-MonitorTask
-    if (-not $task) { Write-Log 'Monitor is not installed - click Install first (that registers the task and copies the script).' 'WARN'; return }
+    if (-not $task) { Write-Log 'Monitor is not enabled - click Enable first (it registers the scheduled task).' 'WARN'; return }
 
-    # The task action launches "powershell.exe -File <InstalledScript>". If that script is missing (task left
-    # over from an older install at a different path, never reinstalled here) the process exits instantly with
-    # no window and no log - which looks exactly like "started but nothing is running". Catch it up front.
+    # The task action launches "powershell.exe -File <InstalledScript>" from src. If that script is missing
+    # (e.g. the app was moved/uninstalled) the process exits instantly with no window - which looks like
+    # "started but nothing is running". Catch it up front.
     if (-not (Test-Path -LiteralPath $InstalledScript)) {
-        Write-Log "Monitor script not found at $InstalledScript - the task would launch nothing. Click Install (or Uninstall then Install) to (re)deploy it." 'ERROR'
+        Write-Log "Monitor script not found at $InstalledScript - the app's src is missing. Reinstall the app, then click Enable." 'ERROR'
         return
     }
     $acts = @($task.Actions)
     $pointsHere = $acts | Where-Object { "$($_.Arguments)" -like "*$InstalledScript*" }
     if (-not $pointsHere) {
-        Write-Log "The installed task does not point at $InstalledScript (it is a stale registration). Click Uninstall then Install to re-register it." 'WARN'
+        Write-Log "The task points at a different/older script path than this src ($InstalledScript) - click Enable to re-register it against the current src." 'WARN'
     }
 
     Start-ScheduledTask -TaskName $TaskName
@@ -853,102 +824,30 @@ function Confirm-Step([string]$Question) {
     (Read-Host "$Question (y/N)") -eq 'y'
 }
 
-function Backup-Install([version]$OldVersion) {
-    $bak = Join-Path $BaseDir 'Backup'
-    New-Item -ItemType Directory -Path $bak -Force | Out-Null
-    $tag = '{0}_{1:yyyyMMdd_HHmmss}' -f $(if ($OldVersion -eq [version]'0.0.0') { 'unversioned' } else { "v$OldVersion" }), (Get-Date)
-    Copy-Item $InstalledScript (Join-Path $bak "$AppName`_$tag.ps1") -Force
-    if (Test-Path $ConfigFile) { Copy-Item $ConfigFile (Join-Path $bak "config_$tag.json") -Force }
-    Write-Log "Backup of installed script and config: $bak (*_$tag)"
-    # keep the 5 newest backups of each kind
-    foreach ($f in "$AppName`_*.ps1", 'config_*.json') {
-        Get-ChildItem $bak -Filter $f -File | Sort-Object LastWriteTime -Descending | Select-Object -Skip 5 |
-            Remove-Item -Force -ErrorAction SilentlyContinue
-    }
-}
-
-function Invoke-Update {
-    $new = [version]$ScriptVersion
-    $old = Get-ScriptVersionFromFile $InstalledScript
-    Write-Log "Update check - installed: $(Format-Version $old) | this script: $new"
-
-    if ($null -eq $old) { Write-Log 'Nothing installed yet - use Install.' 'WARN'; return }
-    if ($PSCommandPath -eq $InstalledScript) {
-        Write-Log 'This IS the installed copy. Run Update from the new script file you want to install.' 'WARN'; return
-    }
-
-    if ($new -lt $old) {
-        Write-Log "This script ($new) is OLDER than the installed one ($old)." 'WARN'
-        if (-not (Confirm-Step 'Downgrade anyway?')) { Write-Log 'Update cancelled.'; return }
-    } elseif ($new -eq $old) {
-        Write-Log "Already up to date ($new)."
-        if (-not (Confirm-Step 'Reinstall the same version?')) { return }
-    }
-
-    $task = Get-MonitorTask
-    if ($old -lt $GracefulStopSince -and $task -and $task.State -eq 'Running') {
-        Write-Log ("The installed monitor ($(Format-Version $old)) does not support graceful stop. Stopping it may " +
-                   "terminate the monitored apps. Close them first if possible.") 'WARN'
-        if (-not (Confirm-Step 'Continue and stop the old monitor now?')) { Write-Log 'Update cancelled.'; return }
-    }
-
-    Backup-Install $old
-    $cfg = Read-Config                      # existing settings + defaults for any new ones
-    # old monitors ignore the stop request, so don't wait the full 90 s for them
-    if ($old -lt $GracefulStopSince) { Stop-MonitorTask $cfg 10 } else { Stop-MonitorTask $cfg }
-
-    try {
-        Copy-Item -Path $PSCommandPath -Destination $InstalledScript -Force -ErrorAction Stop
-        Unblock-File -Path $InstalledScript -ErrorAction SilentlyContinue
-        Install-CommonComponents
-        Install-TriageWorker
-        Install-TelemetryWorker
-    } catch {
-        Write-Log "Copy failed: $($_.Exception.Message) - restarting the previous version." 'ERROR'
-        Start-MonitorTask; return
-    }
-    Save-Config $cfg                        # writes new settings into config.json so they're visible/editable
-    if (-not (Install-Sysinternals)) { Write-Log 'Sysinternals tools missing and could not be downloaded.' 'WARN' }
-    Install-KnownIssuesDeps $cfg
-    Register-MonitorTask $cfg               # task definition may have changed between versions
-    Start-MonitorTask
-
-    $now = Get-ScriptVersionFromFile $InstalledScript
-    if ($now -eq $new) { Write-Log "Update complete: $(Format-Version $old) -> $new." }
-    else { Write-Log "Installed copy reports $(Format-Version $now) after update - check the files." 'ERROR' }
-}
-
 # =============================== INSTALL / UNINSTALL =====================
+# "Install" / "Enable" = register the scheduled task to run THIS script in place from src, and start it.
+# It copies NO scripts anywhere (src is the one correct location; an app update refreshes src directly). It
+# only ensures config/dirs/tools exist, (re)registers the task, and starts it.
 function Invoke-Install {
-    # Already installed from somewhere else -> this is an update (with version check)
-    if ((Test-Path $InstalledScript) -and $PSCommandPath -ne $InstalledScript) {
-        Write-Log 'Already installed - running Update instead.'
-        Invoke-Update; return
-    }
     $cfg = Read-Config
     if (-not (Test-Path $ConfigFile)) {
         if ($script:Interactive) { Write-Host 'No config yet - running setup first.'; $cfg = Edit-Config $cfg }
         else { Save-Config $cfg }   # GUI / unattended: write defaults; edit later via the Monitor tab
     }
     foreach ($d in @($BaseDir, $ToolsDir, $LogDir, $cfg.DumpDir)) { New-Item -ItemType Directory -Path $d -Force | Out-Null }
-
     if (-not (Install-Sysinternals)) { Write-Log 'Install aborted: ProcDump not available.' 'ERROR'; return }
-
-    if ($PSCommandPath -and ($PSCommandPath -ne $InstalledScript)) {
-        Copy-Item -Path $PSCommandPath -Destination $InstalledScript -Force
-        Unblock-File -Path $InstalledScript -ErrorAction SilentlyContinue
-        Install-CommonComponents
-        Install-TriageWorker
-        Install-TelemetryWorker
-        Write-Log "Script copied to $InstalledScript"
-    }
     Install-KnownIssuesDeps $cfg
+    Save-Config $cfg                        # merge defaults (new keys appear in the editor); preserves edits
 
-    Stop-MonitorTask $cfg
-    Register-MonitorTask $cfg
+    Stop-MonitorTask $cfg                   # stop any running instance so the fresh start picks up current src
+    Register-MonitorTask $cfg               # task runs "$InstalledScript -Monitor" in place - nothing copied
     Start-MonitorTask
-    Write-Log "Install complete (version $ScriptVersion)."
+    Write-Log "Monitor enabled: task registered to run $InstalledScript in place (version $ScriptVersion). No scripts copied."
 }
+
+# Scripts run in place from src, so an app update already refreshed them. "Update" just re-registers the task
+# (its definition may have changed between versions) and restarts to pick up the current src.
+function Invoke-Update { Invoke-Install }
 
 function Invoke-Uninstall {
     # Uninstall removes ONLY the scheduled task. Config, logs and the installed script are kept so a later
