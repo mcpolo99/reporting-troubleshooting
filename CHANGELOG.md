@@ -5,6 +5,29 @@ truth; each release is tagged `vX.Y.Z` and published as a GitHub release by `scr
 
 <!-- NEW RELEASES INSERTED BELOW -->
 
+## [v1.0.41] - 2026-10-27
+Changes since v1.0.40:
+
+### Features
+- measure WPF storm facts (operation, recursion depth) and keep hang verdicts fact-only (cdf10cb)
+- attribute hangs to the application frame and keep vendor frames in the fault stack (302d668)
+- version the signature scheme so the recipe can change without breaking history (331116b)
+- emit a procdump-facts/v1 event per capture to the local outbox (d483030)
+
+### Fixes
+- derive deviceId from the dump (machine number) instead of nulling it off-box (7f8cff9)
+- source the computer name from the dump (ProcDump comment / info.txt sidecar), not the analyst host (773a1bc)
+- keep the full managed stack in the event instead of omitting deep framework frames (d26377d)
+- separate vendor code executing at the leaf from a vendor-triggered framework storm at the root (bd4de38)
+- read environment (os, cpus, arch) from the dump SystemInfo stream and set the hang thread id from the walk (d6eb51a)
+
+### Refactoring
+- split the dump engine into focused Dump/* modules and make it self-sufficient (860869b)
+
+### Tests
+- deterministic unit tests for the dump engine classification, signature and diagnosis logic (1ec8fa4)
+
+
 ## [v1.0.40] - 2026-10-27
 Changes since v1.0.39:
 
@@ -271,6 +294,7 @@ Changes since v1.0.0:
 - WPF/XAML launcher (GUI default, `-CLI` text menu) with shared light/dark theme.
 - Shared components (logging, admin/signature/prompt/version helpers) under `src/Common`.
 - Bootstrap installer (`src/Get.ps1` + `src/run.bat`) with version check against GitHub.
+
 
 
 
