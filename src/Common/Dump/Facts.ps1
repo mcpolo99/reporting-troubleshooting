@@ -95,7 +95,11 @@ function Get-DumpFacts {
     $computer = if ($dumpComputer) { $dumpComputer } else { $hostComputer }
     $computerSource = if ($dumpComputer) { 'dump' } else { 'host' }
     $offBox = $dumpComputer -and ($dumpComputer -ne $hostComputer)
-    $deviceId = if ($offBox) { $null } else { Get-MachineKey }
+    # deviceId is the fleet key and MUST be derivable from the dump - use the machine name the dump records
+    # (for this fleet that is the unique machine number). The stable MachineGuid is only knowable live on the
+    # capturing PC, so it rides along as extra identity when on-box, never as the primary key.
+    $deviceId = $computer
+    $machineGuid = if (-not $offBox) { Get-MachineKey } else { $null }
     $sha = $null
     if ($escalate -and $fi) {
         if ($Sha256) { $sha = $Sha256.ToLowerInvariant() }
@@ -137,8 +141,9 @@ function Get-DumpFacts {
         ids          = [ordered]@{
             eventId            = (New-DumpEventId)
             deviceId           = $deviceId
+            deviceSource       = $computerSource
             computer           = $computer
-            computerSource     = $computerSource
+            machineGuid        = $machineGuid
             signatureId        = $IdObj.Id
             signatureScheme    = $IdObj.Scheme
             signatureCanonical = $IdObj.Canonical
