@@ -116,6 +116,7 @@ function Get-DumpFacts {
             deviceId           = (Get-MachineKey)
             computer           = $env:COMPUTERNAME
             signatureId        = $IdObj.Id
+            signatureScheme    = $IdObj.Scheme
             signatureCanonical = $IdObj.Canonical
             signatureTier      = $(if ($Sig.Kind -eq 'crash') { 1 } else { 2 })
             captureId          = (Get-DumpCaptureId $Sig)

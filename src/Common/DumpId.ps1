@@ -14,6 +14,14 @@
 # CLR, not the app, so a managed exception is identified by its managed stack (Tier-2), not module+offset.
 $script:CLR_EXCEPTION_CODE = 0xE0434352
 
+# Signature SCHEME version. It is baked into every canonical string (so it is part of the hash) AND reported
+# on each event (ids.signatureScheme). Bump it ONLY when the recipe that forms the canonical string changes
+# (different frame count, extra fields, normalisation change). Bumping makes new ids provably distinct from
+# old ones instead of silently colliding/drifting, so historical data stays valid and the centre can map
+# old->new on its own terms. Do NOT bump for ordinary app/build changes - a crash is build-scoped by its
+# module+offset already, and cross-build grouping is the Layer-2 issue's job, not the signature's.
+$script:SIG_SCHEME = 1
+
 # This file's own path, so a bitness-redirected child (see Invoke-InMatchingHost) can reload these functions.
 $script:DumpIdPath = $PSCommandPath
 
@@ -163,9 +171,13 @@ function Get-DumpStableId($Sig, [int]$TopN = 8) {
             }
         }
     }
+    # Bake the scheme version into the canonical string so the id is tied to the recipe that produced it
+    # (part of the hash) and a future recipe change yields provably distinct ids instead of silent drift.
+    $canonical = 's{0}|{1}' -f $script:SIG_SCHEME, $canonical
     [pscustomobject]@{
         Id          = Get-ShortHash $canonical
         Kind        = $Sig.Kind
+        Scheme      = $script:SIG_SCHEME
         Canonical   = $canonical
         WalkPending = $walkPending
     }
@@ -521,7 +533,7 @@ function Register-DumpOccurrence {
 
         if (-not $reg.issues.ContainsKey($id)) {
             $reg.issues[$id] = @{
-                kind = $IdObj.Kind; idTier = $(if ($IdObj.Kind -eq 'crash') { 1 } else { 2 })
+                kind = $IdObj.Kind; idTier = $(if ($IdObj.Kind -eq 'crash') { 1 } else { 2 }); scheme = $IdObj.Scheme
                 signature = @{ code = $Sig.Code; module = $Sig.Module; moduleVersion = $Sig.ModuleVer
                                moduleTimestamp = $Sig.ModuleTs; offset = $(if ($null -ne $Sig.Offset) { '0x{0:x}' -f $Sig.Offset } else { $null })
                                frames = @($Sig.Frames) }
