@@ -165,13 +165,16 @@ function Save-Config($cfg) {
 # Test-Admin, Get-ConsoleUser and Test-MicrosoftSignature come from the shared Common component.
 
 # Ship Common\ next to the installed script so the detached scheduled-task copy can dot-source it.
+# RECURSIVE: the dump engine lives in Common\Dump\*.ps1 (loaded by the DumpId.ps1 shim), so the subfolders
+# must come along - a top-level-only copy leaves the shim unable to load the engine and silently breaks
+# signature/fact emission in the installed copy.
 function Install-CommonComponents {
     if (-not $CommonDir) { return }
     $dst = Join-Path $BaseDir 'Common'
     if ((Resolve-Path $CommonDir).Path -ieq $dst) { return }   # already the installed copy
     New-Item -ItemType Directory -Path $dst -Force | Out-Null
-    Copy-Item (Join-Path $CommonDir '*.ps1') $dst -Force
-    Write-Log "Shared components copied to $dst"
+    Copy-Item (Join-Path $CommonDir '*') $dst -Recurse -Force   # includes Dump\*.ps1
+    Write-Log "Shared components copied to $dst (recursive)"
 }
 
 # Deploy the fault-id worker beside the installed monitor so the detached task can launch it.
