@@ -114,6 +114,10 @@ function Get-DefaultConfig {
         BaselinePath     = ''           # optional: JSON of already-analysed ids to suppress even the first time (blank = installed baseline beside the script)
         TelemetryEnabled = $false       # OFF until endpoints are set: periodically forward events / sync known-sigs / upload new-signature dumps
         TelemetrySeconds = 300          # how often the monitor flushes telemetry (when enabled)
+        TelemetryEventSink    = ''      # blank = local archive (KnownIssues\sent); set to https://host for the ingest API
+        KnownSignaturesSource = ''      # blank = local file; set to https://host for the known-signature registry
+        TelemetryDumpTarget   = ''      # blank = local dir (KnownIssues\upload); set to https://host for the silo
+        TelemetryDeviceKey    = ''      # per-device send-only key, sent as X-Device-Key when targets are https
         LogKeep          = 20
         LogMaxMB         = 10
         RunMode          = 'Logon'      # Logon = as user at logon (GUI apps, hang detection) | Startup = SYSTEM at boot
@@ -1205,6 +1209,14 @@ function Invoke-Monitor {
                 Remove-OldLogs $cfg.LogKeep
                 Remove-OldProcDumpLogs $cfg.LogKeep @($monitors.Values | ForEach-Object { $_.File })
                 Remove-Item (Join-Path $LogDir 'ProcDumpOutput') -Recurse -Force -ErrorAction SilentlyContinue   # folder from older version
+
+                # Bound the forwarded-event archive (KnownIssues\outbox\sent) so it cannot grow without limit.
+                $sentDir = Join-Path (Get-KnownIssuesDir) 'outbox\sent'
+                if (Test-Path -LiteralPath $sentDir) {
+                    Get-ChildItem -LiteralPath $sentDir -Filter *.json -File -ErrorAction SilentlyContinue |
+                        Sort-Object LastWriteTime -Descending | Select-Object -Skip 500 |
+                        Remove-Item -Force -ErrorAction SilentlyContinue
+                }
 
                 # Pick up config changes without reinstalling
                 $stamp = if (Test-Path $ConfigFile) { (Get-Item $ConfigFile).LastWriteTimeUtc } else { $null }

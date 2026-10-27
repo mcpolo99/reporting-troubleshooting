@@ -140,7 +140,13 @@ function Show-MainWindow {
     $monStatusSB = {
         $cfg = Read-Config; $task = Get-MonitorTask
         $state = if ($task) { $task.State } else { 'not enabled' }
-        "Task: $state  |  apps: $($cfg.Apps -join ', ')  |  keep: $($cfg.KeepDumps)  |  dumps in $($cfg.DumpDir)"
+        $tel = ''
+        if ($cfg.TelemetryEnabled) {
+            $ob = Join-Path $env:ProgramData 'ReportingTroubleshooting\Monitor\KnownIssues\outbox'
+            $pending = if (Test-Path $ob) { @(Get-ChildItem $ob -Filter *.json -File -ErrorAction SilentlyContinue).Count } else { 0 }
+            $tel = "  |  telemetry: $pending event(s) pending"
+        }
+        "Task: $state  |  apps: $($cfg.Apps -join ', ')  |  keep: $($cfg.KeepDumps)  |  dumps in $($cfg.DumpDir)$tel"
     }
     $script:RefreshPv  = [scriptblock]::Create("Start-ToolJob -Runspace `$script:RsPvCtl -Script { $($pvStatusSB.ToString()) }  -OnText `$script:SetPvStatus  | Out-Null")
     $script:RefreshMon = [scriptblock]::Create("Start-ToolJob -Runspace `$script:RsMon -Script { $($monStatusSB.ToString()) } -OnText `$script:SetMonStatus | Out-Null")
