@@ -151,26 +151,28 @@ else {
 }
 
 # A branch build is for TESTING, and the real conflict with a running release install is the machine-wide
-# ProcDumpMonitor scheduled task (one task; whoever enabled it last owns it) plus its ProcDump instances -
-# they would keep capturing under the release code while you test the branch. So a branch install STOPS +
-# DISABLES that task and ends its processes, leaving the field clear. It is reversible: enable the monitor
-# from whichever build you want (the release GUI's Enable re-registers the task against the release copy).
-function Disable-ReleaseMonitor {
-    Write-Host '> Branch build: disabling the release install''s monitor (stop + disable the shared task) so you can test the branch...'
-    try { Stop-ScheduledTask    -TaskName 'ProcDumpMonitor' -ErrorAction SilentlyContinue } catch {}
-    try { Disable-ScheduledTask -TaskName 'ProcDumpMonitor' -ErrorAction SilentlyContinue | Out-Null } catch {}
+# ProcDumpMonitor task (one task; whoever enabled it last owns it) and its ProcDump instances - they would
+# keep capturing under the release code while you test the branch. So a branch install STOPS that running
+# capture. It must NOT *disable* the task: the task is shared by name, and the branch's own Enable re-registers
+# it against the branch copy - disabling it would just stop the branch's Start from working too. Prod is
+# effectively "off" once the branch takes the task over via Enable; here we only halt the live capture.
+function Stop-ReleaseMonitor {
+    Write-Host '> Branch build: stopping the release install''s running monitor/ProcDump so you can test the branch...'
+    try { Stop-ScheduledTask -TaskName 'ProcDumpMonitor' -ErrorAction SilentlyContinue } catch {}   # stop the run, do NOT disable
     try {
         Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
             Where-Object { $_.CommandLine -and $_.CommandLine -match 'ProcDumpMonitor\.ps1' } |
             ForEach-Object { try { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue } catch {} }
     } catch {}
     try { Get-Process -Name procdump, procdump64 -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue } catch {}
-    Write-Host '  release monitor stopped + disabled; enable the monitor from the branch GUI to test it.'
+    # If a previous build left the task disabled, re-enable it so the branch's Start/Enable works.
+    try { Enable-ScheduledTask -TaskName 'ProcDumpMonitor' -ErrorAction SilentlyContinue | Out-Null } catch {}
+    Write-Host '  release capture stopped. In the branch GUI click Enable (registers the task against the branch), then Start.'
 }
 
 $entry = Join-Path $InstallDir $EntryScript
 if (-not (Test-Path $entry)) { Write-Error "Entry script not found after install: $entry"; return }
-if ($EffBranch) { Disable-ReleaseMonitor }
+if ($EffBranch) { Stop-ReleaseMonitor }
 Write-Host '> Launching...'
 Write-Host ''
 & $entry
