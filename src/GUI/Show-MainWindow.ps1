@@ -133,13 +133,13 @@ function Show-MainWindow {
 
     $pvStatusSB = {
         $cfg = Read-Config; $active = Read-ActiveState
-        $pv  = if (Test-Path $PerfViewExe) { (Get-Item $PerfViewExe).VersionInfo.FileVersion } else { 'not installed' }
+        $pv  = if (Test-Path $PerfViewExe) { (Get-Item $PerfViewExe).VersionInfo.FileVersion } else { 'not downloaded' }
         $act = if ($active) { "active: '$($active.Profile)'$(if($active.Label){" / $($active.Label)"})" } else { 'no active trace' }
         "PerfView: $pv  |  $act  |  output: $($cfg.OutputDir)"
     }
     $monStatusSB = {
         $cfg = Read-Config; $task = Get-MonitorTask
-        $state = if ($task) { $task.State } else { 'not installed' }
+        $state = if ($task) { $task.State } else { 'not enabled' }
         "Task: $state  |  apps: $($cfg.Apps -join ', ')  |  keep: $($cfg.KeepDumps)  |  dumps in $($cfg.DumpDir)"
     }
     $script:RefreshPv  = [scriptblock]::Create("Start-ToolJob -Runspace `$script:RsPvCtl -Script { $($pvStatusSB.ToString()) }  -OnText `$script:SetPvStatus  | Out-Null")
@@ -401,13 +401,13 @@ function Show-MainWindow {
         }
     }
 
-    # Install from the GUI always refreshes the installed copy (that is the button's purpose), so force the
-    # "reinstall same version?" / downgrade confirmations the non-interactive runspace cannot answer.
-    $script:BtnMonInstall.Add_Click({ & $script:Append 'Monitor: install...'; script:Invoke-Action 'Mon' $script:RsMon { $script:Force = $true; Invoke-Install } @() $script:RefreshMon })
+    # Enable from the GUI always refreshes the registered task (that is the button's purpose), so force the
+    # "re-register same version?" / downgrade confirmations the non-interactive runspace cannot answer.
+    $script:BtnMonInstall.Add_Click({ & $script:Append 'Monitor: enabling...'; script:Invoke-Action 'Mon' $script:RsMon { $script:Force = $true; Invoke-Install } @() $script:RefreshMon })
     $script:BtnMonStart.Add_Click({ & $script:Append 'Monitor: start... (live attach/dump activity shows in the "Monitor log (live)" panel below)'; script:Invoke-Action 'Mon' $script:RsMon { Start-MonitorTask } @() $script:RefreshMon })
     $script:BtnMonStop.Add_Click({ & $script:Append 'Monitor: stop...'; script:Invoke-Action 'Mon' $script:RsMon { Stop-MonitorTask (Read-Config) } @() $script:RefreshMon })
     $script:BtnMonStatus.Add_Click({ & $script:RefreshMon })
-    $script:BtnMonUninstall.Add_Click({ & $script:Append 'Monitor: uninstall...'; script:Invoke-Action 'Mon' $script:RsMon { Invoke-Uninstall } @() $script:RefreshMon })
+    $script:BtnMonUninstall.Add_Click({ & $script:Append 'Monitor: disabling...'; script:Invoke-Action 'Mon' $script:RsMon { Invoke-Uninstall } @() $script:RefreshMon })
     $script:BtnMonVerify.Add_Click({
         if ($script:Busy['Mon']) { & $script:Append 'Monitor: busy - try again in a moment.'; return }
         $script:LblMonVerify.Text = 'Verifying dependencies for the monitored apps (attaching briefly to each running app)...'
@@ -445,10 +445,10 @@ function Show-MainWindow {
 
     # ---------- Packages: one shared, verified tool store ----------
     function script:Install-Pkg([string]$Id, [bool]$Force) {
-        if ($script:Busy['Pkg']) { & $script:Append 'Packages: an install is already running.'; return }
+        if ($script:Busy['Pkg']) { & $script:Append 'Packages: a download is already running.'; return }
         $script:Busy['Pkg'] = $true
-        $script:LblPkgStatus.Text = "Installing $Id..."
-        & $script:Append "Packages: install '$Id'$(if ($Force) { ' (reinstall)' } else { '' })..."
+        $script:LblPkgStatus.Text = "Downloading $Id..."
+        & $script:Append "Packages: download '$Id'$(if ($Force) { ' (redownload)' } else { '' })..."
         $done = { $script:Busy['Pkg'] = $false; $script:LblPkgStatus.Text = 'Done.'; script:Build-PkgEditor }
         Start-ToolJob -Runspace $script:RsPkg -Script { param($i, $f) if ($f) { Install-Package $i -Force | Out-Null } else { Install-Package $i | Out-Null } } -ArgList @($Id, $Force) -OnText $script:Append -OnDone $done | Out-Null
     }
@@ -463,7 +463,7 @@ function Show-MainWindow {
             $row = New-Object System.Windows.Controls.DockPanel
 
             $btn = New-Object System.Windows.Controls.Button
-            $btn.Content = if ($s.Installed) { 'Reinstall' } else { 'Install' }
+            $btn.Content = if ($s.Installed) { 'Redownload' } else { 'Download' }
             $btn.Height = 28; $btn.MinWidth = 90; $btn.VerticalAlignment = 'Center'; $btn.Margin = '8,0,0,0'
             [System.Windows.Controls.DockPanel]::SetDock($btn, 'Right')
             # Per-row data on the control + a plain (non-closure) handler: a GetNewClosure handler rebinds the
@@ -479,7 +479,7 @@ function Show-MainWindow {
             $t2.Text = [string]$s.Description; $t2.Foreground = $script:IdBrush; $t2.TextWrapping = 'Wrap'
             $t3 = New-Object System.Windows.Controls.TextBlock
             $t3.Foreground = $script:IdBrush; $t3.Margin = '0,2,0,0'
-            $t3.Text = if ($s.Installed) { "Installed - $($s.ToolCount) tool(s)" } else { 'Not installed' }
+            $t3.Text = if ($s.Installed) { "Downloaded - $($s.ToolCount) tool(s)" } else { 'Not downloaded' }
             [void]$info.Children.Add($t1); [void]$info.Children.Add($t2); [void]$info.Children.Add($t3)
             [void]$row.Children.Add($info)
 
@@ -488,9 +488,9 @@ function Show-MainWindow {
         }
     }
     $script:BtnPkgInstallAll.Add_Click({
-        if ($script:Busy['Pkg']) { & $script:Append 'Packages: an install is already running.'; return }
-        $script:Busy['Pkg'] = $true; $script:LblPkgStatus.Text = 'Installing all...'
-        & $script:Append 'Packages: install / verify all...'
+        if ($script:Busy['Pkg']) { & $script:Append 'Packages: a download is already running.'; return }
+        $script:Busy['Pkg'] = $true; $script:LblPkgStatus.Text = 'Downloading all...'
+        & $script:Append 'Packages: download / verify all...'
         $done = { $script:Busy['Pkg'] = $false; $script:LblPkgStatus.Text = 'Done.'; script:Build-PkgEditor }
         Start-ToolJob -Runspace $script:RsPkg -Script { Install-AllPackages | Out-Null } -OnText $script:Append -OnDone $done | Out-Null
     })
@@ -546,7 +546,7 @@ function Show-MainWindow {
         } elseif ($avail -eq '1') {
             $script:UpdateAvailable = $true
             $script:BtnPkgUpdate.Content = "Update now -> $lat"
-            $script:LblPkgUpdate.Text = "Update available ($chan): $cur -> $lat. Click 'Update now' to install and relaunch."
+            $script:LblPkgUpdate.Text = "Update available ($chan): $cur -> $lat. Click 'Update now' to update and relaunch."
         } else {
             $script:UpdateAvailable = $false
             $script:BtnPkgUpdate.Content = 'Check for updates'
@@ -568,7 +568,7 @@ function Show-MainWindow {
                else { "& ([scriptblock]::Create((irm '$raw')))" }
         try {
             Start-Process powershell.exe -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', $cmd)
-            & $script:Append 'Update started in a new window - it will install the new version and reopen the app. Closing...'
+            & $script:Append 'Update started in a new window - it will update the new version and reopen the app. Closing...'
             if ($script:MainWin) { $script:MainWin.Close() }
         } catch { & $script:Append "Could not start the update: $($_.Exception.Message)" }
     }
@@ -618,7 +618,7 @@ function Show-MainWindow {
         try {
             $lnk = Install-DesktopShortcut -TargetBat (Join-Path $script:ToolkitRoot 'run.bat')
             & $script:Append "Desktop shortcut created: $lnk"
-        } catch { & $script:Append "Shortcut install failed: $($_.Exception.Message)" }
+        } catch { & $script:Append "Shortcut creation failed: $($_.Exception.Message)" }
     })
 
     # ---------- initial load ----------

@@ -2,9 +2,9 @@
               xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
               VerticalScrollBarVisibility="Auto">
   <StackPanel Margin="14">
-    <TextBlock Text="External tools this toolset uses. Installed once into one shared, signature-verified location and reused by every tool." Foreground="{DynamicResource AppIdColor}" TextWrapping="Wrap" Margin="0,0,0,10"/>
+    <TextBlock Text="External tools this toolset uses. Downloaded once into one shared, signature-verified location and reused by every tool." Foreground="{DynamicResource AppIdColor}" TextWrapping="Wrap" Margin="0,0,0,10"/>
     <StackPanel Orientation="Horizontal" Margin="0,0,0,10">
-      <Button x:Name="BtnPkgInstallAll" Content="Install / verify all" Height="30" MinWidth="150" Margin="0,0,8,0"/>
+      <Button x:Name="BtnPkgInstallAll" Content="Download / verify all" Height="30" MinWidth="150" Margin="0,0,8,0"/>
       <Button x:Name="BtnPkgRefresh"    Content="Refresh"             Height="30" MinWidth="90"  Margin="0,0,8,0"/>
       <Button x:Name="BtnPkgOpen"       Content="Open folder"         Height="30" MinWidth="110" Margin="0,0,8,0"/>
       <Button x:Name="BtnPkgUpdate"     Content="Check for updates"   Height="30" MinWidth="150"/>

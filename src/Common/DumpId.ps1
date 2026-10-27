@@ -351,7 +351,7 @@ function Add-DepGap([string]$Area, [string]$Detail, [string]$Dir) {
 # Passively attach to a LIVE process (read-only, no suspend, no dump) and try to create its CLR runtime -
 # the no-dump proof that this machine can fault-identify that app. Returns @{ Managed; Flavor; Clr; Ok; Error }.
 function Test-AppWalkable([int]$ProcessId, [string]$ClrMdDll) {
-    if (-not ($ClrMdDll -and (Test-Path -LiteralPath $ClrMdDll))) { return @{ Managed = $null; Ok = $false; Error = 'ClrMD not installed' } }
+    if (-not ($ClrMdDll -and (Test-Path -LiteralPath $ClrMdDll))) { return @{ Managed = $null; Ok = $false; Error = 'ClrMD not downloaded' } }
     # A 32-bit app can only be attached from a 32-bit host (and vice versa) - the DAC loads as native code.
     if ($env:RT_BITNESS_REDIR -ne '1') {
         $tb = Get-ProcessBitness $ProcessId
@@ -387,10 +387,10 @@ function Test-MonitorDependencies {
     # base: walker + system debug engine
     if ($ClrMdDll -and (Test-Path -LiteralPath $ClrMdDll)) {
         $sig = (Get-AuthenticodeSignature $ClrMdDll).Status
-        $rows += [pscustomobject]@{ Name = 'ClrMD walker'; Status = 'OK'; Detail = "installed ($sig signature)" }
+        $rows += [pscustomobject]@{ Name = 'ClrMD walker'; Status = 'OK'; Detail = "downloaded ($sig signature)" }
     } else {
-        $rows += [pscustomobject]@{ Name = 'ClrMD walker'; Status = 'FAIL'; Detail = 'not installed - install it on the Packages tab (needed for hang/managed ids)' }
-        Add-DepGap 'clrmd-missing' 'ClrMD walker not installed' $Dir
+        $rows += [pscustomobject]@{ Name = 'ClrMD walker'; Status = 'FAIL'; Detail = 'not downloaded - download it on the Packages tab (needed for hang/managed ids)' }
+        Add-DepGap 'clrmd-missing' 'ClrMD walker not downloaded' $Dir
     }
     $dbg = Join-Path $env:SystemRoot 'System32\dbgeng.dll'
     $rows += [pscustomobject]@{ Name = 'Debug engine'; Status = $(if (Test-Path $dbg) { 'OK' } else { 'WARN' }); Detail = $dbg }
