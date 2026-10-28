@@ -44,7 +44,7 @@ function Show-MainWindow {
                    'CmbPvProfile','TxtPvLabel','BtnPvStart','BtnPvStop','BtnPvAbort','TxtPvSeconds','BtnPvOpen','BtnPvStatus','LblPvStatus',
                    'TxtPvProfName','PnlPvKernel','CmbPvClr','PnlPvProviders','TxtPvProvOther','TxtPvExtra','TxtPvCircular','TxtPvBuffer','BtnPvProfSave','BtnPvProfDelete','BtnPvProfDefault',
                    'TxtPvOutput','TxtPvSym','ChkPvMerge','ChkPvZip','BtnPvSettingsSave',
-                   'BtnMonEnable','BtnMonStart','BtnMonStop','BtnMonStatus','BtnMonDisable','LblMonStatus','BtnMonVerify','LblMonVerify','PnlMonConfig','BtnMonSave','BtnMonReload','ChkMonTail','TxtMonLog',
+                   'BtnMonEnable','BtnMonStart','BtnMonStop','BtnMonStatus','BtnMonDisable','LblMonStatus','BtnMonVerify','LblMonVerify','PnlCfgProcess','PnlCfgMonitor','PnlCfgGeneral','BtnMonSave','BtnMonReload','ChkMonTail','TxtMonLog',
                    'TxtCaseExe','BtnCaseBrowse','CmbCaseMode','ChkCaseFusion','ChkCaseAppConfig','TxtCaseTimeout','BtnCaseRun','LblCaseStatus',
                    'BtnPkgInstallAll','BtnPkgRefresh','BtnPkgOpen','BtnPkgUpdate','LblPkgUpdate','PnlPackages','LblPkgStatus',
                    'BtnShortcut') {
@@ -71,7 +71,15 @@ function Show-MainWindow {
     $script:PvProviderPresets = @('Microsoft-Windows-Kernel-Memory','Microsoft-Windows-TCPIP')
     $script:PvClrPresets      = @('Default','None','Verbose')
     # dropdown options for Monitor config fields (anything not listed falls back to checkbox/text by type)
-    $script:MonFieldMeta = @{ DuplicateAction = @('Delete','Keep'); RunMode = @('Logon','Startup') }
+    $script:MonFieldMeta = @{ DuplicateAction = @('Delete','Keep'); RunMode = @('Logon','Startup'); SuppressAction = @('Recycle','Delete') }
+    # Which config sub-tab each field belongs to (#53). ProcDumpArgs is rendered as toggles on 'Process', so it is
+    # not listed here. Any field not listed falls through to 'General'.
+    $script:MonFieldGroup = @{
+        Apps = 'Monitor'; DumpDir = 'Monitor'; CheckSeconds = 'Monitor'; CooldownSeconds = 'Monitor'
+        DuplicateAction = 'Monitor'; DuplicateWindowSeconds = 'Monitor'; RunMode = 'Monitor'; TaskUser = 'Monitor'; HeadlessLauncher = 'Monitor'
+        KeepDumps = 'General'; CleanupSeconds = 'General'; KnownIssuesEnabled = 'General'; SuppressKnown = 'General'; SuppressAction = 'General'
+        BaselinePath = 'General'; TelemetryEnabled = 'General'; TelemetrySeconds = 'General'; LogKeep = 'General'; LogMaxMB = 'General'
+    }
 
     # PerfView safety: an ETW session started with 'PerfView start' keeps running after PerfView.exe exits,
     # so if this app closes/crashes mid-trace we must abort the session. These OS/file paths let us do that
@@ -395,16 +403,54 @@ function Show-MainWindow {
         [void]$row.Children.Add($ctl)
         return @{ Row = $row; Ctl = $ctl }
     }
+    # One capture-switch checkbox for the ProcDump sub-tab.
+    function script:New-ArgToggle($label, $checked, $hint) {
+        $cb = New-Object System.Windows.Controls.CheckBox
+        $cb.Content = $label; $cb.IsChecked = [bool]$checked; $cb.Foreground = $script:FgBrush; $cb.Margin = '0,0,0,6'
+        if ($hint) { $cb.ToolTip = $hint }
+        $cb
+    }
+    # Render the ProcDump capture switches as toggles (+ a dumps-per-session count) into the Process sub-tab, from
+    # the ProcDumpArgs string. -accepteula is always applied and never shown. Controls are kept in $script:MonArgCtls
+    # so BtnMonSave can rebuild the arg string with ConvertTo-ProcDumpArgs. (#53)
+    function script:Build-ArgToggles($argString) {
+        $t = ConvertFrom-ProcDumpArgs $argString
+        $script:MonArgCtls = [ordered]@{}
+        $p = $script:PnlCfgProcess
+        $intro = New-Object System.Windows.Controls.TextBlock
+        $intro.Text = 'ProcDump capture switches (-accepteula is always applied).'; $intro.Foreground = $script:IdBrush
+        $intro.TextWrapping = 'Wrap'; $intro.Margin = '0,0,0,10'
+        [void]$p.Children.Add($intro)
+        $script:MonArgCtls.FullDump       = script:New-ArgToggle 'Full memory dump (-ma)'                    $t.FullDump       'Capture a complete dump including all memory.'
+        $script:MonArgCtls.OnException    = script:New-ArgToggle 'Dump on unhandled exception (-e)'          $t.OnException    'Dump when the app crashes with an unhandled (second-chance) exception.'
+        $script:MonArgCtls.FirstChance    = script:New-ArgToggle 'Also first-chance exceptions (-e 1)'       $t.FirstChance    'Also dump on first-chance exceptions (noisier). Implies -e.'
+        $script:MonArgCtls.OnHang         = script:New-ArgToggle 'Dump on hang / unresponsive window (-h)'   $t.OnHang         'Dump when the window stops responding.'
+        $script:MonArgCtls.WaitForProcess = script:New-ArgToggle 'Wait for the process to start (-w)'        $t.WaitForProcess 'If the app is not running yet, wait and attach when it starts.'
+        foreach ($k in 'FullDump','OnException','FirstChance','OnHang','WaitForProcess') { [void]$p.Children.Add($script:MonArgCtls[$k]) }
+        $row = New-Object System.Windows.Controls.DockPanel; $row.Margin = '0,4,0,0'
+        $lbl = New-Object System.Windows.Controls.TextBlock
+        $lbl.Text = 'Dumps per session (-n)'; $lbl.Width = 180; $lbl.VerticalAlignment = 'Center'; $lbl.Foreground = $script:FgBrush
+        [System.Windows.Controls.DockPanel]::SetDock($lbl, 'Left'); [void]$row.Children.Add($lbl)
+        $tb = New-Object System.Windows.Controls.TextBox; $tb.Width = 80; $tb.HorizontalAlignment = 'Left'; $tb.Text = "$($t.DumpsPerSession)"
+        script:Set-NumericOnly $tb
+        $script:MonArgCtls.DumpsPerSession = $tb
+        [void]$row.Children.Add($tb); [void]$p.Children.Add($row)
+    }
     function script:Build-MonEditor {
         if ($script:Busy['Mon']) { & $script:Append 'Monitor busy - cannot reload config now.'; return }
         $cfg = Invoke-ToolSync -Runspace $script:RsMon -Script { Read-Config } | Select-Object -First 1
         if (-not $cfg) { return }
-        $script:PnlMonConfig.Children.Clear(); $script:MonCtls = @{}
+        $script:PnlCfgProcess.Children.Clear(); $script:PnlCfgMonitor.Children.Clear(); $script:PnlCfgGeneral.Children.Clear()
+        $script:MonCtls = @{}
         foreach ($prop in $cfg.PSObject.Properties) {
+            if ($prop.Name -eq 'ProcDumpArgs') { continue }   # rendered as toggles on the Process sub-tab
+            $grp = $script:MonFieldGroup[$prop.Name]; if (-not $grp) { $grp = 'General' }
+            $panel = switch ($grp) { 'Process' { $script:PnlCfgProcess } 'Monitor' { $script:PnlCfgMonitor } default { $script:PnlCfgGeneral } }
             $r = script:New-ConfigRow $prop.Name $prop.Value $script:MonFieldMeta[$prop.Name]
-            [void]$script:PnlMonConfig.Children.Add($r.Row)
+            [void]$panel.Children.Add($r.Row)
             $script:MonCtls[$prop.Name] = $r.Ctl
         }
+        script:Build-ArgToggles $cfg.ProcDumpArgs
     }
 
     # Enable from the GUI always refreshes the registered task (that is the button's purpose), so force the
@@ -431,6 +477,17 @@ function Show-MainWindow {
                       elseif ($c -is [System.Windows.Controls.ComboBox]) { if ($null -ne $c.SelectedItem) { [string]$c.SelectedItem } else { [string]$c.Text } }
                       elseif ($c -is [System.Windows.Controls.WrapPanel]) { (@(& $c.Tag) -join ',') }   # tag editor -> array split in the tool
                       else { $c.Text }
+        }
+        # ProcDumpArgs is edited as toggles on the Process sub-tab; rebuild the arg string from them (#53).
+        if ($script:MonArgCtls -and $script:MonArgCtls.Count) {
+            $kv['ProcDumpArgs'] = ConvertTo-ProcDumpArgs ([ordered]@{
+                FullDump        = [bool]$script:MonArgCtls.FullDump.IsChecked
+                OnException     = [bool]$script:MonArgCtls.OnException.IsChecked
+                FirstChance     = [bool]$script:MonArgCtls.FirstChance.IsChecked
+                OnHang          = [bool]$script:MonArgCtls.OnHang.IsChecked
+                WaitForProcess  = [bool]$script:MonArgCtls.WaitForProcess.IsChecked
+                DumpsPerSession = $script:MonArgCtls.DumpsPerSession.Text
+            })
         }
         & $script:Append 'Monitor: save config...'
         $doneMon = { script:Build-MonEditor; & $script:RefreshMon }
