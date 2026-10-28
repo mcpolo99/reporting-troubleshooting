@@ -44,7 +44,7 @@ function Show-MainWindow {
                    'CmbPvProfile','TxtPvLabel','BtnPvStart','BtnPvStop','BtnPvAbort','TxtPvSeconds','BtnPvOpen','BtnPvStatus','LblPvStatus',
                    'TxtPvProfName','PnlPvKernel','CmbPvClr','PnlPvProviders','TxtPvProvOther','TxtPvExtra','TxtPvCircular','TxtPvBuffer','BtnPvProfSave','BtnPvProfDelete','BtnPvProfDefault',
                    'TxtPvOutput','TxtPvSym','ChkPvMerge','ChkPvZip','BtnPvSettingsSave',
-                   'BtnMonInstall','BtnMonStart','BtnMonStop','BtnMonStatus','BtnMonUninstall','LblMonStatus','BtnMonVerify','LblMonVerify','PnlMonConfig','BtnMonSave','BtnMonReload','ChkMonTail','TxtMonLog',
+                   'BtnMonEnable','BtnMonStart','BtnMonStop','BtnMonStatus','BtnMonDisable','LblMonStatus','BtnMonVerify','LblMonVerify','PnlMonConfig','BtnMonSave','BtnMonReload','ChkMonTail','TxtMonLog',
                    'TxtCaseExe','BtnCaseBrowse','CmbCaseMode','ChkCaseFusion','ChkCaseAppConfig','TxtCaseTimeout','BtnCaseRun','LblCaseStatus',
                    'BtnPkgInstallAll','BtnPkgRefresh','BtnPkgOpen','BtnPkgUpdate','LblPkgUpdate','PnlPackages','LblPkgStatus',
                    'BtnShortcut') {
@@ -140,7 +140,13 @@ function Show-MainWindow {
     $monStatusSB = {
         $cfg = Read-Config; $task = Get-MonitorTask
         $state = if ($task) { $task.State } else { 'not enabled' }
-        "Task: $state  |  apps: $($cfg.Apps -join ', ')  |  keep: $($cfg.KeepDumps)  |  dumps in $($cfg.DumpDir)"
+        $tel = ''
+        if ($cfg.TelemetryEnabled) {
+            $ob = Join-Path $env:ProgramData 'ReportingTroubleshooting\Monitor\KnownIssues\outbox'
+            $pending = if (Test-Path $ob) { @(Get-ChildItem $ob -Filter *.json -File -ErrorAction SilentlyContinue).Count } else { 0 }
+            $tel = "  |  telemetry: $pending event(s) pending"
+        }
+        "Task: $state  |  apps: $($cfg.Apps -join ', ')  |  keep: $($cfg.KeepDumps)  |  dumps in $($cfg.DumpDir)$tel"
     }
     $script:RefreshPv  = [scriptblock]::Create("Start-ToolJob -Runspace `$script:RsPvCtl -Script { $($pvStatusSB.ToString()) }  -OnText `$script:SetPvStatus  | Out-Null")
     $script:RefreshMon = [scriptblock]::Create("Start-ToolJob -Runspace `$script:RsMon -Script { $($monStatusSB.ToString()) } -OnText `$script:SetMonStatus | Out-Null")
@@ -403,11 +409,11 @@ function Show-MainWindow {
 
     # Enable from the GUI always refreshes the registered task (that is the button's purpose), so force the
     # "re-register same version?" / downgrade confirmations the non-interactive runspace cannot answer.
-    $script:BtnMonInstall.Add_Click({ & $script:Append 'Monitor: enabling...'; script:Invoke-Action 'Mon' $script:RsMon { $script:Force = $true; Invoke-Install } @() $script:RefreshMon })
-    $script:BtnMonStart.Add_Click({ & $script:Append 'Monitor: start... (live attach/dump activity shows in the "Monitor log (live)" panel below)'; script:Invoke-Action 'Mon' $script:RsMon { Start-MonitorTask } @() $script:RefreshMon })
-    $script:BtnMonStop.Add_Click({ & $script:Append 'Monitor: stop...'; script:Invoke-Action 'Mon' $script:RsMon { Stop-MonitorTask (Read-Config) } @() $script:RefreshMon })
+    $script:BtnMonEnable.Add_Click({ & $script:Append 'Monitor: enabling service...'; script:Invoke-Action 'Mon' $script:RsMon { $script:Force = $true; Enable-Service } @() $script:RefreshMon })
+    $script:BtnMonStart.Add_Click({ & $script:Append 'Monitor: starting... (live attach/dump activity shows in the "Monitor log (live)" panel below)'; script:Invoke-Action 'Mon' $script:RsMon { Start-Monitor } @() $script:RefreshMon })
+    $script:BtnMonStop.Add_Click({ & $script:Append 'Monitor: stopping...'; script:Invoke-Action 'Mon' $script:RsMon { Stop-Monitor (Read-Config) } @() $script:RefreshMon })
     $script:BtnMonStatus.Add_Click({ & $script:RefreshMon })
-    $script:BtnMonUninstall.Add_Click({ & $script:Append 'Monitor: disabling...'; script:Invoke-Action 'Mon' $script:RsMon { Invoke-Uninstall } @() $script:RefreshMon })
+    $script:BtnMonDisable.Add_Click({ & $script:Append 'Monitor: disabling service...'; script:Invoke-Action 'Mon' $script:RsMon { Disable-Service } @() $script:RefreshMon })
     $script:BtnMonVerify.Add_Click({
         if ($script:Busy['Mon']) { & $script:Append 'Monitor: busy - try again in a moment.'; return }
         $script:LblMonVerify.Text = 'Verifying dependencies for the monitored apps (attaching briefly to each running app)...'
@@ -506,6 +512,13 @@ function Show-MainWindow {
     $script:IsBranchInstall = [bool]($script:InstallRoot -match '\\branch\\')
     $script:BranchName      = if (Test-Path (Join-Path $script:InstallRoot '.branch')) { (Get-Content (Join-Path $script:InstallRoot '.branch') -Raw).Trim() }
                               elseif ($script:IsBranchInstall) { Split-Path $script:InstallRoot -Leaf } else { '' }
+    # A branch build shares the release VERSION number but runs different code - make it visibly distinct so
+    # you can tell a branch install from the release (show the branch name + the installed commit sha).
+    if ($script:BranchName) {
+        $__sha = if (Test-Path (Join-Path $script:InstallRoot '.version')) { (Get-Content (Join-Path $script:InstallRoot '.version') -Raw).Trim() } else { '' }
+        $__short = if ($__sha.Length -ge 7) { $__sha.Substring(0, 7) } else { $__sha }
+        $script:LblVersion.Text = "v$ScriptVersion  (branch: $($script:BranchName)$(if ($__short) { "@$__short" } else { '' }))"
+    }
     $script:UpdateAvailable = $false
 
     # Runs in the dedicated RsUpd runspace (self-contained, built-in cmdlets only) and returns ONE sentinel

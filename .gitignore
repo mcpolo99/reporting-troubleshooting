@@ -28,3 +28,6 @@ build/
 # Scratch
 .temp/
 *.tmp
+
+# local, untracked fleet-telemetry endpoint blob (never commit the key)
+telemetry.blob

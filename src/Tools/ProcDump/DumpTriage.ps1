@@ -24,6 +24,20 @@ param(
     [switch]$Quiet
 )
 
+# The monitor runs this DETACHED + hidden + -Quiet, so a crash (e.g. an incomplete engine deploy) would be
+# invisible - which looks exactly like "dumps appear but no JSON/registry". Log any terminating error to a
+# file so it is never silent.
+trap {
+    try {
+        $__ld = Join-Path $env:ProgramData 'ReportingTroubleshooting\Monitor\Logs'
+        if (-not (Test-Path $__ld)) { New-Item -ItemType Directory -Path $__ld -Force | Out-Null }
+        Add-Content -LiteralPath (Join-Path $__ld 'DumpTriage-error.log') -Encoding UTF8 `
+            -Value ('{0}  FAILED: {1}`n{2}' -f (Get-Date -Format o), $_.Exception.Message, $_.ScriptStackTrace)
+    } catch {}
+    if (-not $Quiet) { Write-Host "DumpTriage failed: $($_.Exception.Message)" -ForegroundColor Red }
+    exit 1
+}
+
 $ScriptDir = if ($PSCommandPath) { Split-Path -Parent $PSCommandPath } else { (Get-Location).Path }
 
 # locate Common\ upward (same probe the other tools use)
@@ -44,15 +58,16 @@ if (-not $CommonDir) { throw "Shared components (Common\) not found from $Script
 # read the monitor config for the dedupe settings (this is a separate process from the monitor)
 $MonConfig = Join-Path $env:ProgramData 'ReportingTroubleshooting\Monitor\config.json'
 $cfg = $null; if (Test-Path $MonConfig) { try { $cfg = Get-Content $MonConfig -Raw | ConvertFrom-Json } catch {} }
-function Cfg($name, $default) { if ($cfg -and $null -ne $cfg.$name) { $cfg.$name } else { $default } }
+function Cfg($name, $default) { if ($cfg -and $null -ne $cfg.$name -and "$($cfg.$name)" -ne '') { $cfg.$name } else { $default } }
 
 if (-not $DumpDir) { $DumpDir = Cfg 'DumpDir' 'C:\dumps' }
 $suppressKnown  = [bool](Cfg 'SuppressKnown' $true)
 $suppressAction = [string](Cfg 'SuppressAction' 'Recycle')
 $clrmd    = Resolve-PackageTool 'clrmd'
-# shipped baseline of already-analysed ids lives beside the installed script
+# shipped baseline of already-analysed ids lives beside the installed script; a blank config value means
+# "use that shipped baseline", and if even that is absent there is simply no baseline.
 $baseline = Cfg 'BaselinePath' (Join-Path $ScriptDir 'known-issues.baseline.json')
-if (-not (Test-Path "$baseline")) { $baseline = $null }
+if ([string]::IsNullOrWhiteSpace("$baseline") -or -not (Test-Path -LiteralPath $baseline)) { $baseline = $null }
 
 # Write to the host, not the success pipeline - so a caller that captures Triage-One's return value gets
 # only the result object, and a detached worker's stdout stays clean.

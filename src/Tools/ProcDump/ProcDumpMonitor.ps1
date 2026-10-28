@@ -18,11 +18,12 @@
   $ScriptVersion is stamped automatically from the repo VERSION by scripts\New-Release.ps1 at release time -
   NEVER edit it by hand. Release history lives in CHANGELOG.md and the GitHub releases.
   Monitor mode (what the scheduled task runs - not meant to be started by hand):
-      ... -File "%ProgramData%\ReportingTroubleshooting\Monitor\ProcDumpMonitor.ps1" -Monitor
+      ... -File "%ProgramData%\ReportingTroubleshooting\src\Tools\ProcDump\ProcDumpMonitor.ps1" -Monitor
 
 .FILES
-  App data under the one app root %ProgramData%\ReportingTroubleshooting\Monitor\ :
-      ProcDumpMonitor.ps1                 installed copy of this script
+  Scripts run in place from the installed src; the scheduled task and the detached workers point at that src
+  path, so an app update refreshes them with no copy to go stale. %ProgramData%\ReportingTroubleshooting\Monitor\
+  holds DATA only:
       config.json                         settings
       Logs\ProcDumpMonitor_<datetime>.log         one per monitor launch
       Logs\ProcDumpMonitor-Setup_<datetime>.log   one per setup/menu session
@@ -52,8 +53,9 @@ $TaskName        = 'ProcDumpMonitor'
 $BaseDir         = Join-Path $env:ProgramData 'ReportingTroubleshooting\Monitor'   # all app data under the one app root
 $ConfigFile      = Join-Path $BaseDir 'config.json'
 $LogDir          = Join-Path $BaseDir 'Logs'
-$InstalledScript = Join-Path $BaseDir "$AppName.ps1"
-$InstalledTriage = Join-Path $BaseDir 'DumpTriage.ps1'   # fault-id worker deployed beside the monitor
+# Scripts run IN PLACE from src (defined after $MonScriptDir below). $BaseDir holds DATA only - config, logs,
+# KnownIssues, dumps - never script copies. The scheduled task points at the src script directly, so an app
+# update refreshes the monitor automatically (no "installed copy" to go stale).
 $MutexName       = "Global\$AppName"
 $StopFile        = Join-Path $BaseDir 'stop.request'    # created to ask the running monitor to stop gracefully
 # $ToolsDir / $ProcDumpExeName / $ProcDumpExe come from the shared package store, set after Packages.ps1 below.
@@ -75,6 +77,10 @@ $script:LogMaxMB   = 10
 #   New-LogFile/Write-Log/Update-LogRoll/Remove-OldLogs, Test-Admin, Get-ConsoleUser,
 #   Test-MicrosoftSignature, Read-Value/Read-Int/Read-Bool, Get-ScriptVersionFromFile, Format-Version.
 $MonScriptDir = if ($PSScriptRoot) { $PSScriptRoot } elseif ($PSCommandPath) { Split-Path -Parent $PSCommandPath } else { (Get-Location).Path }
+# The task runs THIS script and its siblings in place from src - no copying into $BaseDir.
+$InstalledScript    = Join-Path $MonScriptDir "$AppName.ps1"
+$InstalledTriage    = Join-Path $MonScriptDir 'DumpTriage.ps1'
+$InstalledTelemetry = Join-Path (Split-Path $MonScriptDir -Parent) 'Telemetry\Send-Telemetry.ps1'
 $CommonDir = $null; $__probe = $MonScriptDir
 for ($__i = 0; $__i -lt 6 -and -not $CommonDir; $__i++) {
     foreach ($__c in @((Join-Path $__probe 'Common'), (Join-Path $__probe 'Scripts\Common'))) {
@@ -111,6 +117,11 @@ function Get-DefaultConfig {
         SuppressKnown    = $true        # keep the FIRST dump of each id, count + soft-suppress later recurrences
         SuppressAction   = 'Recycle'    # Recycle = move recurrences to KnownIssues\Suppressed | Delete
         BaselinePath     = ''           # optional: JSON of already-analysed ids to suppress even the first time (blank = installed baseline beside the script)
+        TelemetryEnabled = $true        # periodically forward events / sync known-sigs / upload new-signature dumps
+        TelemetrySeconds = 300          # how often the monitor flushes telemetry (when enabled)
+        # The ingest/registry/silo endpoints and the send-only device key are NOT config: they ship with the
+        # build as an encoded blob (see Common\Telemetry.ps1 Get-TelemetryEndpoints), so they are not clear
+        # text in config.json or the UI and need no manual per-machine step.
         LogKeep          = 20
         LogMaxMB         = 10
         RunMode          = 'Logon'      # Logon = as user at logon (GUI apps, hang detection) | Startup = SYSTEM at boot
@@ -157,24 +168,16 @@ function Save-Config($cfg) {
 # =============================== HELPERS =================================
 # Test-Admin, Get-ConsoleUser and Test-MicrosoftSignature come from the shared Common component.
 
-# Ship Common\ next to the installed script so the detached scheduled-task copy can dot-source it.
-function Install-CommonComponents {
-    if (-not $CommonDir) { return }
-    $dst = Join-Path $BaseDir 'Common'
-    if ((Resolve-Path $CommonDir).Path -ieq $dst) { return }   # already the installed copy
-    New-Item -ItemType Directory -Path $dst -Force | Out-Null
-    Copy-Item (Join-Path $CommonDir '*.ps1') $dst -Force
-    Write-Log "Shared components copied to $dst"
-}
-
-# Deploy the fault-id worker beside the installed monitor so the detached task can launch it.
-function Install-TriageWorker {
-    $src = Join-Path $MonScriptDir 'DumpTriage.ps1'
-    if (-not (Test-Path $src)) { Write-Log 'DumpTriage.ps1 not found next to the monitor - fault-id worker not deployed.' 'WARN'; return }
-    if ((Resolve-Path $src).Path -ieq $InstalledTriage) { return }   # already the installed copy
-    Copy-Item $src $InstalledTriage -Force
-    Unblock-File $InstalledTriage -ErrorAction SilentlyContinue
-    Write-Log "Fault-id worker copied to $InstalledTriage"
+# Launch the telemetry forwarder detached + below-normal (sync known-sigs, forward events, upload new-signature
+# dumps) so network egress never blocks the monitor loop. Runs the forwarder in place from src. No-op if absent.
+function Enqueue-Telemetry {
+    $worker = $InstalledTelemetry
+    if (-not (Test-Path $worker)) { return }
+    try {
+        $p = Start-Process powershell.exe -WindowStyle Hidden -PassThru -ArgumentList @(
+            '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', "`"$worker`"", '-Quiet')
+        try { $p.PriorityClass = [System.Diagnostics.ProcessPriorityClass]::BelowNormal } catch {}
+    } catch { Write-Log "Could not launch telemetry forwarder: $($_.Exception.Message)" 'WARN' }
 }
 
 # Verify the fault-id dependencies for the CONFIGURED apps on this machine (no dump needed) and emit a
@@ -439,11 +442,10 @@ function Get-DumpApp($cfg, [string]$FileName) {
 
 # Launch the fault-identification + dedupe worker for one freshly written dump, DETACHED and at
 # below-normal priority, so the slow managed stack walk never blocks the monitor loop. The worker
-# (DumpTriage.ps1, installed beside this script) computes the stable id, counts the occurrence, and
-# soft-suppresses recurrences of an already-kept/known id.
+# (DumpTriage.ps1, run in place from src next to this script) computes the stable id, counts the
+# occurrence, and soft-suppresses recurrences of an already-kept/known id.
 function Enqueue-DumpTriage([string]$DumpPath) {
-    $worker = Join-Path $BaseDir 'DumpTriage.ps1'
-    if (-not (Test-Path $worker)) { $worker = Join-Path $MonScriptDir 'DumpTriage.ps1' }
+    $worker = $InstalledTriage
     if (-not (Test-Path $worker)) { Write-Log 'DumpTriage.ps1 not found - fault-id skipped for this dump.' 'WARN'; return }
     try {
         $p = Start-Process powershell.exe -WindowStyle Hidden -PassThru -ArgumentList @(
@@ -740,7 +742,7 @@ function Stop-MonitorProcesses {
 # Graceful: ask the monitor to stop via a request file; it detaches ProcDump and exits by itself. Then
 # GUARANTEE it: force-end any loop process the task left behind (e.g. a conhost-launched PowerShell), and
 # only afterwards detach ProcDump - so nothing re-arms it between detach and loop-death.
-function Stop-MonitorTask($cfg, [int]$TimeoutSec = 60) {
+function Stop-Monitor($cfg, [int]$TimeoutSec = 60) {
     $task = Get-MonitorTask
     $running = ($task -and $task.State -eq 'Running') -or (@(Get-MonitorProcesses).Count -gt 0)
     if (-not $running) {
@@ -778,19 +780,19 @@ function Stop-MonitorTask($cfg, [int]$TimeoutSec = 60) {
 
 function Start-MonitorTask {
     $task = Get-MonitorTask
-    if (-not $task) { Write-Log 'Monitor is not installed - click Install first (that registers the task and copies the script).' 'WARN'; return }
+    if (-not $task) { Write-Log 'Monitor is not enabled - click Enable first (it registers the scheduled task).' 'WARN'; return }
 
-    # The task action launches "powershell.exe -File <InstalledScript>". If that script is missing (task left
-    # over from an older install at a different path, never reinstalled here) the process exits instantly with
-    # no window and no log - which looks exactly like "started but nothing is running". Catch it up front.
+    # The task action launches "powershell.exe -File <InstalledScript>" from src. If that script is missing
+    # (e.g. the app was moved/uninstalled) the process exits instantly with no window - which looks like
+    # "started but nothing is running". Catch it up front.
     if (-not (Test-Path -LiteralPath $InstalledScript)) {
-        Write-Log "Monitor script not found at $InstalledScript - the task would launch nothing. Click Install (or Uninstall then Install) to (re)deploy it." 'ERROR'
+        Write-Log "Monitor script not found at $InstalledScript - the app's src is missing. Reinstall the app, then click Enable." 'ERROR'
         return
     }
     $acts = @($task.Actions)
     $pointsHere = $acts | Where-Object { "$($_.Arguments)" -like "*$InstalledScript*" }
     if (-not $pointsHere) {
-        Write-Log "The installed task does not point at $InstalledScript (it is a stale registration). Click Uninstall then Install to re-register it." 'WARN'
+        Write-Log "The task points at a different/older script path than this src ($InstalledScript) - click Enable to re-register it against the current src." 'WARN'
     }
 
     Start-ScheduledTask -TaskName $TaskName
@@ -811,6 +813,51 @@ function Start-MonitorTask {
     }
 }
 
+# Non-persistent run (what "Start" does): launch the monitor loop as a detached, hidden process in THIS
+# session - NO scheduled task involved. The run lives until Stop (or until the user logs off); it is not
+# re-created at logon. The Global mutex in Invoke-Monitor guarantees a single monitor, so this never
+# collides with an enabled task. For a monitor that survives logon/reboot, use Enable (registers the task).
+function Start-MonitorRun {
+    if (-not (Test-Path -LiteralPath $InstalledScript)) {
+        Write-Log "Monitor script not found at $InstalledScript - the app's src is missing. Reinstall the app." 'ERROR'; return
+    }
+    $taskRunning = (Get-MonitorTask) -and (Get-MonitorTask).State -eq 'Running'
+    if ($taskRunning -or @(Get-MonitorProcesses).Count -gt 0) {
+        Write-Log 'Monitor is already running - nothing to start.'; return
+    }
+    Remove-Item $StopFile -Force -ErrorAction SilentlyContinue   # clear any stale stop request
+    $p = Start-Process powershell.exe -WindowStyle Hidden -PassThru -ArgumentList @(
+        '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-WindowStyle', 'Hidden',
+        '-File', "`"$InstalledScript`"", '-Monitor')
+
+    # Confirm it actually came up: a healthy monitor spawns its loop process and acquires the mutex within a
+    # few seconds. If the launched process died immediately, say so instead of claiming success.
+    $deadline = (Get-Date).AddSeconds(6); $up = $false
+    while ((Get-Date) -lt $deadline) {
+        Start-Sleep -Milliseconds 400
+        if (-not $p.HasExited -and @(Get-MonitorProcesses).Count -gt 0) { $up = $true; break }
+    }
+    if ($up) {
+        Write-Log "Monitor started (this session, PID $($p.Id)). Runs until you click Stop or log off. Click Enable for a monitor that survives logon/reboot."
+    } else {
+        Write-Log "Monitor exited immediately after start - see the newest monitor log in $LogDir for why." 'ERROR'
+    }
+}
+
+# What the "Start Monitor" button/menu does. If the service is enabled AND its task points at THIS install's
+# src, Start starts that task (persistent). Otherwise - no task, or a task left over from an old install/path
+# that would just fail - it does a non-persistent run in this session, so Start always does something useful.
+# Enable Service re-registers the task to restore persistence. Stop-Monitor ends whichever is running.
+function Start-Monitor {
+    $task = Get-MonitorTask
+    if ($task) {
+        $pointsHere = @($task.Actions | Where-Object { "$($_.Arguments)" -like "*$InstalledScript*" })
+        if ($pointsHere.Count) { Start-MonitorTask; return }
+        Write-Log "A scheduled task exists but points at an old path, not this install's src - starting a non-persistent run instead. Click 'Enable Service' to re-register the task for persistence across logon/reboot." 'WARN'
+    }
+    Start-MonitorRun
+}
+
 # =============================== VERSION / UPDATE ========================
 # Get-ScriptVersionFromFile and Format-Version come from the shared Common component.
 function Confirm-Step([string]$Question) {
@@ -821,109 +868,40 @@ function Confirm-Step([string]$Question) {
     (Read-Host "$Question (y/N)") -eq 'y'
 }
 
-function Backup-Install([version]$OldVersion) {
-    $bak = Join-Path $BaseDir 'Backup'
-    New-Item -ItemType Directory -Path $bak -Force | Out-Null
-    $tag = '{0}_{1:yyyyMMdd_HHmmss}' -f $(if ($OldVersion -eq [version]'0.0.0') { 'unversioned' } else { "v$OldVersion" }), (Get-Date)
-    Copy-Item $InstalledScript (Join-Path $bak "$AppName`_$tag.ps1") -Force
-    if (Test-Path $ConfigFile) { Copy-Item $ConfigFile (Join-Path $bak "config_$tag.json") -Force }
-    Write-Log "Backup of installed script and config: $bak (*_$tag)"
-    # keep the 5 newest backups of each kind
-    foreach ($f in "$AppName`_*.ps1", 'config_*.json') {
-        Get-ChildItem $bak -Filter $f -File | Sort-Object LastWriteTime -Descending | Select-Object -Skip 5 |
-            Remove-Item -Force -ErrorAction SilentlyContinue
-    }
-}
-
-function Invoke-Update {
-    $new = [version]$ScriptVersion
-    $old = Get-ScriptVersionFromFile $InstalledScript
-    Write-Log "Update check - installed: $(Format-Version $old) | this script: $new"
-
-    if ($null -eq $old) { Write-Log 'Nothing installed yet - use Install.' 'WARN'; return }
-    if ($PSCommandPath -eq $InstalledScript) {
-        Write-Log 'This IS the installed copy. Run Update from the new script file you want to install.' 'WARN'; return
-    }
-
-    if ($new -lt $old) {
-        Write-Log "This script ($new) is OLDER than the installed one ($old)." 'WARN'
-        if (-not (Confirm-Step 'Downgrade anyway?')) { Write-Log 'Update cancelled.'; return }
-    } elseif ($new -eq $old) {
-        Write-Log "Already up to date ($new)."
-        if (-not (Confirm-Step 'Reinstall the same version?')) { return }
-    }
-
-    $task = Get-MonitorTask
-    if ($old -lt $GracefulStopSince -and $task -and $task.State -eq 'Running') {
-        Write-Log ("The installed monitor ($(Format-Version $old)) does not support graceful stop. Stopping it may " +
-                   "terminate the monitored apps. Close them first if possible.") 'WARN'
-        if (-not (Confirm-Step 'Continue and stop the old monitor now?')) { Write-Log 'Update cancelled.'; return }
-    }
-
-    Backup-Install $old
-    $cfg = Read-Config                      # existing settings + defaults for any new ones
-    # old monitors ignore the stop request, so don't wait the full 90 s for them
-    if ($old -lt $GracefulStopSince) { Stop-MonitorTask $cfg 10 } else { Stop-MonitorTask $cfg }
-
-    try {
-        Copy-Item -Path $PSCommandPath -Destination $InstalledScript -Force -ErrorAction Stop
-        Unblock-File -Path $InstalledScript -ErrorAction SilentlyContinue
-        Install-CommonComponents
-        Install-TriageWorker
-    } catch {
-        Write-Log "Copy failed: $($_.Exception.Message) - restarting the previous version." 'ERROR'
-        Start-MonitorTask; return
-    }
-    Save-Config $cfg                        # writes new settings into config.json so they're visible/editable
-    if (-not (Install-Sysinternals)) { Write-Log 'Sysinternals tools missing and could not be downloaded.' 'WARN' }
-    Install-KnownIssuesDeps $cfg
-    Register-MonitorTask $cfg               # task definition may have changed between versions
-    Start-MonitorTask
-
-    $now = Get-ScriptVersionFromFile $InstalledScript
-    if ($now -eq $new) { Write-Log "Update complete: $(Format-Version $old) -> $new." }
-    else { Write-Log "Installed copy reports $(Format-Version $now) after update - check the files." 'ERROR' }
-}
-
-# =============================== INSTALL / UNINSTALL =====================
-function Invoke-Install {
-    # Already installed from somewhere else -> this is an update (with version check)
-    if ((Test-Path $InstalledScript) -and $PSCommandPath -ne $InstalledScript) {
-        Write-Log 'Already installed - running Update instead.'
-        Invoke-Update; return
-    }
+# =============================== ENABLE / DISABLE SERVICE ===============
+# Enable Service = register the scheduled task to run THIS script in place from src (persistent across
+# logon/reboot), and start it. It copies NO scripts anywhere (src is the one correct location; an app update
+# refreshes src directly). It only ensures config/dirs/tools exist, (re)registers the task, and starts it.
+# (A non-persistent run that needs no task is Start-MonitorRun.)
+function Enable-Service {
     $cfg = Read-Config
     if (-not (Test-Path $ConfigFile)) {
         if ($script:Interactive) { Write-Host 'No config yet - running setup first.'; $cfg = Edit-Config $cfg }
         else { Save-Config $cfg }   # GUI / unattended: write defaults; edit later via the Monitor tab
     }
     foreach ($d in @($BaseDir, $ToolsDir, $LogDir, $cfg.DumpDir)) { New-Item -ItemType Directory -Path $d -Force | Out-Null }
-
     if (-not (Install-Sysinternals)) { Write-Log 'Install aborted: ProcDump not available.' 'ERROR'; return }
-
-    if ($PSCommandPath -and ($PSCommandPath -ne $InstalledScript)) {
-        Copy-Item -Path $PSCommandPath -Destination $InstalledScript -Force
-        Unblock-File -Path $InstalledScript -ErrorAction SilentlyContinue
-        Install-CommonComponents
-        Install-TriageWorker
-        Write-Log "Script copied to $InstalledScript"
-    }
     Install-KnownIssuesDeps $cfg
+    Save-Config $cfg                        # merge defaults (new keys appear in the editor); preserves edits
 
-    Stop-MonitorTask $cfg
-    Register-MonitorTask $cfg
+    Stop-Monitor $cfg                   # stop any running instance so the fresh start picks up current src
+    Register-MonitorTask $cfg               # task runs "$InstalledScript -Monitor" in place - nothing copied
     Start-MonitorTask
-    Write-Log "Install complete (version $ScriptVersion)."
+    Write-Log "Service enabled: task registered to run $InstalledScript in place (version $ScriptVersion). No scripts copied."
 }
 
-function Invoke-Uninstall {
-    # Uninstall removes ONLY the scheduled task. Config, logs and the installed script are kept so a later
-    # reinstall reuses the same configuration - uninstall must never clear config. Dumps live in C:\dumps
+# Scripts run in place from src, so an app update already refreshed them. "Update" just re-registers the task
+# (its definition may have changed between versions) and restarts to pick up the current src.
+function Invoke-Update { Enable-Service }
+
+function Disable-Service {
+    # Disable removes ONLY the scheduled task. Config, logs and the installed script are kept so a later
+    # re-enable reuses the same configuration - disable must never clear config. Dumps live in C:\dumps
     # (outside BaseDir) and are untouched regardless.
     $cfg = Read-Config
-    Stop-MonitorTask $cfg
+    Stop-Monitor $cfg
     if (Get-MonitorTask) {
-        # Disable first so no trigger (logon / StartWhenAvailable) can fire it mid-uninstall, then remove it.
+        # Disable the trigger first so no logon / StartWhenAvailable event can fire it mid-removal, then remove it.
         Disable-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue | Out-Null
         Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false
         Write-Log 'Scheduled task removed.'
@@ -931,8 +909,8 @@ function Invoke-Uninstall {
     $left = Stop-MonitorProcesses      # belt and suspenders: nothing left to re-arm ProcDump
     if ($left) { Write-Log "Ended $left monitor process(es) still running after task removal." 'WARN' }
     Stop-ProcDumpInstances $cfg
-    Write-Log "Configuration preserved at $ConfigFile. Uninstall removes only the scheduled task; delete $BaseDir by hand if you want config/logs gone."
-    Write-Host 'Uninstall complete - scheduled task removed; configuration preserved.'
+    Write-Log "Configuration preserved at $ConfigFile. Disable removes only the scheduled task; delete $BaseDir by hand if you want config/logs gone."
+    Write-Host 'Service disabled - scheduled task removed; configuration preserved.'
 }
 
 # =============================== INTERACTIVE =============================
@@ -970,7 +948,7 @@ function Edit-Config($cfg) {
     Save-Config $cfg
     if (Get-MonitorTask) {
         if ((Read-Host 'Re-register task and restart monitor with new settings? (Y/n)') -ne 'n') {
-            Stop-MonitorTask $cfg
+            Stop-Monitor $cfg
             Register-MonitorTask $cfg
             Start-MonitorTask
         }
@@ -1021,29 +999,29 @@ function Show-Menu {
             Write-Host "   >> Update available: $(Format-Version $iv) -> $ScriptVersion  (choose U)" -ForegroundColor Green
         }
         Write-Host ' 1) Setup / edit configuration'
-        Write-Host ' 2) Install (download ProcDump, copy script, create scheduled task, start)'
+        Write-Host ' 2) Enable Service (download ProcDump, register the persistent scheduled task, start)'
         Write-Host ' 3) Status'
-        Write-Host ' 4) Start monitor'
+        Write-Host ' 4) Start monitor (starts the service if enabled, otherwise a non-persistent run)'
         Write-Host ' 5) Stop monitor'
         Write-Host ' 6) Run monitor in this window (testing, Ctrl+C to stop)'
         Write-Host ' 7) Update Sysinternals Suite to latest'
         Write-Host ' 8) Open dump folder'
-        Write-Host ' 9) Uninstall'
+        Write-Host ' 9) Disable Service (remove the scheduled task)'
         Write-Host ' U) Update installed copy from this script (version check, backup, keeps config)'
         Write-Host ' Q) Quit'
         switch ((Read-Host 'Select').Trim().ToUpper()) {
             '1' { $null = Edit-Config (Read-Config) }
-            '2' { Invoke-Install }
+            '2' { Enable-Service }
             '3' { Show-Status }
-            '4' { Start-MonitorTask }
-            '5' { Stop-MonitorTask (Read-Config) }
+            '4' { Start-Monitor }
+            '5' { Stop-Monitor (Read-Config) }
             '6' { Invoke-Monitor; $script:LogPrefix = "$AppName-Setup"; New-LogFile }
             '7' { $cfg = Read-Config; $was = $installed -and (Get-MonitorTask).State -eq 'Running'
-                  if ($was) { Stop-MonitorTask $cfg }
+                  if ($was) { Stop-Monitor $cfg }
                   $null = Install-Sysinternals -Force
                   if ($was) { Start-MonitorTask } }
             '8' { $d = (Read-Config).DumpDir; if (Test-Path $d) { Start-Process explorer.exe $d } else { Write-Host 'Folder does not exist yet.' } }
-            '9' { if ((Read-Host 'Really uninstall? (y/N)') -eq 'y') { Invoke-Uninstall } }
+            '9' { if ((Read-Host 'Really disable the service? (y/N)') -eq 'y') { Disable-Service } }
             'U' { Invoke-Update }
             'Q' { return }
             default { Write-Host 'Unknown choice.' -ForegroundColor Yellow }
@@ -1066,6 +1044,7 @@ function Invoke-Monitor {
     $monitors    = @{}
     $stopRequested = $false
     $lastCleanup = [datetime]::MinValue
+    $lastTelemetry = Get-Date      # don't flush immediately on startup; wait one interval
     $cfgStamp    = if (Test-Path $ConfigFile) { (Get-Item $ConfigFile).LastWriteTimeUtc } else { $null }
 
     try {
@@ -1178,6 +1157,14 @@ function Invoke-Monitor {
                 Remove-OldProcDumpLogs $cfg.LogKeep @($monitors.Values | ForEach-Object { $_.File })
                 Remove-Item (Join-Path $LogDir 'ProcDumpOutput') -Recurse -Force -ErrorAction SilentlyContinue   # folder from older version
 
+                # Bound the forwarded-event archive (KnownIssues\outbox\sent) so it cannot grow without limit.
+                $sentDir = Join-Path (Get-KnownIssuesDir) 'outbox\sent'
+                if (Test-Path -LiteralPath $sentDir) {
+                    Get-ChildItem -LiteralPath $sentDir -Filter *.json -File -ErrorAction SilentlyContinue |
+                        Sort-Object LastWriteTime -Descending | Select-Object -Skip 500 |
+                        Remove-Item -Force -ErrorAction SilentlyContinue
+                }
+
                 # Pick up config changes without reinstalling
                 $stamp = if (Test-Path $ConfigFile) { (Get-Item $ConfigFile).LastWriteTimeUtc } else { $null }
                 if ($stamp -ne $cfgStamp) {
@@ -1194,6 +1181,13 @@ function Invoke-Monitor {
                     $lastCleanup = [datetime]::MinValue
                     continue
                 }
+            }
+
+            # 3) Telemetry flush on its own timer (off unless enabled + endpoints configured). Detached, so
+            #    network egress never blocks the loop; forwards events, syncs known-sigs, uploads new-sig dumps.
+            if ($cfg.TelemetryEnabled -and ((Get-Date) - $lastTelemetry).TotalSeconds -ge $cfg.TelemetrySeconds) {
+                $lastTelemetry = Get-Date
+                Enqueue-Telemetry
             }
 
             Start-Sleep -Seconds $cfg.CheckSeconds
@@ -1218,8 +1212,11 @@ function Invoke-Monitor {
 }
 
 # =============================== ENTRY POINT =============================
-# Loaded as a library (RT_LIBRARY=1, e.g. the GUI runspace): expose functions only, no auto-run.
-if ($env:RT_LIBRARY -eq '1') { return }
+# Loaded as a library (RT_LIBRARY=1, e.g. the GUI runspace dot-sources this for its functions): expose
+# functions only, no auto-run. BUT an explicit action switch must still run: a monitor/worker the GUI
+# launches as its own process (Start-MonitorRun, Enqueue-DumpTriage) inherits RT_LIBRARY=1 from the GUI's
+# process environment, and must not be silenced by it - that would "start" a process that does nothing.
+if ($env:RT_LIBRARY -eq '1' -and -not ($Monitor -or $Install -or $Update -or $Uninstall -or $Triage)) { return }
 
 if ($Monitor) {
     Invoke-Monitor
@@ -1229,9 +1226,8 @@ if ($Monitor) {
 # On-demand fault-id + dedupe over the configured dump folder (no admin needed).
 if ($Triage) {
     $cfg = Read-Config
-    $worker = if (Test-Path $InstalledTriage) { $InstalledTriage } else { Join-Path $MonScriptDir 'DumpTriage.ps1' }
-    if (-not (Test-Path $worker)) { Write-Host 'DumpTriage.ps1 not found.' -ForegroundColor Red; exit 1 }
-    & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $worker -DumpDir $cfg.DumpDir
+    if (-not (Test-Path $InstalledTriage)) { Write-Host 'DumpTriage.ps1 not found.' -ForegroundColor Red; exit 1 }
+    & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $InstalledTriage -DumpDir $cfg.DumpDir
     exit $LASTEXITCODE
 }
 
@@ -1249,7 +1245,7 @@ $script:EchoLog = -not ($Install -or $Update -or $Uninstall)   # menu mode print
 $script:Interactive = $script:EchoLog                          # only the console menu can Read-Host
 Write-Log "Setup session (v$ScriptVersion) started by $env:USERDOMAIN\$env:USERNAME from $PSCommandPath"
 
-if     ($Install)   { Invoke-Install }
+if     ($Install)   { Enable-Service }
 elseif ($Update)    { Invoke-Update }
-elseif ($Uninstall) { Invoke-Uninstall }
+elseif ($Uninstall) { Disable-Service }
 else                { Show-Menu }

@@ -18,6 +18,11 @@
 $script:DumpIdPath = $PSCommandPath
 
 $__dumpDir = Join-Path (Split-Path -Parent $PSCommandPath) 'Dump'
+if (-not (Test-Path -LiteralPath $__dumpDir)) {
+    throw "Dump engine folder not found: $__dumpDir. The deploy is incomplete (Common\Dump\ missing) - re-run Install on the Monitor tab."
+}
 foreach ($__m in 'Core', 'Minidump', 'Signature', 'Walk', 'Diagnosis', 'KnownIssues', 'Facts', 'Triage') {
-    . (Join-Path $__dumpDir "$__m.ps1")
+    $__f = Join-Path $__dumpDir "$__m.ps1"
+    if (-not (Test-Path -LiteralPath $__f)) { throw "Dump engine file missing: $__f (incomplete deploy - re-run Install on the Monitor tab)." }
+    . $__f
 }
