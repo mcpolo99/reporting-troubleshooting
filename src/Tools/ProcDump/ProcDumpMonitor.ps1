@@ -123,6 +123,7 @@ function Get-DefaultConfig {
         # text in config.json or the UI and need no manual per-machine step.
         LogKeep          = 20
         LogMaxMB         = 10
+        WorkerPriority   = 'BelowNormal' # CPU priority of the detached workers (triage stack-walk + telemetry/gzip): Idle | BelowNormal | Normal - keep the service from stealing CPU from the machine's apps
         RunMode          = 'Logon'      # Logon = as user at logon (GUI apps, hang detection) | Startup = SYSTEM at boot
         TaskUser         = (Get-ConsoleUser)   # Logon mode: DOMAIN\user; defaults to the current console user (editable)
         HeadlessLauncher = $true        # Logon mode: start via 'conhost --headless' so no window flashes
@@ -169,14 +170,24 @@ function Save-Config($cfg) {
 
 # Launch the telemetry forwarder detached + below-normal (sync known-sigs, forward events, upload new-signature
 # dumps) so network egress never blocks the monitor loop. Runs the forwarder in place from src. No-op if absent.
-function Enqueue-Telemetry {
+# CPU priority for the detached workers, from config (default BelowNormal). Keeps the installed service from
+# stealing CPU from the machine's foreground apps; Idle only runs the worker when the system is otherwise idle.
+function Resolve-WorkerPriority($cfg) {
+    switch ("$(if ($cfg) { $cfg.WorkerPriority })") {
+        'Idle'   { [System.Diagnostics.ProcessPriorityClass]::Idle }
+        'Normal' { [System.Diagnostics.ProcessPriorityClass]::Normal }
+        default  { [System.Diagnostics.ProcessPriorityClass]::BelowNormal }
+    }
+}
+
+function Enqueue-Telemetry($Config) {
     $worker = $InstalledTelemetry
     if (-not (Test-Path $worker)) { Write-Log "Telemetry flush skipped: forwarder not found at $worker" 'WARN'; return }
     try {
         Write-Log 'Telemetry flush: launching forwarder (sync known-sigs, forward events, upload granted dumps)'
         $p = Start-Process powershell.exe -WindowStyle Hidden -PassThru -ArgumentList @(
             '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', "`"$worker`"", '-Quiet')
-        try { $p.PriorityClass = [System.Diagnostics.ProcessPriorityClass]::BelowNormal } catch {}
+        try { $p.PriorityClass = Resolve-WorkerPriority $Config } catch {}
         Write-Log "Telemetry forwarder launched (PID $($p.Id)); outcome in Logs\Telemetry_*.log"
     } catch { Write-Log "Could not launch telemetry forwarder: $($_.Exception.Message)" 'WARN' }
 }
@@ -452,13 +463,13 @@ function Get-DumpApp($cfg, [string]$FileName) {
 # below-normal priority, so the slow managed stack walk never blocks the monitor loop. The worker
 # (DumpTriage.ps1, run in place from src next to this script) computes the stable id, counts the
 # occurrence, and soft-suppresses recurrences of an already-kept/known id.
-function Enqueue-DumpTriage([string]$DumpPath) {
+function Enqueue-DumpTriage([string]$DumpPath, $Config) {
     $worker = $InstalledTriage
     if (-not (Test-Path $worker)) { Write-Log 'DumpTriage.ps1 not found - fault-id skipped for this dump.' 'WARN'; return }
     try {
         $p = Start-Process powershell.exe -WindowStyle Hidden -PassThru -ArgumentList @(
             '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', "`"$worker`"", '-DumpPath', "`"$DumpPath`"", '-Quiet')
-        try { $p.PriorityClass = [System.Diagnostics.ProcessPriorityClass]::BelowNormal } catch {}
+        try { $p.PriorityClass = Resolve-WorkerPriority $Config } catch {}
         Write-Log "Fault-id worker queued for $([IO.Path]::GetFileName($DumpPath)) (PID $($p.Id))."
     } catch { Write-Log "Could not launch fault-id worker: $($_.Exception.Message)" 'WARN' }
 }
@@ -557,7 +568,7 @@ function Invoke-NewDumps($cfg, $known, $pending, $recent, $lastInfo) {
                    $(if ($dupOf) { " - DUPLICATE of $dupOf (kept)" } else { '' })) $lvl
 
         # Fault-identify this dump and dedupe already-seen problems (runs detached - never blocks the loop).
-        if ($cfg.KnownIssuesEnabled) { Enqueue-DumpTriage $d.FullName }
+        if ($cfg.KnownIssuesEnabled) { Enqueue-DumpTriage $d.FullName $cfg }
     }
     # forget dumps that no longer exist. Re-scan the directory NOW (not the $dumps list captured at entry): a dump
     # renamed to its final name during this pass is only on disk under the new name, so a stale list would drop the
@@ -1268,7 +1279,7 @@ function Invoke-Monitor {
             #    network egress never blocks the loop; forwards events, syncs known-sigs, uploads new-sig dumps.
             if ($cfg.TelemetryEnabled -and ((Get-Date) - $lastTelemetry).TotalSeconds -ge $cfg.TelemetrySeconds) {
                 $lastTelemetry = Get-Date
-                Enqueue-Telemetry
+                Enqueue-Telemetry $cfg
             }
 
             Start-Sleep -Seconds $cfg.CheckSeconds
