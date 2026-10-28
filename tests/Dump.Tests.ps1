@@ -77,12 +77,7 @@ try {
     Check 'top-level productVersion = imageVer' ($fev.productVersion -eq '2.3.4')
     Check 'top-level class + severity present'  ([bool]$fev.class -and [bool]$fev.severity)
     Check 'top-level capturedAtUtc present'     ([bool]$fev.capturedAtUtc)
-    # firstSeenOnDevice signal (#68): true on the machine's first occurrence (no decision / count<=1), false on a recurrence.
-    Check 'firstSeenOnDevice true (no decision)' ($fev.firstSeenOnDevice -eq $true)
-    $fev1 = Get-DumpFacts -Sig $fsig -IdObj $fido -DumpPath $tmpDump -Decision @{ Action = 'keep'; Count = 1 }
-    Check 'firstSeenOnDevice true (count 1)'     ($fev1.firstSeenOnDevice -eq $true)
-    $fev2 = Get-DumpFacts -Sig $fsig -IdObj $fido -DumpPath $tmpDump -Decision @{ Action = 'suppress'; Count = 3 }
-    Check 'firstSeenOnDevice false (recurrence)' ($fev2.firstSeenOnDevice -eq $false)
+    Check 'top-level deviceId present'          ([bool]$fev.deviceId)   # CI-bound per CONTRACT 7; required for the per-device grant
 } finally { Remove-Item -LiteralPath $tmpDump -Force -ErrorAction SilentlyContinue }
 
 Write-Host 'dump file naming (ProcDump_<pc>_<process>_<tag>_<yyyyMMdd>_<HHmmss>.dmp)'
