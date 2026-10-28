@@ -23,19 +23,40 @@ for ($i = 0; $i -lt 6 -and -not $CommonDir; $i++) {
 }
 if (-not $CommonDir) { throw "Common\ not found from $ScriptDir upward." }
 . (Join-Path $CommonDir 'Common.ps1')
+. (Join-Path $CommonDir 'Logging.ps1')
 . (Join-Path $CommonDir 'DumpId.ps1')       # Get-KnownIssuesDir
 . (Join-Path $CommonDir 'Telemetry.ps1')
 
-function Say($m) { if (-not $Quiet) { Write-Host $m } }
+# Every flush is recorded in the monitor's Logs dir (Logs\Telemetry_<datetime>.log), so a detached, silent
+# run still leaves a trail of what was attempted and whether it sent / failed. -Quiet only suppresses the
+# console echo; the file log is always written.
+$LogDir = Join-Path $env:ProgramData 'ReportingTroubleshooting\Monitor\Logs'
+$AppName = 'Telemetry'
+$script:LogPrefix = 'Telemetry'
+$script:EchoLog = -not $Quiet
+$script:LogMaxMB = 5
+$script:LogCount = 0
+New-LogFile
+try { Remove-OldLogs 10 } catch {}
+
 if (-not $Dir) { $Dir = Get-KnownIssuesDir }
 $cfg = Get-TelemetryConfig
+$mode = if (Test-IsHttp $cfg.EventSink) { 'http' } else { 'local' }
+Write-Log "flush start (mode=$mode, events -> $($cfg.EventSink))"
 
-Say ("known-signatures <- {0}" -f $cfg.KnownSource)
-$k = Sync-KnownSignatures -Config $cfg
-Say $(if ($k -ge 0) { "  baseline now lists $k signature(s)" } else { '  sync failed - keeping existing baseline' })
+try {
+    $k = Sync-KnownSignatures -Config $cfg
+    if ($k -ge 0) { Write-Log "known-signatures: baseline now lists $k signature(s)" }
+    else { Write-Log 'known-signatures: sync failed - keeping existing baseline' 'WARN' }
 
-Say ("events -> {0}" -f $cfg.EventSink)
-$r = Send-OutboxEvents -Dir $Dir -Config $cfg
-Say ("  sent {0}, uploaded {1} dump(s) on server grant, failed {2} (failed stay in the outbox for the next run)" -f $r.Sent, $r.Dumps, $r.Failed)
-
-if ($r.Failed -gt 0) { exit 1 }
+    $r = Send-OutboxEvents -Dir $Dir -Config $cfg
+    $level = if ($r.Failed -gt 0) { 'WARN' } else { 'INFO' }
+    Write-Log ('events: sent {0}, uploaded {1} dump(s) on grant, failed {2} (failed stay in the outbox)' -f $r.Sent, $r.Dumps, $r.Failed) $level
+    Write-Log 'flush done'
+    if ($r.Failed -gt 0) { exit 1 }
+    exit 0
+}
+catch {
+    Write-Log "flush error: $($_.Exception.Message)" 'ERROR'
+    exit 1
+}

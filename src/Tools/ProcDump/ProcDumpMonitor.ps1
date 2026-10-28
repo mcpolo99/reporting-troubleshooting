@@ -172,11 +172,13 @@ function Save-Config($cfg) {
 # dumps) so network egress never blocks the monitor loop. Runs the forwarder in place from src. No-op if absent.
 function Enqueue-Telemetry {
     $worker = $InstalledTelemetry
-    if (-not (Test-Path $worker)) { return }
+    if (-not (Test-Path $worker)) { Write-Log "Telemetry flush skipped: forwarder not found at $worker" 'WARN'; return }
     try {
+        Write-Log 'Telemetry flush: launching forwarder (sync known-sigs, forward events, upload granted dumps)'
         $p = Start-Process powershell.exe -WindowStyle Hidden -PassThru -ArgumentList @(
             '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', "`"$worker`"", '-Quiet')
         try { $p.PriorityClass = [System.Diagnostics.ProcessPriorityClass]::BelowNormal } catch {}
+        Write-Log "Telemetry forwarder launched (PID $($p.Id)); outcome in Logs\Telemetry_*.log"
     } catch { Write-Log "Could not launch telemetry forwarder: $($_.Exception.Message)" 'WARN' }
 }
 
