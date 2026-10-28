@@ -438,8 +438,19 @@ function Show-MainWindow {
         $intro.Text = 'ProcDump capture switches (-accepteula is always applied).'; $intro.Foreground = $script:IdBrush
         $intro.TextWrapping = 'Wrap'; $intro.Margin = '0,0,0,10'
         [void]$p.Children.Add($intro)
-        $script:MonArgCtls.FullDump       = script:New-ArgToggle 'Full memory dump (-ma)'                    $t.FullDump       'Capture a complete dump including all memory.'
-        [void]$p.Children.Add($script:MonArgCtls.FullDump)
+
+        # Dump type: a single choice - -ma and -mp are mutually exclusive, so a dropdown, not checkboxes.
+        $dtRow = New-Object System.Windows.Controls.DockPanel; $dtRow.Margin = '0,0,0,8'
+        $dtLbl = New-Object System.Windows.Controls.TextBlock
+        $dtLbl.Text = 'Dump type'; $dtLbl.Width = 120; $dtLbl.VerticalAlignment = 'Center'; $dtLbl.Foreground = $script:FgBrush
+        [System.Windows.Controls.DockPanel]::SetDock($dtLbl, 'Left'); [void]$dtRow.Children.Add($dtLbl)
+        $dtCb = New-Object System.Windows.Controls.ComboBox; $dtCb.Width = 220; $dtCb.HorizontalAlignment = 'Left'
+        $dtCb.ToolTip = 'Full (-ma): all memory, richest. Mini-plus (-mp): lighter, usually still walkable for the signature. Mini: smallest (stacks only); signatures may be provisional.'
+        $script:DumpTypeItems = [ordered]@{ Full = 'Full (-ma)'; MiniPlus = 'Mini-plus (-mp)'; Mini = 'Mini (smallest)' }
+        foreach ($disp in $script:DumpTypeItems.Values) { [void]$dtCb.Items.Add($disp) }
+        $dtCb.SelectedItem = $(if ($script:DumpTypeItems.Contains("$($t.DumpType)")) { $script:DumpTypeItems["$($t.DumpType)"] } else { $script:DumpTypeItems['Full'] })
+        [void]$dtRow.Children.Add($dtCb); [void]$p.Children.Add($dtRow)
+        $script:MonArgCtls.DumpType = $dtCb
 
         # Exception: one -e checkbox + an inline level box (blank = unhandled/2nd-chance only; 1 = also first-chance).
         $exRow = New-Object System.Windows.Controls.StackPanel; $exRow.Orientation = 'Horizontal'; $exRow.Margin = '0,0,0,6'
@@ -512,7 +523,7 @@ function Show-MainWindow {
         # ProcDumpArgs is edited as toggles on the Process sub-tab; rebuild the arg string from them (#53).
         if ($script:MonArgCtls -and $script:MonArgCtls.Count) {
             $kv['ProcDumpArgs'] = ConvertTo-ProcDumpArgs ([ordered]@{
-                FullDump        = [bool]$script:MonArgCtls.FullDump.IsChecked
+                DumpType        = switch -Wildcard ("$($script:MonArgCtls.DumpType.SelectedItem)") { '*-ma*' { 'Full' } '*-mp*' { 'MiniPlus' } default { 'Mini' } }
                 OnException     = [bool]$script:MonArgCtls.OnException.IsChecked
                 ExceptionLevel  = $script:MonArgCtls.ExceptionLevel.Text
                 OnHang          = [bool]$script:MonArgCtls.OnHang.IsChecked

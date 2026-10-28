@@ -12,7 +12,7 @@ function Check([string]$name, [bool]$cond) { $script:count++; if ($cond) { Write
 
 Write-Host 'parse the shipped default'
 $d = ConvertFrom-ProcDumpArgs '-accepteula -ma -e -h -n 1 -w'
-Check 'FullDump on'            ($d.FullDump)
+Check 'DumpType = Full'        ($d.DumpType -eq 'Full')
 Check 'OnException on'         ($d.OnException)
 Check 'ExceptionLevel blank'   ($d.ExceptionLevel -eq '')
 Check 'OnHang on'              ($d.OnHang)
@@ -26,8 +26,12 @@ Check 'OnException on'         ($f.OnException)
 Check 'DumpsPerSession = 3'    ($f.DumpsPerSession -eq 3)
 
 Write-Host 'build from toggles always starts with -accepteula'
-$s = ConvertTo-ProcDumpArgs ([ordered]@{ FullDump=$true; OnException=$true; ExceptionLevel=''; OnHang=$true; WaitForProcess=$true; DumpsPerSession=1 })
+$s = ConvertTo-ProcDumpArgs ([ordered]@{ DumpType='Full'; OnException=$true; ExceptionLevel=''; OnHang=$true; WaitForProcess=$true; DumpsPerSession=1 })
 Check 'builds the shipped default' ($s -eq '-accepteula -ma -e -h -n 1 -w')
+Check 'MiniPlus builds -mp'         ((ConvertTo-ProcDumpArgs ([ordered]@{ DumpType='MiniPlus'; DumpsPerSession=1 })) -match '(^|\s)-mp(\s|$)')
+Check 'Mini builds neither -ma/-mp' (-not ((ConvertTo-ProcDumpArgs ([ordered]@{ DumpType='Mini'; DumpsPerSession=1 })) -match '(^|\s)-m[ap](\s|$)'))
+Check 'parse -mp -> MiniPlus'       ((ConvertFrom-ProcDumpArgs '-accepteula -mp -e -n 1 -w').DumpType -eq 'MiniPlus')
+Check 'parse neither -> Mini'       ((ConvertFrom-ProcDumpArgs '-accepteula -e -n 1 -w').DumpType -eq 'Mini')
 Check 'accepteula always present'  ((ConvertTo-ProcDumpArgs ([ordered]@{})) -match '(^|\s)-accepteula(\s|$)')
 Check 'on-exception + blank -> -e'  ((ConvertTo-ProcDumpArgs ([ordered]@{ OnException=$true; DumpsPerSession=1 })) -match '(^|\s)-e(\s|$)')
 Check 'on-exception + 1 -> -e 1'    ((ConvertTo-ProcDumpArgs ([ordered]@{ OnException=$true; ExceptionLevel='1'; DumpsPerSession=1 })) -match '(^|\s)-e 1(\s|$)')
