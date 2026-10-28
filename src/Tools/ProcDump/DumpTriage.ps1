@@ -62,7 +62,7 @@ function Cfg($name, $default) { if ($cfg -and $null -ne $cfg.$name -and "$($cfg.
 
 if (-not $DumpDir) { $DumpDir = Cfg 'DumpDir' 'C:\dumps' }
 $suppressKnown  = [bool](Cfg 'SuppressKnown' $true)
-$suppressAction = [string](Cfg 'SuppressAction' 'Recycle')
+$suppressAction = [string](Cfg 'SuppressAction' 'Delete')
 $clrmd    = Resolve-PackageTool 'clrmd'
 # shipped baseline of already-analysed ids lives beside the installed script; a blank config value means
 # "use that shipped baseline", and if even that is absent there is simply no baseline.

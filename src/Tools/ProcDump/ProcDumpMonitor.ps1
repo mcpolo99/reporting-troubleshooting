@@ -115,7 +115,7 @@ function Get-DefaultConfig {
         DuplicateWindowSeconds = 300    # hang dumps of a process this soon after its exception dump = duplicate
         KnownIssuesEnabled = $true      # identify each dump's stable fault id and dedupe already-seen problems
         SuppressKnown    = $true        # keep the FIRST dump of each id, count + soft-suppress later recurrences
-        SuppressAction   = 'Recycle'    # Recycle = move recurrences to KnownIssues\Suppressed | Delete
+        SuppressAction   = 'Delete'     # Delete recurrences (default: first dump + count already captured) | Recycle = move to KnownIssues\Suppressed (bounded)
         BaselinePath     = ''           # optional: JSON of already-analysed ids to suppress even the first time (blank = installed baseline beside the script)
         TelemetryEnabled = $true        # periodically forward events / sync known-sigs / upload new-signature dumps
         TelemetrySeconds = 300          # how often the monitor flushes telemetry (when enabled)
@@ -1186,6 +1186,22 @@ function Invoke-Monitor {
                     Where-Object { $_.Name -match '\.(info|versions)\.txt$' -and
                                    -not (Test-Path -LiteralPath ($_.FullName -replace '\.(info|versions)\.txt$', '.dmp')) } |
                     Remove-Item -Force -ErrorAction SilentlyContinue
+
+                # Bound the suppressed-recurrence store (KnownIssues\Suppressed). With SuppressAction=Delete it is
+                # empty, but legacy data and Recycle mode land dumps here; keep only the newest KeepDumps and drop
+                # their sidecars, so it can never grow unbounded (and never sits as a pile of uncompressed dumps).
+                $supDir = Join-Path (Get-KnownIssuesDir) 'Suppressed'
+                if (Test-Path -LiteralPath $supDir) {
+                    Get-ChildItem -LiteralPath $supDir -Filter *.dmp -File -ErrorAction SilentlyContinue |
+                        Sort-Object LastWriteTime -Descending | Select-Object -Skip $cfg.KeepDumps |
+                        ForEach-Object {
+                            try {
+                                Remove-Item -LiteralPath $_.FullName -Force -ErrorAction Stop
+                                foreach ($sx in '.info.txt', '.versions.txt') { Remove-Item -LiteralPath ($_.FullName -replace '\.dmp$', $sx) -Force -ErrorAction SilentlyContinue }
+                                Write-Log "Pruned suppressed dump $($_.Name)"
+                            } catch { Write-Log "Could not prune suppressed $($_.Name) (in use?), will retry." 'WARN' }
+                        }
+                }
 
                 Update-LogRoll
                 Remove-OldLogs $cfg.LogKeep
