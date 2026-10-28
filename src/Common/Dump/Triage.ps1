@@ -14,7 +14,7 @@ function Invoke-DumpTriage {
         [string]$Dir,
         [string]$BaselinePath,
         [bool]$SuppressKnown = $true,
-        [ValidateSet('Recycle', 'Delete')][string]$SuppressAction = 'Recycle',
+        [ValidateSet('Recycle', 'Delete')][string]$SuppressAction = 'Delete',
         [string]$SuppressDir
     )
     if (-not (Test-Path -LiteralPath $DumpPath)) { return @{ Action = 'skip'; Reason = 'dump not found' } }
