@@ -92,11 +92,14 @@ function Send-OutboxEvents {
         try {
             if ($http) {
                 # 1) Post the event. The backend decides on its 202 whether this capture's dump is wanted and,
-                #    if so, returns a one-time uploadGrant { token, maxBytes, expiry } in the response body.
+                #    if so, returns a one-time uploadGrant { token, maxBytes, expiresAt } in the response body.
+                #    The event's own eventId is the Idempotency-Key (contract 3) so a retry of the same file
+                #    is deduped server-side rather than double-stored.
                 $body = Get-Content -LiteralPath $f.FullName -Raw
-                $resp = Invoke-RestMethod -Method Post -Uri ($Config.EventSink.TrimEnd('/') + '/v1/events') -Body $body -ContentType 'application/json' -Headers (Get-AuthHeaders $Config) -TimeoutSec 30
-                # 2) Grant issued + dump still on disk + within maxBytes -> upload it under the grant.
                 $evt = $null; try { $evt = $body | ConvertFrom-Json } catch {}
+                $idem = if ($evt -and $evt.ids -and $evt.ids.eventId) { "$($evt.ids.eventId)" } else { [IO.Path]::GetFileNameWithoutExtension($f.Name) }
+                $resp = Invoke-RestMethod -Method Post -Uri ($Config.EventSink.TrimEnd('/') + '/v1/events') -Body $body -ContentType 'application/json' -Headers (Get-AuthHeaders $Config @{ 'Idempotency-Key' = $idem }) -TimeoutSec 30
+                # 2) Grant issued + dump still on disk + within maxBytes -> upload it under the grant.
                 $dumpFile = if ($evt -and $evt.dump) { $evt.dump.file } else { $null }
                 if ($dumpFile) {
                     $dumpPath = Join-Path $Config.DumpDir $dumpFile
@@ -172,7 +175,7 @@ function Send-EscalatedDump {
             if ($Grant) { $extra['X-Upload-Grant'] = $Grant }
             $headers = Get-AuthHeaders $Config $extra
             $resp = Invoke-RestMethod -Method Post -Uri ($Config.DumpTarget.TrimEnd('/') + '/v1/dumps') -InFile $DumpPath -ContentType 'application/octet-stream' -Headers $headers -TimeoutSec 600
-            if ($resp -and $resp.objectKey) { return "$($resp.objectKey)" } else { return $name }
+            if ($resp -and $resp.dumpObjectKey) { return "$($resp.dumpObjectKey)" } else { return $name }   # contract 5b: 201 { dumpObjectKey }
         } else {
             if (-not (Test-Path -LiteralPath $Config.DumpTarget)) { New-Item -ItemType Directory -Path $Config.DumpTarget -Force | Out-Null }
             Copy-Item -LiteralPath $DumpPath -Destination (Join-Path $Config.DumpTarget $name) -Force
