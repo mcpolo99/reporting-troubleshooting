@@ -13,7 +13,8 @@ function Invoke-DumpTriage {
         [string]$ClrMdDll,
         [string]$Dir,
         [string]$BaselinePath,
-        [bool]$SuppressKnown = $true
+        [bool]$SuppressKnown = $true,
+        $DeviceProfile              # @{ signatureId -> state } from the backend per-device profile (CONTRACT 4a)
     )
     if (-not (Test-Path -LiteralPath $DumpPath)) { return @{ Action = 'skip'; Reason = 'dump not found' } }
     if (-not $Dir) { $Dir = Get-KnownIssuesDir }
@@ -41,7 +42,8 @@ function Invoke-DumpTriage {
     if ($idObj.WalkPending -and $sig.Kind -ne 'crash') {
         Add-DepGap 'tier2-unavailable' ("$($sig.Kind) dump $([IO.Path]::GetFileName($DumpPath)): managed walk unavailable (ClrMD missing or failed) - id provisional, dump kept") $Dir
     }
-    $res = Register-DumpOccurrence -IdObj $idObj -Sig $sig -DumpPath $DumpPath -Dir $Dir -BaselinePath $BaselinePath -SuppressKnown $SuppressKnown
+    $deviceUploaded = [bool]($DeviceProfile -and "$($DeviceProfile[$idObj.Id])" -eq 'uploaded')
+    $res = Register-DumpOccurrence -IdObj $idObj -Sig $sig -DumpPath $DumpPath -Dir $Dir -BaselinePath $BaselinePath -SuppressKnown $SuppressKnown -DeviceUploaded $deviceUploaded
     $res.Kind = $sig.Kind
     $res.Leaf = if ($sig.Frames -and $sig.Frames.Count) { $sig.Frames[0] } elseif ($sig.Module) { '{0}+0x{1:x}' -f $sig.Module, $sig.Offset } else { '' }
 

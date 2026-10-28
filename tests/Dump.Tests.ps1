@@ -95,6 +95,28 @@ Check 'empty token -> fallback'          ((Get-DumpProcessFromName (New-DumpFile
 Check 'trailing .exe stripped'           ((Get-DumpProcessFromName (New-DumpFileName -Computer 'PC01' -Process 'bSuite.exe' -Tag 'hang' -When $when)) -eq 'bSuite')
 Check 'only .exe stripped, dotted kept'  ((Get-DumpProcessFromName (New-DumpFileName -Computer 'PC01' -Process 'bSuite.NotRespondingHandler.exe' -Tag 'hang' -When $when)) -eq 'bSuite.NotRespondingHandler')
 
+Write-Host 'device profile: fetch-and-overwrite cache, read-only use (#84)'
+$pdir = Join-Path $env:TEMP ('devprof_{0}' -f ([guid]::NewGuid().ToString('N').Substring(0, 8)))
+New-Item -ItemType Directory -Force $pdir | Out-Null
+try {
+    $ppath = Join-Path $pdir 'device-profile.json'
+    '{"sigAAA":"uploaded","sigBBB":"granted"}' | Set-Content -LiteralPath $ppath -Encoding UTF8
+    $prof = Get-DeviceProfile $ppath
+    Check 'profile reads uploaded state'    ($prof['sigAAA'] -eq 'uploaded')
+    Check 'profile reads granted state'     ($prof['sigBBB'] -eq 'granted')
+    Check 'missing profile -> empty map'    ((Get-DeviceProfile (Join-Path $pdir 'nope.json')).Count -eq 0)
+
+    # triage dedup honours the profile: a signature this device already 'uploaded' is SUPPRESSED (stop collecting),
+    # even with an empty local registry; 'granted'/absent keep the first-sample-per-machine decision.
+    $sig = New-Sig @{ Kind = 'hang'; Frames = @('A.B', 'C.D') }
+    $ido = Get-DumpStableId $sig
+    $dmp = Join-Path $pdir 't.dmp'; Set-Content -LiteralPath $dmp -Value 'X' -Encoding ascii
+    $up  = Register-DumpOccurrence -IdObj $ido -Sig $sig -DumpPath $dmp -Dir (Join-Path $pdir 'ki_up') -DeviceUploaded $true
+    Check 'profile uploaded -> suppress'    ($up.Action -eq 'suppress')
+    $keep = Register-DumpOccurrence -IdObj $ido -Sig $sig -DumpPath $dmp -Dir (Join-Path $pdir 'ki_keep') -DeviceUploaded $false
+    Check 'not uploaded -> keep first'      ($keep.Action -eq 'keep')
+} finally { Remove-Item -Recurse -Force $pdir -ErrorAction SilentlyContinue }
+
 Write-Host ''
 Write-Host ("{0}/{1} passed" -f ($script:count - $script:fail), $script:count) -ForegroundColor $(if ($script:fail) { 'Red' } else { 'Green' })
 if ($script:fail) { exit 1 } else { exit 0 }
