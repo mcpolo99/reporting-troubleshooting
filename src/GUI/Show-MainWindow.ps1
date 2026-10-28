@@ -43,7 +43,7 @@ function Show-MainWindow {
                    'CmbPvProfile','TxtPvLabel','BtnPvStart','BtnPvStop','BtnPvAbort','TxtPvSeconds','BtnPvOpen','BtnPvStatus','LblPvStatus',
                    'TxtPvProfName','PnlPvKernel','CmbPvClr','PnlPvProviders','TxtPvProvOther','TxtPvExtra','TxtPvCircular','TxtPvBuffer','BtnPvProfSave','BtnPvProfDelete','BtnPvProfDefault',
                    'TxtPvOutput','TxtPvSym','ChkPvMerge','ChkPvZip','BtnPvSettingsSave',
-                   'BtnMonEnable','BtnMonStart','BtnMonStop','BtnMonStatus','BtnMonDisable','LblMonStatus','BtnMonVerify','LblMonVerify','PnlCfgProcess','PnlCfgMonitor','PnlCfgGeneral','BtnMonSave','BtnMonReload','ChkMonTail','TxtMonLog',
+                   'BtnMonEnable','BtnMonStart','BtnMonStop','BtnMonStatus','BtnMonDisable','LblMonStatus','BtnMonVerify','LblMonVerify','PnlCfgProcess','PnlCfgMonitor','PnlCfgGeneral','BtnMonSave','BtnMonReload','ChkMonTail','TxtMonLog','LblMonCompress','PbMonCompress',
                    'BtnPkgInstallAll','BtnPkgRefresh','BtnPkgOpen','BtnPkgUpdate','LblPkgUpdate','PnlPackages','LblPkgStatus',
                    'BtnShortcut') {
         $el = $null
@@ -109,6 +109,25 @@ function Show-MainWindow {
             $lines = Get-Content -LiteralPath $f.FullName -Tail 40 -ErrorAction SilentlyContinue
             $script:TxtMonLog.Text = ($lines -join "`r`n")
             $script:TxtMonLog.ScrollToEnd()
+        } catch {}
+    }
+
+    # Live dump-compression indicator (#65). The detached telemetry flush logs "compressing <dump>: NN%" and a
+    # final "compressed <dump>: X -> Y (Z% of raw)" to Logs\Telemetry_*.log; mirror the latest of those into the
+    # Monitor tab's progress bar + label so a user with the app open sees a large dump being compressed / when done.
+    $script:CompressLast = ''
+    function script:Update-CompressionProgress {
+        if (-not $script:LblMonCompress) { return }
+        try {
+            $f = Get-ChildItem $script:MonLogDir -Filter 'Telemetry_*.log' -File -ErrorAction SilentlyContinue |
+                 Sort-Object LastWriteTime -Descending | Select-Object -First 1
+            if (-not $f) { return }
+            $line = Get-Content -LiteralPath $f.FullName -Tail 60 -ErrorAction SilentlyContinue |
+                    Where-Object { $_ -match 'compress(ing|ed) ' } | Select-Object -Last 1
+            if (-not $line -or $line -eq $script:CompressLast) { return }
+            $script:CompressLast = $line
+            $p = Get-CompressionProgressLine $line
+            if ($p) { $script:LblMonCompress.Text = $p.Text; if ($p.Percent -ge 0) { $script:PbMonCompress.Value = $p.Percent } }
         } catch {}
     }
 
@@ -707,7 +726,7 @@ function Show-MainWindow {
             Update-ToolJobs
             $script:LblBusy.Text = if (Test-ToolJobsBusy) { 'Working...' } else { 'Ready' }
             $script:TailCounter++
-            if ($script:TailCounter % 5 -eq 0) { script:Update-MonTail }   # ~1s cadence
+            if ($script:TailCounter % 5 -eq 0) { script:Update-MonTail; script:Update-CompressionProgress }   # ~1s cadence
         } catch { & $script:Append "Timer error: $($_.Exception.Message)" }
     })
     $timer.Start()
