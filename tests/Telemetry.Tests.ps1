@@ -102,6 +102,23 @@ try {
     Check 'reason note written'            ((Get-Content (Join-Path $fdir 'outbox\failed\stuck.json.error') -Raw).Trim() -eq 'upload-failed: HTTP 409')
     Check 'event gone from outbox'         (-not (Test-Path $evF))
     Check 'attempt sidecar cleaned up'     (-not (Test-Path ($evF + '.try')))
+
+    # compression before upload (#43): gzips to <source>.gz, streamed; round-trips to the original bytes.
+    Write-Host 'dump compression (gzip before upload)'
+    $srcDump = Join-Path $dir 'compress_me.dmp'
+    $payload = (('A' * 4096) + ('B' * 4096)) * 64   # 512 KiB, highly compressible
+    Set-Content -LiteralPath $srcDump -Value $payload -Encoding ascii -NoNewline
+    $c = Compress-DumpFile -SourcePath $srcDump
+    Check 'compress ok'                    ($c.Ok)
+    Check 'gz written next to source'      ($c.Path -eq ($srcDump + '.gz') -and (Test-Path -LiteralPath $c.Path))
+    Check 'gz smaller than raw'            ((Get-Item -LiteralPath $c.Path).Length -lt (Get-Item -LiteralPath $srcDump).Length)
+    # round-trip: decompress and compare to the original bytes
+    $rt = Join-Path $dir 'compress_me.roundtrip'
+    $gin = [IO.File]::OpenRead($c.Path); $gz = New-Object System.IO.Compression.GZipStream($gin, [System.IO.Compression.CompressionMode]::Decompress); $gout = [IO.File]::Create($rt)
+    try { $gz.CopyTo($gout) } finally { $gz.Dispose(); $gin.Dispose(); $gout.Dispose() }
+    Check 'gz round-trips to original'     ((Get-Item -LiteralPath $rt).Length -eq (Get-Item -LiteralPath $srcDump).Length)
+    Check 'custom DestPath honored'        ((Compress-DumpFile -SourcePath $srcDump -DestPath (Join-Path $dir 'x.gz')).Path -eq (Join-Path $dir 'x.gz'))
+    Check 'missing source -> not ok'       (-not (Compress-DumpFile -SourcePath (Join-Path $dir 'nope.dmp')).Ok)
 }
 finally { Remove-Item -Recurse -Force $dir -ErrorAction SilentlyContinue }
 
