@@ -49,6 +49,10 @@ try {
     if ($k -ge 0) { Write-Log "known-signatures: baseline now lists $k signature(s)" }
     else { Write-Log 'known-signatures: sync failed - keeping existing baseline' 'WARN' }
 
+    $p = Sync-DeviceProfile -Config $cfg
+    if ($p -ge 0) { Write-Log "device-profile: $p signature(s) already collected for this device" }
+    else { Write-Log 'device-profile: sync failed - keeping cached profile' 'WARN' }
+
     $r = Send-OutboxEvents -Dir $Dir -Config $cfg
     $level = if ($r.FailedUploads -gt 0) { 'ERROR' } elseif ($r.Failed -gt 0) { 'WARN' } else { 'INFO' }
     Write-Log ('events: sent {0}, uploaded {1} dump(s) on grant, {2} pending retry (left in outbox), {3} moved to failed-uploads' -f $r.Sent, $r.Dumps, $r.Failed, $r.FailedUploads) $level

@@ -167,6 +167,7 @@ function Send-OutboxEvents {
     $http = Test-IsHttp $Config.EventSink
     if (-not $http -and -not (Test-Path -LiteralPath $Config.EventSink)) { New-Item -ItemType Directory -Path $Config.EventSink -Force | Out-Null }
 
+    $profile = Get-DeviceProfile   # per-device collection profile (CONTRACT 4a), offline-aware cache
     $sent = 0; $failed = 0; $dumps = 0; $failedUploads = 0
     foreach ($f in @(Get-ChildItem -LiteralPath $outbox -Filter *.json -File -ErrorAction SilentlyContinue)) {
         try {
@@ -178,6 +179,14 @@ function Send-OutboxEvents {
                 $body = Get-Content -LiteralPath $f.FullName -Raw
                 $evt = $null; try { $evt = $body | ConvertFrom-Json } catch {}
                 $idem = if ($evt -and $evt.ids -and $evt.ids.eventId) { "$($evt.ids.eventId)" } else { [IO.Path]::GetFileNameWithoutExtension($f.Name) }
+                # Profile shortcut (CONTRACT 4a): if THIS device already uploaded a dump for this signature, the
+                # held dump is redundant - discard it now (offline-aware, before any grant round-trip). The grant
+                # still decides any actual upload; this only avoids holding/retrying a dump the backend already has.
+                $sigId = if ($evt) { if ($evt.signatureId) { "$($evt.signatureId)" } elseif ($evt.ids) { "$($evt.ids.signatureId)" } else { '' } } else { '' }
+                if ($sigId -and $profile[$sigId] -eq 'uploaded') {
+                    $locP = Resolve-DumpPath -Evt $evt -Config $Config
+                    if ($locP.Path) { Remove-HandledDump -DumpPath $locP.Path; Write-TelemetryLog ("device already uploaded a dump for {0} - discarded local {1}" -f $sigId, (Split-Path $locP.Path -Leaf)) }
+                }
                 try {
                     $resp = Invoke-RestMethod -Method Post -Uri ($Config.EventSink.TrimEnd('/') + '/v1/events') -Body $body -ContentType 'application/json' -Headers (Get-AuthHeaders $Config @{ 'Idempotency-Key' = $idem }) -TimeoutSec 30
                 } catch {
@@ -299,6 +308,41 @@ function Sync-KnownSignatures {
         $ids = if ($null -eq $b) { @() } elseif ($b.issues) { $b.issues.PSObject.Properties.Name } elseif ($b -is [array]) { $b } else { @($b) }
         return @($ids).Count
     } catch { return -1 }       # -1 = sync failed (keep the existing baseline)
+}
+
+# Pull THIS device's collection profile (CONTRACT 4a: GET /v1/profile?deviceId) and cache it locally, so the
+# flush knows - even offline - which signatures this device has already uploaded (discard the held dump) vs still
+# owes (keep + retry). Advisory only: the grant (5a) remains the sole upload authority. Returns the entry count,
+# or -1 on failure (keep the cached profile). No-op (0) in local/offline mode.
+function Sync-DeviceProfile {
+    param($Config, [string]$DeviceId)
+    if (-not $Config) { $Config = Get-TelemetryConfig }
+    if (-not $DeviceId) { $DeviceId = $env:COMPUTERNAME }
+    if (-not (Test-IsHttp $Config.KnownSource)) { return 0 }
+    try {
+        $uri = $Config.KnownSource.TrimEnd('/') + '/v1/profile?deviceId=' + [uri]::EscapeDataString($DeviceId)
+        $data = Invoke-RestMethod -Method Get -Uri $uri -Headers (Get-AuthHeaders $Config) -TimeoutSec 30
+        $map = @{}
+        foreach ($e in @($data.entries)) { if ($e.signatureId) { $map["$($e.signatureId)"] = "$($e.state)" } }
+        $path = Join-Path (Get-KnownIssuesDir) 'device-profile.json'
+        $dir = Split-Path -Parent $path
+        if ($dir -and -not (Test-Path -LiteralPath $dir)) { New-Item -ItemType Directory -Path $dir -Force -ErrorAction Stop | Out-Null }
+        ($map | ConvertTo-Json) | Set-Content -LiteralPath $path -Encoding UTF8 -ErrorAction Stop
+        return $map.Count
+    } catch { return -1 }
+}
+
+# Load the cached device profile as @{ signatureId -> state }. Empty if none/unreadable (offline-safe).
+function Get-DeviceProfile {
+    $path = Join-Path (Get-KnownIssuesDir) 'device-profile.json'
+    $map = @{}
+    if (Test-Path -LiteralPath $path) {
+        try {
+            $o = Get-Content -LiteralPath $path -Raw | ConvertFrom-Json
+            if ($o) { foreach ($p in $o.PSObject.Properties) { $map[$p.Name] = "$($p.Value)" } }
+        } catch {}
+    }
+    return $map
 }
 
 # Stream a file to an http endpoint with HttpClient. Windows PowerShell 5.1's Invoke-RestMethod -InFile buffers
