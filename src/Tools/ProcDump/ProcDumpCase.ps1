@@ -73,7 +73,7 @@ param(
 )
 
 # Stamped automatically by scripts\New-Release.ps1 from the repo VERSION - do not edit by hand.
-$ScriptVersion = '1.0.43'
+$ScriptVersion = '1.0.44'
 $ErrorActionPreference = 'Continue'
 # $ToolsDir points at the shared package store; set after Packages.ps1 is dot-sourced below.
 

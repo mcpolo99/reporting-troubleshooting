@@ -5,6 +5,13 @@ truth; each release is tagged `vX.Y.Z` and published as a GitHub release by `scr
 
 <!-- NEW RELEASES INSERTED BELOW -->
 
+## [v1.0.44] - 2026-10-28
+Changes since v1.0.43:
+
+### Features
+- log every telemetry flush so sends are no longer invisible (#38) (ce80e6a)
+
+
 ## [v1.0.43] - 2026-10-28
 Changes since v1.0.42:
 
@@ -344,6 +351,7 @@ Changes since v1.0.0:
 - WPF/XAML launcher (GUI default, `-CLI` text menu) with shared light/dark theme.
 - Shared components (logging, admin/signature/prompt/version helpers) under `src/Common`.
 - Bootstrap installer (`src/Get.ps1` + `src/run.bat`) with version check against GitHub.
+
 
 
 
