@@ -1179,7 +1179,22 @@ function Invoke-Monitor {
             if (((Get-Date) - $lastCleanup).TotalSeconds -ge $cfg.CleanupSeconds) {
                 $lastCleanup = Get-Date
 
+                # Dumps still referenced by a PENDING outbox event (not yet uploaded) must never be pruned, or a
+                # burst / long offline period would delete them before the flush sends them (#75). Build the set of
+                # dump names any pending event points at, and exclude them from the ring-buffer prune.
+                $pendingDumps = @{}
+                $obx = Join-Path (Get-KnownIssuesDir) 'outbox'
+                if (Test-Path -LiteralPath $obx) {
+                    foreach ($ev in @(Get-ChildItem -LiteralPath $obx -Filter *.json -File -ErrorAction SilentlyContinue)) {
+                        try {
+                            $j = Get-Content -LiteralPath $ev.FullName -Raw | ConvertFrom-Json
+                            foreach ($p in @($j.dump.path, $j.dump.file)) { if ($p) { $pendingDumps[[IO.Path]::GetFileName("$p")] = $true } }
+                        } catch {}
+                    }
+                }
+
                 Get-ChildItem -Path $cfg.DumpDir -Filter *.dmp -File -ErrorAction SilentlyContinue |
+                    Where-Object { -not $pendingDumps[$_.Name] } |
                     Sort-Object LastWriteTime -Descending | Select-Object -Skip $cfg.KeepDumps |
                     ForEach-Object {
                         try {
