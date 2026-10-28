@@ -5,6 +5,22 @@ truth; each release is tagged `vX.Y.Z` and published as a GitHub release by `scr
 
 <!-- NEW RELEASES INSERTED BELOW -->
 
+## [v1.0.46] - 2026-10-28
+Changes since v1.0.45:
+
+### Features
+- ProcDump args as toggles and split monitor settings into sub-tabs (#53) (657a4ec)
+- log dump compression progress; keep compression strictly upload-gated (#65, #64) (d05f28e)
+- gzip dumps as the last step before upload (#43) (62247ab)
+- rename captured dumps to ProcDump_<pc>_<process>_<tag>_<date>_<time> (#51) (7ed1e72)
+
+### Fixes
+- enforce a 60s minimum re-arm cooldown to stop the ProcDump re-arm loop (#63) (2dcf206)
+
+### Chores
+- retire the one-shot ProcDumpCase capture tool (#52) (58955ae)
+
+
 ## [v1.0.45] - 2026-10-28
 Changes since v1.0.44:
 
@@ -358,6 +374,7 @@ Changes since v1.0.0:
 - WPF/XAML launcher (GUI default, `-CLI` text menu) with shared light/dark theme.
 - Shared components (logging, admin/signature/prompt/version helpers) under `src/Common`.
 - Bootstrap installer (`src/Get.ps1` + `src/run.bat`) with version check against GitHub.
+
 
 
 
