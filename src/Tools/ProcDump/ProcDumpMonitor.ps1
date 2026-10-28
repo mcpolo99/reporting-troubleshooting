@@ -117,7 +117,7 @@ function Get-DefaultConfig {
         SuppressKnown    = $true        # keep the FIRST dump of each id, count + soft-suppress later recurrences
         SuppressAction   = 'Recycle'    # Recycle = move recurrences to KnownIssues\Suppressed | Delete
         BaselinePath     = ''           # optional: JSON of already-analysed ids to suppress even the first time (blank = installed baseline beside the script)
-        TelemetryEnabled = $false       # periodically forward events / sync known-sigs / upload new-signature dumps
+        TelemetryEnabled = $true        # periodically forward events / sync known-sigs / upload new-signature dumps
         TelemetrySeconds = 300          # how often the monitor flushes telemetry (when enabled)
         # The ingest/registry/silo endpoints and the send-only device key are NOT config: they ship with the
         # build as an encoded blob (see Common\Telemetry.ps1 Get-TelemetryEndpoints), so they are not clear
