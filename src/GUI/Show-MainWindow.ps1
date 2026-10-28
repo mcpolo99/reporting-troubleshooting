@@ -439,11 +439,25 @@ function Show-MainWindow {
         $intro.TextWrapping = 'Wrap'; $intro.Margin = '0,0,0,10'
         [void]$p.Children.Add($intro)
         $script:MonArgCtls.FullDump       = script:New-ArgToggle 'Full memory dump (-ma)'                    $t.FullDump       'Capture a complete dump including all memory.'
-        $script:MonArgCtls.OnException    = script:New-ArgToggle 'Dump on unhandled exception (-e)'          $t.OnException    'Dump when the app crashes with an unhandled (second-chance) exception.'
-        $script:MonArgCtls.FirstChance    = script:New-ArgToggle 'Also first-chance exceptions (-e 1)'       $t.FirstChance    'Also dump on first-chance exceptions (noisier). Implies -e.'
+        [void]$p.Children.Add($script:MonArgCtls.FullDump)
+
+        # Exception: one -e checkbox + an inline level box (blank = unhandled/2nd-chance only; 1 = also first-chance).
+        $exRow = New-Object System.Windows.Controls.StackPanel; $exRow.Orientation = 'Horizontal'; $exRow.Margin = '0,0,0,6'
+        $exCb = script:New-ArgToggle 'Dump on exception (-e)' $t.OnException 'Unchecked = never dump on exceptions. Checked = dump on unhandled (2nd-chance) exceptions; put 1 in the box to also dump on first-chance exceptions (noisier).'
+        $exCb.Margin = '0,0,8,0'; $exCb.VerticalAlignment = 'Center'
+        $exLvl = New-Object System.Windows.Controls.TextBox; $exLvl.Width = 44; $exLvl.VerticalAlignment = 'Center'; $exLvl.Text = "$($t.ExceptionLevel)"
+        $exLvl.ToolTip = 'Blank = -e (unhandled only). 1 = -e 1 (also first-chance).'
+        script:Set-NumericOnly $exLvl
+        $exHint = New-Object System.Windows.Controls.TextBlock; $exHint.Text = 'level (blank = unhandled only; 1 = also first-chance)'
+        $exHint.Foreground = $script:IdBrush; $exHint.VerticalAlignment = 'Center'; $exHint.Margin = '8,0,0,0'
+        [void]$exRow.Children.Add($exCb); [void]$exRow.Children.Add($exLvl); [void]$exRow.Children.Add($exHint)
+        [void]$p.Children.Add($exRow)
+        $script:MonArgCtls.OnException    = $exCb
+        $script:MonArgCtls.ExceptionLevel = $exLvl
+
         $script:MonArgCtls.OnHang         = script:New-ArgToggle 'Dump on hang / unresponsive window (-h)'   $t.OnHang         'Dump when the window stops responding.'
         $script:MonArgCtls.WaitForProcess = script:New-ArgToggle 'Wait for the process to start (-w)'        $t.WaitForProcess 'If the app is not running yet, wait and attach when it starts.'
-        foreach ($k in 'FullDump','OnException','FirstChance','OnHang','WaitForProcess') { [void]$p.Children.Add($script:MonArgCtls[$k]) }
+        foreach ($k in 'OnHang','WaitForProcess') { [void]$p.Children.Add($script:MonArgCtls[$k]) }
         $row = New-Object System.Windows.Controls.DockPanel; $row.Margin = '0,4,0,0'
         $lbl = New-Object System.Windows.Controls.TextBlock
         $lbl.Text = 'Dumps per session (-n)'; $lbl.Width = 180; $lbl.VerticalAlignment = 'Center'; $lbl.Foreground = $script:FgBrush
@@ -500,7 +514,7 @@ function Show-MainWindow {
             $kv['ProcDumpArgs'] = ConvertTo-ProcDumpArgs ([ordered]@{
                 FullDump        = [bool]$script:MonArgCtls.FullDump.IsChecked
                 OnException     = [bool]$script:MonArgCtls.OnException.IsChecked
-                FirstChance     = [bool]$script:MonArgCtls.FirstChance.IsChecked
+                ExceptionLevel  = $script:MonArgCtls.ExceptionLevel.Text
                 OnHang          = [bool]$script:MonArgCtls.OnHang.IsChecked
                 WaitForProcess  = [bool]$script:MonArgCtls.WaitForProcess.IsChecked
                 DumpsPerSession = $script:MonArgCtls.DumpsPerSession.Text
