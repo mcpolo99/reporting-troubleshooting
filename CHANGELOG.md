@@ -5,6 +5,16 @@ truth; each release is tagged `vX.Y.Z` and published as a GitHub release by `scr
 
 <!-- NEW RELEASES INSERTED BELOW -->
 
+## [v1.0.50] - 2026-10-28
+Changes since v1.0.49:
+
+### Features
+- sync the per-device collection profile (CONTRACT 4a) and drop redundant firstSeenOnDevice (#82) (d6b11c2)
+
+### Fixes
+- known-signature sync creates the baseline dir and fails closed to -1 (#80) (ffb76ec)
+
+
 ## [v1.0.49] - 2026-10-28
 Changes since v1.0.48:
 
@@ -404,6 +414,7 @@ Changes since v1.0.0:
 - WPF/XAML launcher (GUI default, `-CLI` text menu) with shared light/dark theme.
 - Shared components (logging, admin/signature/prompt/version helpers) under `src/Common`.
 - Bootstrap installer (`src/Get.ps1` + `src/run.bat`) with version check against GitHub.
+
 
 
 
