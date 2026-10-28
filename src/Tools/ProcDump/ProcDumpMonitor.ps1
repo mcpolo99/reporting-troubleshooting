@@ -949,7 +949,7 @@ function Edit-Config($cfg) {
     $cfg.DumpDir        = Read-Value 'Dump folder' $cfg.DumpDir
     $cfg.KeepDumps      = Read-Int   'Number of newest dumps to keep' $cfg.KeepDumps
     $cfg.ProcDumpArgs   = Read-Value 'ProcDump arguments (-e 1 = also first-chance exceptions; -n = dumps per session, 1 recommended)' $cfg.ProcDumpArgs
-    $cfg.CooldownSeconds = Read-Int  'Cooldown after a dump before re-arming on the same process (seconds)' $cfg.CooldownSeconds 0
+    $cfg.CooldownSeconds = Read-Int  'Cooldown before re-arming on the same process (seconds; 60 minimum, enforced)' $cfg.CooldownSeconds 60
     while ($true) {
         $a = Read-Value 'Duplicate captures of the same event: Delete / Keep' $cfg.DuplicateAction
         if ($a -in 'Delete','Keep') { $cfg.DuplicateAction = (Get-Culture).TextInfo.ToTitleCase($a.ToLower()); break }
@@ -1126,11 +1126,18 @@ function Invoke-Monitor {
                     $code = try { $st.Process.ExitCode } catch { '?' }
                     $made = @(Get-ChildItem -Path $cfg.DumpDir -Filter "ProcDump_*_${appName}_*.dmp" -File -ErrorAction SilentlyContinue |
                               Where-Object { $_.CreationTime -ge $st.Started.AddSeconds(-2) })
-                    if ($made -and $pidsNow -and $cfg.CooldownSeconds -gt 0) {
-                        $cooldown[$app] = @{ Until = (Get-Date).AddSeconds($cfg.CooldownSeconds); Pids = $pidsNow }
-                        Write-Log "ProcDump for $app exited after writing a dump (code $code). $app is still running (PID $pidsNow) - re-arming in $($cfg.CooldownSeconds)s, or as soon as a new $app process starts."
+                    # Re-arm cooldown. Wait before re-arming whenever the SAME process is still alive - not only
+                    # after a dump was written - and never faster than 60s, so a ProcDump that keeps exiting (caught
+                    # nothing, or a saved config with a low/zero CooldownSeconds) cannot spin the monitor in a tight
+                    # re-arm loop. A changed/absent PID set clears the cooldown immediately (see below), so a genuinely
+                    # new process is still picked up promptly.
+                    $coolSecs = [Math]::Max([int]$cfg.CooldownSeconds, 60)
+                    if ($pidsNow) {
+                        $cooldown[$app] = @{ Until = (Get-Date).AddSeconds($coolSecs); Pids = $pidsNow }
+                        $wrote = if ($made) { 'after writing a dump' } else { 'without a new dump' }
+                        Write-Log "ProcDump for $app exited $wrote (code $code). $app is still running (PID $pidsNow) - re-arming in ${coolSecs}s, or as soon as a new $app process starts."
                     } else {
-                        Write-Log "ProcDump for $app exited (code $code). Re-arming."
+                        Write-Log "ProcDump for $app exited (code $code); $app not running - re-arming (ProcDump waits for it to start)."
                     }
                 }
 
