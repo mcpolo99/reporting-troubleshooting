@@ -77,3 +77,17 @@ function ConvertTo-ProcDumpArgs {
     if ($Toggles.WaitForProcess) { $a += '-w' }
     $a -join ' '
 }
+
+# Parse a telemetry-log line (Write-Log format) into a dump-compression display message + progress percent (#65).
+# Returns $null for a non-compression line. Percent: NN% while compressing, 100 when done, 0 at the start line,
+# else -1 (message only, no bar change). Pure, so the GUI's live indicator can be unit-tested.
+function Get-CompressionProgressLine {
+    param([string]$Line)
+    if ("$Line" -notmatch 'compress(ing|ed) ') { return $null }
+    $msg = "$Line" -replace '^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d{3} \[.+?\] \[PID \d+\]\s*', ''
+    $pct = -1
+    if     ($Line -match 'compressing .+?: (\d+)%')      { $pct = [int]$matches[1] }
+    elseif ($Line -match 'compressed ')                  { $pct = 100 }
+    elseif ($Line -match 'compressing .+ before upload') { $pct = 0 }
+    [ordered]@{ Text = $msg; Percent = $pct }
+}
