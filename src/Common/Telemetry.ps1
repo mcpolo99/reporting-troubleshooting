@@ -279,17 +279,23 @@ function Sync-KnownSignatures {
     param($Config)
     if (-not $Config) { $Config = Get-TelemetryConfig }
     try {
+        # Ensure the baseline's folder exists - KnownIssues\ may not exist yet on a fresh machine or before the
+        # monitor has created it - and force file ops to be TERMINATING (-ErrorAction Stop) so a write/read failure
+        # fails CLOSED to -1 (keep existing baseline) instead of a non-terminating error slipping past the catch and
+        # silently returning 0, which would discard the synced list and make first-run triage over-capture.
+        $baseDir = Split-Path -Parent $Config.BaselinePath
+        if ($baseDir -and -not (Test-Path -LiteralPath $baseDir)) { New-Item -ItemType Directory -Path $baseDir -Force -ErrorAction Stop | Out-Null }
         if (Test-IsHttp $Config.KnownSource) {
             $headers = Get-AuthHeaders $Config
             $data = Invoke-RestMethod -Method Get -Uri ($Config.KnownSource.TrimEnd('/') + '/v1/known-signatures') -Headers $headers -TimeoutSec 30
             # The registry returns { signatures: [ { signature, status, ... } ], nextCursor }. The triage
             # baseline only needs the id set, so store the ids as a flat array (the shape Test-BaselineKnown reads).
             $ids = @($data.signatures | ForEach-Object { $_.signature } | Where-Object { $_ })
-            (ConvertTo-Json -InputObject $ids) | Set-Content -LiteralPath $Config.BaselinePath -Encoding UTF8
+            (ConvertTo-Json -InputObject $ids) | Set-Content -LiteralPath $Config.BaselinePath -Encoding UTF8 -ErrorAction Stop
         } elseif (Test-Path -LiteralPath $Config.KnownSource) {
-            if ($Config.KnownSource -ne $Config.BaselinePath) { Copy-Item -LiteralPath $Config.KnownSource -Destination $Config.BaselinePath -Force }
+            if ($Config.KnownSource -ne $Config.BaselinePath) { Copy-Item -LiteralPath $Config.KnownSource -Destination $Config.BaselinePath -Force -ErrorAction Stop }
         } else { return 0 }
-        $b = Get-Content -LiteralPath $Config.BaselinePath -Raw | ConvertFrom-Json
+        $b = Get-Content -LiteralPath $Config.BaselinePath -Raw -ErrorAction Stop | ConvertFrom-Json
         $ids = if ($null -eq $b) { @() } elseif ($b.issues) { $b.issues.PSObject.Properties.Name } elseif ($b -is [array]) { $b } else { @($b) }
         return @($ids).Count
     } catch { return -1 }       # -1 = sync failed (keep the existing baseline)

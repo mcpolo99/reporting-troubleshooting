@@ -38,6 +38,11 @@ try {
     Check 'baseline lists 3 ids'            ($k -eq 3)
     Check 'baseline file written'           (Test-Path $cfg.BaselinePath)
 
+    # fresh machine: BaselinePath's parent dir does not exist yet - sync must CREATE it, not silently fail to 0 (#78).
+    $cfgFresh = [ordered]@{ KnownSource = $knownSrc; BaselinePath = (Join-Path $dir 'KnownIssues\nested\baseline.json') }
+    $kf = Sync-KnownSignatures -Config $cfgFresh
+    Check 'sync creates missing parent dir' ($kf -eq 3 -and (Test-Path $cfgFresh.BaselinePath))
+
     Write-Host 'forward outbox'
     $r = Send-OutboxEvents -Dir $dir -Config $cfg
     Check 'both events sent'                ($r.Sent -eq 2)
