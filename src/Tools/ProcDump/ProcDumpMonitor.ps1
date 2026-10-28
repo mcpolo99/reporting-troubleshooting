@@ -117,12 +117,11 @@ function Get-DefaultConfig {
         SuppressKnown    = $true        # keep the FIRST dump of each id, count + soft-suppress later recurrences
         SuppressAction   = 'Recycle'    # Recycle = move recurrences to KnownIssues\Suppressed | Delete
         BaselinePath     = ''           # optional: JSON of already-analysed ids to suppress even the first time (blank = installed baseline beside the script)
-        TelemetryEnabled = $false       # OFF until endpoints are set: periodically forward events / sync known-sigs / upload new-signature dumps
+        TelemetryEnabled = $false       # periodically forward events / sync known-sigs / upload new-signature dumps
         TelemetrySeconds = 300          # how often the monitor flushes telemetry (when enabled)
-        TelemetryEventSink    = ''      # blank = local archive (KnownIssues\sent); set to https://host for the ingest API
-        KnownSignaturesSource = ''      # blank = local file; set to https://host for the known-signature registry
-        TelemetryDumpTarget   = ''      # blank = local dir (KnownIssues\upload); set to https://host for the silo
-        TelemetryDeviceKey    = ''      # per-device send-only key, sent as X-Device-Key when targets are https
+        # The ingest/registry/silo endpoints and the send-only device key are NOT config: they are baked into
+        # the build (encoded, see Common\Telemetry.ps1 Get-TelemetryEndpoints) so they are not clear text in
+        # config.json or the UI. Until a real blob is baked, telemetry stays in local-file mode.
         LogKeep          = 20
         LogMaxMB         = 10
         RunMode          = 'Logon'      # Logon = as user at logon (GUI apps, hang detection) | Startup = SYSTEM at boot
