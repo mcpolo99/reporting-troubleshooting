@@ -50,10 +50,10 @@ try {
     else { Write-Log 'known-signatures: sync failed - keeping existing baseline' 'WARN' }
 
     $r = Send-OutboxEvents -Dir $Dir -Config $cfg
-    $level = if ($r.Failed -gt 0) { 'WARN' } else { 'INFO' }
-    Write-Log ('events: sent {0}, uploaded {1} dump(s) on grant, failed {2} (failed stay in the outbox)' -f $r.Sent, $r.Dumps, $r.Failed) $level
+    $level = if ($r.FailedUploads -gt 0) { 'ERROR' } elseif ($r.Failed -gt 0) { 'WARN' } else { 'INFO' }
+    Write-Log ('events: sent {0}, uploaded {1} dump(s) on grant, {2} pending retry (left in outbox), {3} moved to failed-uploads' -f $r.Sent, $r.Dumps, $r.Failed, $r.FailedUploads) $level
     Write-Log 'flush done'
-    if ($r.Failed -gt 0) { exit 1 }
+    if ($r.Failed -gt 0 -or $r.FailedUploads -gt 0) { exit 1 }
     exit 0
 }
 catch {

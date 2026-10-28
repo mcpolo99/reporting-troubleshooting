@@ -65,6 +65,43 @@ try {
     Check 'grant + oversize -> no upload'   ((Resolve-UploadGrant -Response $withGrant -DumpBytes 5000).Reason -eq 'too-large')
     Check 'grant, no maxBytes -> upload'    ((Resolve-UploadGrant -Response ([pscustomobject]@{ uploadGrant = [pscustomobject]@{ token = 'g2' } }) -DumpBytes 999999).Ok)
     Check 'grant decision carries token'    ((Resolve-UploadGrant -Response $withGrant -DumpBytes 500).Token -eq 'g1')
+
+    # dump-path resolution (#42 defect 3): absolute dump.path wins; else DumpDir + bare file; else not-found.
+    Write-Host 'dump-path resolution'
+    $cfg2 = [ordered]@{ DumpDir = $dumpDir }
+    $evAbs  = [pscustomobject]@{ dump = [pscustomobject]@{ file = 'app.exe_new.dmp'; path = (Join-Path $dumpDir 'app.exe_new.dmp') } }
+    $evBare = [pscustomobject]@{ dump = [pscustomobject]@{ file = 'app.exe_new.dmp' } }
+    $evGone = [pscustomobject]@{ dump = [pscustomobject]@{ file = 'nope.dmp' } }
+    Check 'resolves absolute dump.path'     ((Resolve-DumpPath -Evt $evAbs  -Config $cfg2).Path -eq (Join-Path $dumpDir 'app.exe_new.dmp'))
+    Check 'falls back to DumpDir + file'    ((Resolve-DumpPath -Evt $evBare -Config $cfg2).Path -eq (Join-Path $dumpDir 'app.exe_new.dmp'))
+    Check 'missing dump -> null path'       ($null -eq (Resolve-DumpPath -Evt $evGone -Config $cfg2).Path)
+    Check 'not-found reports looked paths'  ((Resolve-DumpPath -Evt $evGone -Config $cfg2).Tried.Count -ge 1)
+
+    # upload-attempt sidecar (#42 retry cap): counts up, stays out of the *.json drain, clears cleanly.
+    Write-Host 'upload-attempt sidecar'
+    $evPath = Join-Path $dir 'outbox\sent\new.json'    # any existing file path; the sidecar sits beside it
+    Check 'attempts start at 0'             ((Get-UploadAttempts -EventPath $evPath) -eq 0)
+    Set-UploadAttempts -EventPath $evPath -Count 2
+    Check 'attempts persist'               ((Get-UploadAttempts -EventPath $evPath) -eq 2)
+    Check 'sidecar written as .try'        (Test-Path -LiteralPath ($evPath + '.try'))
+    Check 'sidecar not caught by *.json'   (@(Get-ChildItem (Join-Path $dir 'outbox\sent') -Filter *.json -File).Name -notcontains 'new.json.try')
+    Clear-UploadAttempts -EventPath $evPath
+    Check 'attempts cleared'               ((Get-UploadAttempts -EventPath $evPath) -eq 0)
+
+    # giving up (#42 user rule): the dump is MOVED to DumpDir\failed-uploads, never deleted; the event is parked.
+    Write-Host 'failed-upload parking'
+    $fdir = Join-Path $dir 'fu'; New-Item -ItemType Directory -Force (Join-Path $fdir 'outbox') | Out-Null
+    $fdump = Join-Path $fdir 'dumps'; New-Item -ItemType Directory -Force $fdump | Out-Null
+    $dumpF = Join-Path $fdump 'stuck.dmp'; Set-Content $dumpF -Value 'DUMP' -Encoding ascii
+    $evF = Join-Path $fdir 'outbox\stuck.json'; Set-Content $evF -Value '{}' -Encoding UTF8
+    Set-UploadAttempts -EventPath $evF -Count 2
+    Move-FailedUpload -EventPath $evF -DumpPath $dumpF -Config ([ordered]@{ DumpDir = $fdump }) -Reason 'upload-failed: HTTP 409'
+    Check 'dump preserved (not deleted)'   (Test-Path (Join-Path $fdump 'failed-uploads\stuck.dmp'))
+    Check 'dump left original location'    (-not (Test-Path $dumpF))
+    Check 'event parked in outbox\failed'  (Test-Path (Join-Path $fdir 'outbox\failed\stuck.json'))
+    Check 'reason note written'            ((Get-Content (Join-Path $fdir 'outbox\failed\stuck.json.error') -Raw).Trim() -eq 'upload-failed: HTTP 409')
+    Check 'event gone from outbox'         (-not (Test-Path $evF))
+    Check 'attempt sidecar cleaned up'     (-not (Test-Path ($evF + '.try')))
 }
 finally { Remove-Item -Recurse -Force $dir -ErrorAction SilentlyContinue }
 

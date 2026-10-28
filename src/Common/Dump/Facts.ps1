@@ -172,6 +172,7 @@ function Get-DumpFacts {
         environment  = $environment
         dump         = [ordered]@{
             file         = [IO.Path]::GetFileName($DumpPath)
+            path         = $(if ($fi) { $fi.FullName } else { $DumpPath })   # absolute source path, so the flusher finds the dump even when its DumpDir differs from where the capture landed (#42)
             bytes        = $(if ($fi) { $fi.Length } else { $null })
             sha256       = $sha
             writtenLocal = $(if ($fi) { $fi.LastWriteTime.ToString('yyyy-MM-dd HH:mm:ss') } else { $null })
