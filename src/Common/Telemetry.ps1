@@ -123,6 +123,16 @@ function Move-SentEvent { param([string]$EventPath, [string]$SentDir)
     Clear-UploadAttempts -EventPath $EventPath
 }
 
+# Delete a dump the flush is done with (uploaded OK, or the backend did not want it) + its sidecars. DumpDir is
+# staging: the only dumps we retain are the ones that FAILED to upload (in failed-uploads). No-op if $DumpPath is
+# blank/missing (e.g. the dump was already deleted, or a recurrence deleted at triage).
+function Remove-HandledDump { param([string]$DumpPath)
+    if (-not $DumpPath) { return }
+    foreach ($f in @($DumpPath) + @('.info.txt', '.versions.txt' | ForEach-Object { $DumpPath -replace '\.dmp$', $_ })) {
+        if (Test-Path -LiteralPath $f) { Remove-Item -LiteralPath $f -Force -ErrorAction SilentlyContinue }
+    }
+}
+
 # Terminal state for a wanted dump we could not upload (retries exhausted, or it can never fit the grant). We
 # NEVER delete it (#42): the dump is MOVED to DumpDir\failed-uploads (preserved for a manual retry) and the event
 # to outbox\failed with a .error note. Both subdirs are non-recursive-safe (the drain only scans the top level).
@@ -175,9 +185,12 @@ function Send-OutboxEvents {
                     Write-TelemetryLog ("event POST failed for {0}: {1}" -f $f.Name, $_.Exception.Message) 'WARN'
                     $failed++; continue
                 }
-                # 2) No grant token -> the backend did not want this capture's dump -> the event is done.
+                # 2) No grant token -> the backend did not want this capture's dump -> the event is done and the
+                #    local dump (if any) is not needed - delete it (DumpDir is staging, not a keep-store).
                 $grantTok = if ($resp -and $resp.uploadGrant) { "$($resp.uploadGrant.token)" } else { '' }
                 if ([string]::IsNullOrWhiteSpace($grantTok)) {
+                    $locNG = Resolve-DumpPath -Evt $evt -Config $Config
+                    if ($locNG.Path) { Remove-HandledDump -DumpPath $locNG.Path; Write-TelemetryLog ("dump not requested for {0} - deleted {1}" -f $f.Name, (Split-Path $locNG.Path -Leaf)) }
                     Move-SentEvent -EventPath $f.FullName -SentDir $sentDir; $sent++
                     continue
                 }
@@ -213,6 +226,7 @@ function Send-OutboxEvents {
                     $up = Send-EscalatedDump -DumpPath $uploadPath -UploadName $uploadName -Config $Config -Grant $grant.Token
                     if ($up.Ok) {
                         Write-TelemetryLog ("uploaded dump {0} as {1} ({2} bytes compressed) -> {3}" -f $rawName, $uploadName, $bytes, $up.Key) 'INFO'
+                        Remove-HandledDump -DumpPath $loc.Path   # uploaded OK -> the local raw dump is no longer needed
                         Move-SentEvent -EventPath $f.FullName -SentDir $sentDir; $sent++; $dumps++
                     } else {
                         $n = (Get-UploadAttempts -EventPath $f.FullName) + 1

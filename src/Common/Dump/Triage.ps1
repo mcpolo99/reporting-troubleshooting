@@ -4,22 +4,19 @@
 # =============================== TRIAGE (one dump) =====================
 # Full decision for one completed dump: read its signature, run the Tier-2 walk if the kind needs one,
 # compute the stable id, record it (keep-first-count-rest, per-machine), and act on the decision -
-# recurrences are soft-suppressed (moved to Suppressed\, or deleted). The FIRST sample of an id is always
-# kept. Returns the decision plus the id. This is the slow step (the walk opens the dump) - the monitor
-# runs it in a DETACHED worker, never in its loop.
+# recurrences of an already-seen id are deleted (the FIRST sample of an id is always kept). Returns the
+# decision plus the id. This is the slow step (the walk opens the dump) - the monitor runs it in a DETACHED
+# worker, never in its loop.
 function Invoke-DumpTriage {
     param(
         [Parameter(Mandatory)][string]$DumpPath,
         [string]$ClrMdDll,
         [string]$Dir,
         [string]$BaselinePath,
-        [bool]$SuppressKnown = $true,
-        [ValidateSet('Recycle', 'Delete')][string]$SuppressAction = 'Delete',
-        [string]$SuppressDir
+        [bool]$SuppressKnown = $true
     )
     if (-not (Test-Path -LiteralPath $DumpPath)) { return @{ Action = 'skip'; Reason = 'dump not found' } }
     if (-not $Dir) { $Dir = Get-KnownIssuesDir }
-    if (-not $SuppressDir) { $SuppressDir = Join-Path $Dir 'Suppressed' }
 
     $sig = try { Get-DumpSignature $DumpPath } catch { $null }
     if (-not $sig) { return @{ Action = 'skip'; Reason = 'not a minidump' } }
@@ -58,21 +55,11 @@ function Invoke-DumpTriage {
     }
 
     if ($res.Action -eq 'suppress') {
+        # A recurrence of an already-kept id: the first sample is enough, so delete this one (dump + sidecars).
+        # We never hoard recurrences (no Recycle / Suppressed store).
         $sidecars = @($DumpPath) + @('.info.txt', '.versions.txt' | ForEach-Object { $DumpPath -replace '\.dmp$', $_ })
-        if ($SuppressAction -eq 'Delete') {
-            foreach ($f in $sidecars) { if (Test-Path -LiteralPath $f) { Remove-Item -LiteralPath $f -Force -ErrorAction SilentlyContinue } }
-            $res.Disposition = 'deleted'
-        } else {
-            if (-not (Test-Path -LiteralPath $SuppressDir)) { New-Item -ItemType Directory -Path $SuppressDir -Force | Out-Null }
-            $moved = $true
-            foreach ($f in $sidecars) {
-                if (Test-Path -LiteralPath $f) {
-                    try { Move-Item -LiteralPath $f -Destination (Join-Path $SuppressDir ([IO.Path]::GetFileName($f))) -Force -ErrorAction Stop }
-                    catch { $moved = $false; $res.MoveError = $_.Exception.Message }
-                }
-            }
-            $res.Disposition = if ($moved) { "moved to $SuppressDir" } else { "SUPPRESS but move failed: $($res.MoveError)" }
-        }
+        foreach ($f in $sidecars) { if (Test-Path -LiteralPath $f) { Remove-Item -LiteralPath $f -Force -ErrorAction SilentlyContinue } }
+        $res.Disposition = 'deleted'
     } else {
         $res.Disposition = 'kept'
     }

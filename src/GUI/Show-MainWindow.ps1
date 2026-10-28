@@ -69,13 +69,13 @@ function Show-MainWindow {
     $script:PvProviderPresets = @('Microsoft-Windows-Kernel-Memory','Microsoft-Windows-TCPIP')
     $script:PvClrPresets      = @('Default','None','Verbose')
     # dropdown options for Monitor config fields (anything not listed falls back to checkbox/text by type)
-    $script:MonFieldMeta = @{ DuplicateAction = @('Delete','Keep'); RunMode = @('Logon','Startup'); SuppressAction = @('Delete','Recycle') }
+    $script:MonFieldMeta = @{ DuplicateAction = @('Delete','Keep'); RunMode = @('Logon','Startup') }
     # Which config sub-tab each field belongs to (#53). ProcDumpArgs is rendered as toggles on 'Process', so it is
     # not listed here. Any field not listed falls through to 'General'.
     $script:MonFieldGroup = @{
         Apps = 'Monitor'; DumpDir = 'Monitor'; CheckSeconds = 'Monitor'; CooldownSeconds = 'Monitor'
         DuplicateAction = 'Monitor'; DuplicateWindowSeconds = 'Monitor'; RunMode = 'Monitor'; TaskUser = 'Monitor'; HeadlessLauncher = 'Monitor'
-        KeepDumps = 'General'; CleanupSeconds = 'General'; KnownIssuesEnabled = 'General'; SuppressKnown = 'General'; SuppressAction = 'General'
+        KeepDumps = 'General'; CleanupSeconds = 'General'; KnownIssuesEnabled = 'General'; SuppressKnown = 'General'
         BaselinePath = 'General'; TelemetryEnabled = 'General'; TelemetrySeconds = 'General'; LogKeep = 'General'; LogMaxMB = 'General'
     }
 
