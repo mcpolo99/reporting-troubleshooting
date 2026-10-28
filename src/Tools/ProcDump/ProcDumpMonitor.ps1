@@ -114,8 +114,7 @@ function Get-DefaultConfig {
         DuplicateAction  = 'Delete'     # Delete | Keep  - what to do with repeat captures of the same event
         DuplicateWindowSeconds = 300    # hang dumps of a process this soon after its exception dump = duplicate
         KnownIssuesEnabled = $true      # identify each dump's stable fault id and dedupe already-seen problems
-        SuppressKnown    = $true        # keep the FIRST dump of each id, count + soft-suppress later recurrences
-        SuppressAction   = 'Delete'     # Delete recurrences (default: first dump + count already captured) | Recycle = move to KnownIssues\Suppressed (bounded)
+        SuppressKnown    = $true        # keep the FIRST dump of each id, count + DELETE later recurrences (first dump + count already capture it)
         BaselinePath     = ''           # optional: JSON of already-analysed ids to suppress even the first time (blank = installed baseline beside the script)
         TelemetryEnabled = $true        # periodically forward events / sync known-sigs / upload new-signature dumps
         TelemetrySeconds = 300          # how often the monitor flushes telemetry (when enabled)
@@ -1180,7 +1179,22 @@ function Invoke-Monitor {
             if (((Get-Date) - $lastCleanup).TotalSeconds -ge $cfg.CleanupSeconds) {
                 $lastCleanup = Get-Date
 
+                # Dumps still referenced by a PENDING outbox event (not yet uploaded) must never be pruned, or a
+                # burst / long offline period would delete them before the flush sends them (#75). Build the set of
+                # dump names any pending event points at, and exclude them from the ring-buffer prune.
+                $pendingDumps = @{}
+                $obx = Join-Path (Get-KnownIssuesDir) 'outbox'
+                if (Test-Path -LiteralPath $obx) {
+                    foreach ($ev in @(Get-ChildItem -LiteralPath $obx -Filter *.json -File -ErrorAction SilentlyContinue)) {
+                        try {
+                            $j = Get-Content -LiteralPath $ev.FullName -Raw | ConvertFrom-Json
+                            foreach ($p in @($j.dump.path, $j.dump.file)) { if ($p) { $pendingDumps[[IO.Path]::GetFileName("$p")] = $true } }
+                        } catch {}
+                    }
+                }
+
                 Get-ChildItem -Path $cfg.DumpDir -Filter *.dmp -File -ErrorAction SilentlyContinue |
+                    Where-Object { -not $pendingDumps[$_.Name] } |
                     Sort-Object LastWriteTime -Descending | Select-Object -Skip $cfg.KeepDumps |
                     ForEach-Object {
                         try {
@@ -1196,19 +1210,26 @@ function Invoke-Monitor {
                                    -not (Test-Path -LiteralPath ($_.FullName -replace '\.(info|versions)\.txt$', '.dmp')) } |
                     Remove-Item -Force -ErrorAction SilentlyContinue
 
-                # Bound the suppressed-recurrence store (KnownIssues\Suppressed). With SuppressAction=Delete it is
-                # empty, but legacy data and Recycle mode land dumps here; keep only the newest KeepDumps and drop
-                # their sidecars, so it can never grow unbounded (and never sits as a pile of uncompressed dumps).
+                # Legacy cleanup: recurrences are deleted at triage now, so the old KnownIssues\Suppressed store is
+                # retired - remove it wholesale if a previous version left one behind.
                 $supDir = Join-Path (Get-KnownIssuesDir) 'Suppressed'
                 if (Test-Path -LiteralPath $supDir) {
-                    Get-ChildItem -LiteralPath $supDir -Filter *.dmp -File -ErrorAction SilentlyContinue |
+                    try { Remove-Item -LiteralPath $supDir -Recurse -Force -ErrorAction Stop; Write-Log "Removed legacy Suppressed store ($supDir)" }
+                    catch { Write-Log "Could not remove legacy Suppressed store (in use?), will retry." 'WARN' }
+                }
+
+                # Bound the ONLY retained dump store: DumpDir\failed-uploads (dumps that exhausted upload retries).
+                # Keep the newest KeepDumps + drop their sidecars so it can never grow unbounded.
+                $fuDir = Join-Path $cfg.DumpDir 'failed-uploads'
+                if (Test-Path -LiteralPath $fuDir) {
+                    Get-ChildItem -LiteralPath $fuDir -Filter *.dmp -File -ErrorAction SilentlyContinue |
                         Sort-Object LastWriteTime -Descending | Select-Object -Skip $cfg.KeepDumps |
                         ForEach-Object {
                             try {
                                 Remove-Item -LiteralPath $_.FullName -Force -ErrorAction Stop
                                 foreach ($sx in '.info.txt', '.versions.txt') { Remove-Item -LiteralPath ($_.FullName -replace '\.dmp$', $sx) -Force -ErrorAction SilentlyContinue }
-                                Write-Log "Pruned suppressed dump $($_.Name)"
-                            } catch { Write-Log "Could not prune suppressed $($_.Name) (in use?), will retry." 'WARN' }
+                                Write-Log "Pruned failed-upload dump $($_.Name)"
+                            } catch { Write-Log "Could not prune failed-upload $($_.Name) (in use?), will retry." 'WARN' }
                         }
                 }
 

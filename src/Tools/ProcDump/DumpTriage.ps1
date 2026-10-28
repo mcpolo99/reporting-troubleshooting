@@ -9,7 +9,7 @@
   every .dmp present and prints a summary.
 
   Decision (see Common\DumpId.ps1 Invoke-DumpTriage): compute the stable fault id; the FIRST dump of an id
-  is kept, later recurrences are counted and soft-suppressed (moved to KnownIssues\Suppressed\ or deleted).
+  is kept, later recurrences are counted and deleted (no local recurrence store).
   A provisional id (hang/managed-exception whose walk could not run) is never suppressed.
 
 .USAGE
@@ -62,7 +62,6 @@ function Cfg($name, $default) { if ($cfg -and $null -ne $cfg.$name -and "$($cfg.
 
 if (-not $DumpDir) { $DumpDir = Cfg 'DumpDir' 'C:\dumps' }
 $suppressKnown  = [bool](Cfg 'SuppressKnown' $true)
-$suppressAction = [string](Cfg 'SuppressAction' 'Delete')
 $clrmd    = Resolve-PackageTool 'clrmd'
 # shipped baseline of already-analysed ids lives beside the installed script; a blank config value means
 # "use that shipped baseline", and if even that is absent there is simply no baseline.
@@ -74,7 +73,7 @@ if ([string]::IsNullOrWhiteSpace("$baseline") -or -not (Test-Path -LiteralPath $
 function Say($m) { if (-not $Quiet) { Write-Host $m } }
 
 function Triage-One([string]$Path) {
-    $r = Invoke-DumpTriage -DumpPath $Path -ClrMdDll $clrmd -BaselinePath $baseline -SuppressKnown $suppressKnown -SuppressAction $suppressAction
+    $r = Invoke-DumpTriage -DumpPath $Path -ClrMdDll $clrmd -BaselinePath $baseline -SuppressKnown $suppressKnown
     $name = [IO.Path]::GetFileName($Path)
     Say ("{0,-40} {1,-9} id={2} x{3,-4} {4}{5}" -f $name, $r.Action, $r.Id, $r.Count, $r.Leaf, $(if ($r.Disposition -and $r.Disposition -ne 'kept') { " ($($r.Disposition))" } else { '' }))
     return $r
