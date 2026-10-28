@@ -5,6 +5,14 @@ truth; each release is tagged `vX.Y.Z` and published as a GitHub release by `scr
 
 <!-- NEW RELEASES INSERTED BELOW -->
 
+## [v1.0.49] - 2026-10-28
+Changes since v1.0.48:
+
+### Features
+- emit firstSeenOnDevice so the backend can grant a dump per device per signature (#68) (752123e)
+- configurable background-worker CPU priority (WorkerPriority) in General settings (#76) (66acf4c)
+
+
 ## [v1.0.48] - 2026-10-28
 Changes since v1.0.47:
 
@@ -396,6 +404,7 @@ Changes since v1.0.0:
 - WPF/XAML launcher (GUI default, `-CLI` text menu) with shared light/dark theme.
 - Shared components (logging, admin/signature/prompt/version helpers) under `src/Common`.
 - Bootstrap installer (`src/Get.ps1` + `src/run.bat`) with version check against GitHub.
+
 
 
 
