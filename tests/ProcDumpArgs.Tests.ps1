@@ -14,22 +14,25 @@ Write-Host 'parse the shipped default'
 $d = ConvertFrom-ProcDumpArgs '-accepteula -ma -e -h -n 1 -w'
 Check 'FullDump on'            ($d.FullDump)
 Check 'OnException on'         ($d.OnException)
-Check 'FirstChance off'        (-not $d.FirstChance)
+Check 'ExceptionLevel blank'   ($d.ExceptionLevel -eq '')
 Check 'OnHang on'              ($d.OnHang)
 Check 'WaitForProcess on'      ($d.WaitForProcess)
 Check 'DumpsPerSession = 1'    ($d.DumpsPerSession -eq 1)
 
-Write-Host 'first-chance (-e 1) is detected'
+Write-Host 'first-chance level (-e 1) is detected'
 $f = ConvertFrom-ProcDumpArgs '-accepteula -ma -e 1 -h -n 3 -w'
-Check 'FirstChance on'         ($f.FirstChance)
-Check 'OnException implied'    ($f.OnException)
+Check 'ExceptionLevel = 1'     ($f.ExceptionLevel -eq '1')
+Check 'OnException on'         ($f.OnException)
 Check 'DumpsPerSession = 3'    ($f.DumpsPerSession -eq 3)
 
 Write-Host 'build from toggles always starts with -accepteula'
-$s = ConvertTo-ProcDumpArgs ([ordered]@{ FullDump=$true; OnException=$true; FirstChance=$false; OnHang=$true; WaitForProcess=$true; DumpsPerSession=1 })
+$s = ConvertTo-ProcDumpArgs ([ordered]@{ FullDump=$true; OnException=$true; ExceptionLevel=''; OnHang=$true; WaitForProcess=$true; DumpsPerSession=1 })
 Check 'builds the shipped default' ($s -eq '-accepteula -ma -e -h -n 1 -w')
 Check 'accepteula always present'  ((ConvertTo-ProcDumpArgs ([ordered]@{})) -match '(^|\s)-accepteula(\s|$)')
-Check 'first-chance builds -e 1'   ((ConvertTo-ProcDumpArgs ([ordered]@{ FirstChance=$true; DumpsPerSession=1 })) -match '(^|\s)-e 1(\s|$)')
+Check 'on-exception + blank -> -e'  ((ConvertTo-ProcDumpArgs ([ordered]@{ OnException=$true; DumpsPerSession=1 })) -match '(^|\s)-e(\s|$)')
+Check 'on-exception + 1 -> -e 1'    ((ConvertTo-ProcDumpArgs ([ordered]@{ OnException=$true; ExceptionLevel='1'; DumpsPerSession=1 })) -match '(^|\s)-e 1(\s|$)')
+Check 'no on-exception -> no -e'    (-not ((ConvertTo-ProcDumpArgs ([ordered]@{ OnHang=$true; DumpsPerSession=1 })) -match '(^|\s)-e(\s|$)'))
+Check 'level ignored without -e'    (-not ((ConvertTo-ProcDumpArgs ([ordered]@{ ExceptionLevel='1'; DumpsPerSession=1 })) -match '(^|\s)-e'))
 Check 'n floored to 1'             ((ConvertTo-ProcDumpArgs ([ordered]@{ DumpsPerSession=0 })) -match '-n 1')
 
 Write-Host 'round-trips'
