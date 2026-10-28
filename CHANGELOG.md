@@ -5,6 +5,17 @@ truth; each release is tagged `vX.Y.Z` and published as a GitHub release by `scr
 
 <!-- NEW RELEASES INSERTED BELOW -->
 
+## [v1.0.47] - 2026-10-28
+Changes since v1.0.46:
+
+### Features
+- live dump-compression progress indicator on the Monitor tab (#65) (ab47ee8)
+
+### Fixes
+- stop double-processing renamed dumps and handle ProcDump's .exe in the process token (#70, #71) (f80937d)
+- delete suppressed recurrence dumps by default and prune the Suppressed store (#67) (4bebc22)
+
+
 ## [v1.0.46] - 2026-10-28
 Changes since v1.0.45:
 
@@ -374,6 +385,7 @@ Changes since v1.0.0:
 - WPF/XAML launcher (GUI default, `-CLI` text menu) with shared light/dark theme.
 - Shared components (logging, admin/signature/prompt/version helpers) under `src/Common`.
 - Bootstrap installer (`src/Get.ps1` + `src/run.bat`) with version check against GitHub.
+
 
 
 
