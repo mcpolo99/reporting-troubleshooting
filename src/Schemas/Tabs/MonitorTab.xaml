@@ -40,6 +40,13 @@
 
     <Border BorderBrush="{DynamicResource AppIdColor}" BorderThickness="0,1,0,0" Margin="0,12,0,10"/>
     <DockPanel Margin="0,0,0,4">
+      <TextBlock DockPanel.Dock="Left" Text="Compression" Foreground="{DynamicResource AppFgColor}" FontWeight="SemiBold" VerticalAlignment="Center" Margin="0,0,10,0"/>
+      <TextBlock x:Name="LblMonCompress" Text="idle" Foreground="{DynamicResource AppIdColor}" VerticalAlignment="Center" TextTrimming="CharacterEllipsis"/>
+    </DockPanel>
+    <ProgressBar x:Name="PbMonCompress" Height="6" Minimum="0" Maximum="100" Value="0" Margin="0,0,0,12"/>
+
+    <Border BorderBrush="{DynamicResource AppIdColor}" BorderThickness="0,1,0,0" Margin="0,0,0,10"/>
+    <DockPanel Margin="0,0,0,4">
       <TextBlock DockPanel.Dock="Left" Text="Monitor log (live)" Foreground="{DynamicResource AppFgColor}" FontWeight="SemiBold" VerticalAlignment="Center"/>
       <CheckBox x:Name="ChkMonTail" DockPanel.Dock="Right" Content="Live tail" IsChecked="True" Foreground="{DynamicResource AppFgColor}" VerticalAlignment="Center"/>
     </DockPanel>
