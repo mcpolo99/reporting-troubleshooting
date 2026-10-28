@@ -45,3 +45,35 @@ function Read-Int([string]$Prompt, [int]$Current, [int]$Min = 1) {
 function Read-Bool([string]$Prompt, [bool]$Current) {
     (Read-Value "$Prompt (y/n)" ($(if ($Current) { 'y' } else { 'n' }))) -match '^(y|yes|true|1)$'
 }
+
+# --- ProcDump argument toggles (settings UI <-> the ProcDumpArgs string, #53) ---------------------------------
+# -accepteula is always required and implied, never a toggle. The meaningful switches map to checkboxes and a
+# count so the UI never shows a raw arg string. Order mirrors the shipped default: -accepteula -ma -e[ 1] -h -n N -w.
+function ConvertFrom-ProcDumpArgs {
+    param([string]$Arguments)
+    $t = @(("$Arguments") -split '\s+' | Where-Object { $_ })
+    $n = 1
+    for ($i = 0; $i -lt $t.Count; $i++) { if ($t[$i] -ieq '-n' -and $i + 1 -lt $t.Count) { [void][int]::TryParse($t[$i + 1], [ref]$n) } }
+    $e = $false; $fc = $false
+    for ($i = 0; $i -lt $t.Count; $i++) { if ($t[$i] -ieq '-e') { $e = $true; if ($i + 1 -lt $t.Count -and $t[$i + 1] -eq '1') { $fc = $true } } }
+    [ordered]@{
+        FullDump        = [bool]($t -contains '-ma')
+        OnException     = $e
+        FirstChance     = $fc
+        OnHang          = [bool]($t -contains '-h')
+        WaitForProcess  = [bool]($t -contains '-w')
+        DumpsPerSession = [Math]::Max($n, 1)
+    }
+}
+
+function ConvertTo-ProcDumpArgs {
+    param($Toggles)
+    $a = @('-accepteula')
+    if ($Toggles.FullDump)    { $a += '-ma' }
+    if ($Toggles.FirstChance) { $a += @('-e', '1') } elseif ($Toggles.OnException) { $a += '-e' }
+    if ($Toggles.OnHang)      { $a += '-h' }
+    $n = 1; if ($Toggles.DumpsPerSession) { [void][int]::TryParse("$($Toggles.DumpsPerSession)", [ref]$n) }; if ($n -lt 1) { $n = 1 }
+    $a += @('-n', "$n")
+    if ($Toggles.WaitForProcess) { $a += '-w' }
+    $a -join ' '
+}
