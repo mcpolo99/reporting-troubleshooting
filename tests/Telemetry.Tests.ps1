@@ -112,6 +112,7 @@ try {
     Check 'compress ok'                    ($c.Ok)
     Check 'gz written next to source'      ($c.Path -eq ($srcDump + '.gz') -and (Test-Path -LiteralPath $c.Path))
     Check 'gz smaller than raw'            ((Get-Item -LiteralPath $c.Path).Length -lt (Get-Item -LiteralPath $srcDump).Length)
+    Check 'returns raw + gz byte counts'   ($c.RawBytes -eq (Get-Item -LiteralPath $srcDump).Length -and $c.GzBytes -eq (Get-Item -LiteralPath $c.Path).Length -and $c.GzBytes -lt $c.RawBytes)
     # round-trip: decompress and compare to the original bytes
     $rt = Join-Path $dir 'compress_me.roundtrip'
     $gin = [IO.File]::OpenRead($c.Path); $gz = New-Object System.IO.Compression.GZipStream($gin, [System.IO.Compression.CompressionMode]::Decompress); $gout = [IO.File]::Create($rt)
