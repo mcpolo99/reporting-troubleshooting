@@ -190,24 +190,39 @@ function Send-OutboxEvents {
                     else { Set-UploadAttempts -EventPath $f.FullName -Count $n; $failed++ }
                     continue
                 }
-                # 4) Size-gate against the grant, then stream it up. Over-cap can never succeed -> park it now.
-                $bytes = (Get-Item -LiteralPath $loc.Path).Length
-                $grant = Resolve-UploadGrant -Response $resp -DumpBytes $bytes
-                if ($grant.Reason -eq 'too-large') {
-                    Write-TelemetryLog ("granted dump {0} is {1} bytes, over the grant cap - moving to failed-uploads" -f (Split-Path $loc.Path -Leaf), $bytes) 'ERROR'
-                    Move-FailedUpload -EventPath $f.FullName -DumpPath $loc.Path -Config $Config -Reason 'too-large'; $failedUploads++
-                    continue
-                }
-                $up = Send-EscalatedDump -DumpPath $loc.Path -Config $Config -Grant $grant.Token
-                if ($up.Ok) {
-                    Write-TelemetryLog ("uploaded dump {0} ({1} bytes) -> {2}" -f (Split-Path $loc.Path -Leaf), $bytes, $up.Key) 'INFO'
-                    Move-SentEvent -EventPath $f.FullName -SentDir $sentDir; $sent++; $dumps++
-                } else {
-                    $n = (Get-UploadAttempts -EventPath $f.FullName) + 1
-                    Write-TelemetryLog ("dump upload failed for {0}: {1}; attempt {2}/{3}" -f (Split-Path $loc.Path -Leaf), $up.Detail, $n, $script:MaxDumpUploadAttempts) 'ERROR'
-                    if ($n -ge $script:MaxDumpUploadAttempts) { Move-FailedUpload -EventPath $f.FullName -DumpPath $loc.Path -Config $Config -Reason ("upload-failed: " + $up.Detail); $failedUploads++ }
-                    else { Set-UploadAttempts -EventPath $f.FullName -Count $n; $failed++ }
-                    continue
+                # 4) A grant was issued and the dump is on disk, so it WILL be uploaded - only now do we compress it
+                #    (#64: a dump that is not being uploaded is never compressed; the no-grant case already returned
+                #    at step 2). Process-memory dumps compress ~5x, so gzipping just before the POST is a large
+                #    transfer win and makes the body far more likely to fit the grant cap. The backend stores the
+                #    body opaquely (CONTRACT 5b), so we upload the .gz as-is and signal it with a .gz name; the silo
+                #    consumer decompresses. The event already carries the RAW bytes/sha256 (emitted at capture), so
+                #    those still describe the original dump. Size-gate the COMPRESSED bytes, stream up, clean the .gz.
+                $rawName = Split-Path $loc.Path -Leaf
+                $gzPath = $null
+                $comp = Compress-DumpFile -SourcePath $loc.Path -DestPath ($loc.Path + '.gz') -Label $rawName
+                if ($comp.Ok) { $gzPath = $comp.Path; $uploadPath = $gzPath; $uploadName = $rawName + '.gz' }
+                else { Write-TelemetryLog ("compress failed for {0}: {1} - uploading raw" -f $rawName, $comp.Error) 'WARN'; $uploadPath = $loc.Path; $uploadName = $rawName }
+                try {
+                    $bytes = (Get-Item -LiteralPath $uploadPath).Length
+                    $grant = Resolve-UploadGrant -Response $resp -DumpBytes $bytes
+                    if ($grant.Reason -eq 'too-large') {
+                        Write-TelemetryLog ("granted dump {0} is {1} bytes compressed, over the grant cap - moving to failed-uploads" -f $rawName, $bytes) 'ERROR'
+                        Move-FailedUpload -EventPath $f.FullName -DumpPath $loc.Path -Config $Config -Reason 'too-large'; $failedUploads++
+                        continue
+                    }
+                    $up = Send-EscalatedDump -DumpPath $uploadPath -UploadName $uploadName -Config $Config -Grant $grant.Token
+                    if ($up.Ok) {
+                        Write-TelemetryLog ("uploaded dump {0} as {1} ({2} bytes compressed) -> {3}" -f $rawName, $uploadName, $bytes, $up.Key) 'INFO'
+                        Move-SentEvent -EventPath $f.FullName -SentDir $sentDir; $sent++; $dumps++
+                    } else {
+                        $n = (Get-UploadAttempts -EventPath $f.FullName) + 1
+                        Write-TelemetryLog ("dump upload failed for {0}: {1}; attempt {2}/{3}" -f $rawName, $up.Detail, $n, $script:MaxDumpUploadAttempts) 'ERROR'
+                        if ($n -ge $script:MaxDumpUploadAttempts) { Move-FailedUpload -EventPath $f.FullName -DumpPath $loc.Path -Config $Config -Reason ("upload-failed: " + $up.Detail); $failedUploads++ }
+                        else { Set-UploadAttempts -EventPath $f.FullName -Count $n; $failed++ }
+                        continue
+                    }
+                } finally {
+                    if ($gzPath -and (Test-Path -LiteralPath $gzPath)) { Remove-Item -LiteralPath $gzPath -Force -ErrorAction SilentlyContinue }
                 }
             } else {
                 # Local/offline stand-in: no server to grant, so a NEW signature (escalateDump) drops its dump
@@ -294,16 +309,52 @@ function Invoke-DumpUpload {
     }
 }
 
+# gzip a file (streamed, chunked - never buffers the whole dump into memory), to $DestPath or <source>.gz.
+# Process-memory dumps compress heavily; this is the last step before upload (#43). Progress is logged every ~10%
+# and a final "compressed X -> Y (Z%)" line (#65), so a watcher on the telemetry log (and, later, the UI) sees a
+# large dump being worked. Returns @{ Ok; Path; RawBytes; GzBytes; Error }.
+function Compress-DumpFile {
+    param([Parameter(Mandatory)][string]$SourcePath, [string]$DestPath, [string]$Label)
+    try { Add-Type -AssemblyName System.IO.Compression -ErrorAction SilentlyContinue } catch {}
+    if (-not $DestPath) { $DestPath = "$SourcePath.gz" }
+    if (-not $Label)    { $Label = [IO.Path]::GetFileName($SourcePath) }
+    $in = $null; $out = $null; $gz = $null
+    try {
+        $in  = [IO.File]::OpenRead($SourcePath)
+        $total = $in.Length
+        $out = [IO.File]::Create($DestPath)
+        $gz  = New-Object System.IO.Compression.GZipStream($out, [System.IO.Compression.CompressionLevel]::Optimal)
+        $buf = New-Object byte[] (1MB); $done = 0L; $lastPct = -1
+        Write-TelemetryLog ("compressing {0} ({1:N0} bytes) before upload..." -f $Label, $total)
+        while (($read = $in.Read($buf, 0, $buf.Length)) -gt 0) {
+            $gz.Write($buf, 0, $read); $done += $read
+            if ($total -gt 0) {
+                $pct = [int](($done * 100) / $total)
+                if ($pct -ge $lastPct + 10 -and $pct -lt 100) { Write-TelemetryLog ("compressing {0}: {1}%" -f $Label, $pct); $lastPct = $pct }
+            }
+        }
+        $gz.Dispose(); $gz = $null; $out.Dispose(); $out = $null; $in.Dispose(); $in = $null
+        $gzBytes = (Get-Item -LiteralPath $DestPath).Length
+        $ratio = if ($total -gt 0) { [int](($gzBytes * 100) / $total) } else { 0 }
+        Write-TelemetryLog ("compressed {0}: {1:N0} -> {2:N0} bytes ({3}% of raw)" -f $Label, $total, $gzBytes, $ratio)
+        return @{ Ok = $true; Path = $DestPath; RawBytes = $total; GzBytes = $gzBytes; Error = $null }
+    } catch {
+        if ($gz) { $gz.Dispose() }; if ($out) { $out.Dispose() }; if ($in) { $in.Dispose() }
+        if (Test-Path -LiteralPath $DestPath) { Remove-Item -LiteralPath $DestPath -Force -ErrorAction SilentlyContinue }
+        return @{ Ok = $false; Path = $null; RawBytes = 0; GzBytes = 0; Error = $_.Exception.Message }
+    }
+}
+
 # Send a granted dump to the dump target (silo stand-in locally). Over http the one-time grant from the
 # /v1/events 202 goes in X-Upload-Grant (fleet key only, no admin key), streamed (not -InFile; #42 defect 4).
 # Returns @{ Ok; Key; Detail } - on failure Detail carries the HTTP status/reason so the flusher can log it
 # (#42 defect 2: the upload error was swallowed with no diagnostic). It is artifact-agnostic: whatever file is at
-# $DumpPath is uploaded as-is, so a future compressed artifact (#43) needs no change here.
+# $DumpPath is uploaded as-is (the flusher passes a gzipped .gz, #43), named by $UploadName on the wire.
 function Send-EscalatedDump {
-    param([Parameter(Mandatory)][string]$DumpPath, $Config, [string]$Grant)
+    param([Parameter(Mandatory)][string]$DumpPath, $Config, [string]$Grant, [string]$UploadName)
     if (-not $Config) { $Config = Get-TelemetryConfig }
     if (-not (Test-Path -LiteralPath $DumpPath)) { return @{ Ok = $false; Key = $null; Detail = 'dump-not-found' } }
-    $name = [IO.Path]::GetFileName($DumpPath)
+    $name = if ($UploadName) { $UploadName } else { [IO.Path]::GetFileName($DumpPath) }
     if (Test-IsHttp $Config.DumpTarget) {
         $extra = @{ 'X-Dump-Name' = $name }
         if ($Grant) { $extra['X-Upload-Grant'] = $Grant }
