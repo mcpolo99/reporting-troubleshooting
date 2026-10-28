@@ -5,6 +5,13 @@ truth; each release is tagged `vX.Y.Z` and published as a GitHub release by `scr
 
 <!-- NEW RELEASES INSERTED BELOW -->
 
+## [v1.0.52] - 2026-10-28
+Changes since v1.0.51:
+
+### Features
+- exception arg as one -e checkbox + a level number box (blank=-e, 1=-e 1) (#86) (4bce2e6)
+
+
 ## [v1.0.51] - 2026-10-28
 Changes since v1.0.50:
 
@@ -421,6 +428,7 @@ Changes since v1.0.0:
 - WPF/XAML launcher (GUI default, `-CLI` text menu) with shared light/dark theme.
 - Shared components (logging, admin/signature/prompt/version helpers) under `src/Common`.
 - Bootstrap installer (`src/Get.ps1` + `src/run.bat`) with version check against GitHub.
+
 
 
 
