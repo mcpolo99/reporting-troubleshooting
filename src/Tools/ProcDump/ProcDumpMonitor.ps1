@@ -439,9 +439,13 @@ function Get-DumpInfo([string]$Path) {
 }
 
 function Get-DumpApp($cfg, [string]$FileName) {
-    # New scheme: match the <process> token exactly. Fall back to a prefix match for any legacy-named dump.
+    # New scheme: match the <process> token exactly (ignoring a trailing .exe, since ProcDump's PROCESSNAME may
+    # include it; #71). Fall back to a prefix match for any legacy-named dump.
     $proc = Get-DumpProcessFromName $FileName
-    if ($proc) { return ($cfg.Apps | Where-Object { [IO.Path]::GetFileNameWithoutExtension($_) -ieq $proc } | Select-Object -First 1) }
+    if ($proc) {
+        $procBase = $proc -replace '(?i)\.exe$', ''
+        return ($cfg.Apps | Where-Object { [IO.Path]::GetFileNameWithoutExtension($_) -ieq $procBase } | Select-Object -First 1)
+    }
     $cfg.Apps | Where-Object { $FileName -like "$([IO.Path]::GetFileNameWithoutExtension($_))*" } | Select-Object -First 1
 }
 
@@ -556,8 +560,10 @@ function Invoke-NewDumps($cfg, $known, $pending, $recent, $lastInfo) {
         # Fault-identify this dump and dedupe already-seen problems (runs detached - never blocks the loop).
         if ($cfg.KnownIssuesEnabled) { Enqueue-DumpTriage $d.FullName }
     }
-    # forget dumps that no longer exist
-    $existing = @($dumps | ForEach-Object { $_.FullName })
+    # forget dumps that no longer exist. Re-scan the directory NOW (not the $dumps list captured at entry): a dump
+    # renamed to its final name during this pass is only on disk under the new name, so a stale list would drop the
+    # renamed file from $known and the next pass would re-process it (#70).
+    $existing = @(Get-ChildItem -Path $cfg.DumpDir -Filter *.dmp -File -ErrorAction SilentlyContinue | ForEach-Object { $_.FullName })
     @($known)        | Where-Object { $_ -notin $existing } | ForEach-Object { [void]$known.Remove($_) }
     @($pending.Keys) | Where-Object { $_ -notin $existing } | ForEach-Object { $pending.Remove($_) }
 }
@@ -1124,8 +1130,11 @@ function Invoke-Monitor {
                     Close-ProcDumpCapture $st
                     $monitors.Remove($app)
                     $code = try { $st.Process.ExitCode } catch { '?' }
-                    $made = @(Get-ChildItem -Path $cfg.DumpDir -Filter "ProcDump_*_${appName}_*.dmp" -File -ErrorAction SilentlyContinue |
-                              Where-Object { $_.CreationTime -ge $st.Started.AddSeconds(-2) })
+                    # Attribute via Get-DumpApp, not a per-app glob: ProcDump's PROCESSNAME may carry .exe, and one
+                    # app name can be a prefix of another (bSuite vs bSuite.NotRespondingHandler), so a glob misses or
+                    # misattributes. A placeholder or already-renamed dump for THIS app, written since we started = ours.
+                    $made = @(Get-ChildItem -Path $cfg.DumpDir -Filter 'ProcDump_*.dmp' -File -ErrorAction SilentlyContinue |
+                              Where-Object { $_.CreationTime -ge $st.Started.AddSeconds(-2) -and (Get-DumpApp $cfg $_.Name) -eq $app })
                     # Re-arm cooldown. Wait before re-arming whenever the SAME process is still alive - not only
                     # after a dump was written - and never faster than 60s, so a ProcDump that keeps exiting (caught
                     # nothing, or a saved config with a low/zero CooldownSeconds) cannot spin the monitor in a tight

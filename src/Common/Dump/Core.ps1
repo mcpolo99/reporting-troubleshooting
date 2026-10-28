@@ -52,11 +52,15 @@ function Get-DumpTag {
     return 'manual'
 }
 
-# Build the dump base filename (no directory) for a capture.
+# Build the dump base filename (no directory) for a capture. A trailing .exe is stripped from the process token
+# (ProcDump's PROCESSNAME expands WITH the extension on some builds), so names stay consistent and the token
+# round-trips to the configured app name - only '.exe' is removed, so 'bSuite.NotRespondingHandler.exe' keeps its
+# dotted base (#71).
 function New-DumpFileName {
     param([string]$Computer, [string]$Process, [string]$Tag, [datetime]$When = (Get-Date))
+    $proc = "$Process" -replace '(?i)\.exe$', ''
     '{0}_{1}_{2}_{3}_{4:yyyyMMdd_HHmmss}.dmp' -f $script:DumpNamePrefix,
-        (ConvertTo-DumpToken $Computer 'pc'), (ConvertTo-DumpToken $Process 'app'),
+        (ConvertTo-DumpToken $Computer 'pc'), (ConvertTo-DumpToken $proc 'app'),
         (ConvertTo-DumpToken $Tag 'manual'), $When
 }
 

@@ -91,6 +91,8 @@ Check 'process token round-trips'        ((Get-DumpProcessFromName $fn) -eq 'bSu
 Check 'process token: legacy name null'  ($null -eq (Get-DumpProcessFromName 'bSuite.exe_261019_084858.dmp'))
 Check 'underscores in token collapse'    ((New-DumpFileName -Computer 'PC01' -Process 'my_app' -Tag 'hang' -When $when) -eq 'ProcDump_PC01_my-app_hang_20261028_143005.dmp')
 Check 'empty token -> fallback'          ((Get-DumpProcessFromName (New-DumpFileName -Computer 'PC01' -Process '' -Tag 'hang' -When $when)) -eq 'app')
+Check 'trailing .exe stripped'           ((Get-DumpProcessFromName (New-DumpFileName -Computer 'PC01' -Process 'bSuite.exe' -Tag 'hang' -When $when)) -eq 'bSuite')
+Check 'only .exe stripped, dotted kept'  ((Get-DumpProcessFromName (New-DumpFileName -Computer 'PC01' -Process 'bSuite.NotRespondingHandler.exe' -Tag 'hang' -When $when)) -eq 'bSuite.NotRespondingHandler')
 
 Write-Host ''
 Write-Host ("{0}/{1} passed" -f ($script:count - $script:fail), $script:count) -ForegroundColor $(if ($script:fail) { 'Red' } else { 'Green' })
