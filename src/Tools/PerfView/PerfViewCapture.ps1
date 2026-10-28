@@ -2,14 +2,12 @@
 <#
 .SYNOPSIS
   PerfView capture console: installs PerfView, then starts / stops machine-wide performance traces
-  (ETW/ETL) using selectable collection profiles that keep the trace size under control. Also reaches
-  the temporary one-shot process-dump capture (ProcDumpCase.ps1) from the same menu.
+  (ETW/ETL) using selectable collection profiles that keep the trace size under control.
 
   PerfView is "installed" (resolved, Microsoft-signature-verified, parked in a known Tools folder).
-  ProcDump capture stays TEMPORARY - it is delegated to ProcDumpCase.ps1 and nothing is installed.
 
 .USAGE
-  Interactive (menu: setup, install, status, start/stop capture, abort, procdump):
+  Interactive (menu: setup, install, status, start/stop capture, abort):
       powershell -ExecutionPolicy Bypass -File .\PerfViewCapture.ps1
   Unattended:
       ...\PerfViewCapture.ps1 -Install

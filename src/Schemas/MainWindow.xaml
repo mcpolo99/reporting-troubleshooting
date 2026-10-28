@@ -19,7 +19,6 @@
       <TabItem x:Name="TabPackages" Header="Packages"/>
       <TabItem x:Name="TabPerfView" Header="PerfView"/>
       <TabItem x:Name="TabMonitor"  Header="ProcDump Monitor"/>
-      <TabItem x:Name="TabCase"     Header="ProcDump Case"/>
     </TabControl>
 
     <TextBlock Grid.Row="1" Text="Output" Foreground="{DynamicResource AppIdColor}" Margin="2,10,0,4"/>
