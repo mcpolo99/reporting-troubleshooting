@@ -13,45 +13,46 @@
     <TextBlock x:Name="LblMonStatus" Foreground="{DynamicResource AppIdColor}" TextWrapping="Wrap" Margin="0,0,0,12"/>
 
     <Border BorderBrush="{DynamicResource AppIdColor}" BorderThickness="0,1,0,0" Margin="0,0,0,10"/>
-    <TextBlock Text="Dependencies" Foreground="{DynamicResource AppFgColor}" FontWeight="SemiBold" Margin="0,0,0,4"/>
-    <TextBlock Text="Check that each monitored app can be fault-identified on THIS machine (detects each app's .NET runtime and confirms the stack-walker can load it - no dump needed). Start the apps first for the most accurate result." Foreground="{DynamicResource AppIdColor}" TextWrapping="Wrap" Margin="0,0,0,6"/>
-    <StackPanel Orientation="Horizontal" Margin="0,0,0,4">
-      <Button x:Name="BtnMonVerify" Content="Verify deps (monitored apps)" Height="30" MinWidth="200"/>
-    </StackPanel>
-    <TextBlock x:Name="LblMonVerify" Foreground="{DynamicResource AppIdColor}" TextWrapping="Wrap" Margin="0,0,0,12"/>
-
-    <Border BorderBrush="{DynamicResource AppIdColor}" BorderThickness="0,1,0,0" Margin="0,0,0,10"/>
     <TextBlock Text="Configuration (live editor)" Foreground="{DynamicResource AppFgColor}" FontWeight="SemiBold" Margin="0,0,0,8"/>
-    <TabControl x:Name="TabsMonConfig" MinHeight="230" Margin="0,0,0,8" Background="{DynamicResource CardBgColor}">
+    <TabControl x:Name="TabsMonConfig" MinHeight="260" Margin="0,0,0,8" Background="{DynamicResource CardBgColor}">
       <TabItem Header="ProcDump">
-        <ScrollViewer VerticalScrollBarVisibility="Auto" MaxHeight="300"><StackPanel x:Name="PnlCfgProcess" Margin="10"/></ScrollViewer>
+        <ScrollViewer VerticalScrollBarVisibility="Auto" MaxHeight="320"><StackPanel x:Name="PnlCfgProcess" Margin="10"/></ScrollViewer>
       </TabItem>
       <TabItem Header="Monitor">
-        <ScrollViewer VerticalScrollBarVisibility="Auto" MaxHeight="300"><StackPanel x:Name="PnlCfgMonitor" Margin="10"/></ScrollViewer>
+        <ScrollViewer VerticalScrollBarVisibility="Auto" MaxHeight="320"><StackPanel x:Name="PnlCfgMonitor" Margin="10"/></ScrollViewer>
       </TabItem>
       <TabItem Header="General">
-        <ScrollViewer VerticalScrollBarVisibility="Auto" MaxHeight="300"><StackPanel x:Name="PnlCfgGeneral" Margin="10"/></ScrollViewer>
+        <ScrollViewer VerticalScrollBarVisibility="Auto" MaxHeight="320">
+          <StackPanel Margin="10">
+            <StackPanel x:Name="PnlCfgGeneral"/>
+            <Border BorderBrush="{DynamicResource AppIdColor}" BorderThickness="0,1,0,0" Margin="0,8,0,10"/>
+            <TextBlock Text="Dependencies" Foreground="{DynamicResource AppFgColor}" FontWeight="SemiBold" Margin="0,0,0,4"/>
+            <TextBlock Text="Check that each monitored app can be fault-identified on THIS machine (detects each app's .NET runtime and confirms the stack-walker can load it - no dump needed). Start the apps first for the most accurate result." Foreground="{DynamicResource AppIdColor}" TextWrapping="Wrap" Margin="0,0,0,6"/>
+            <Button x:Name="BtnMonVerify" Content="Verify deps (monitored apps)" Height="30" MinWidth="200" HorizontalAlignment="Left" Margin="0,0,0,4"/>
+            <TextBlock x:Name="LblMonVerify" Foreground="{DynamicResource AppIdColor}" TextWrapping="Wrap"/>
+          </StackPanel>
+        </ScrollViewer>
+      </TabItem>
+      <TabItem Header="Log">
+        <StackPanel Margin="10">
+          <DockPanel Margin="0,0,0,4">
+            <TextBlock DockPanel.Dock="Left" Text="Compression" Foreground="{DynamicResource AppFgColor}" FontWeight="SemiBold" VerticalAlignment="Center" Margin="0,0,10,0"/>
+            <TextBlock x:Name="LblMonCompress" Text="idle" Foreground="{DynamicResource AppIdColor}" VerticalAlignment="Center" TextTrimming="CharacterEllipsis"/>
+          </DockPanel>
+          <ProgressBar x:Name="PbMonCompress" Height="6" Minimum="0" Maximum="100" Value="0" Margin="0,0,0,10"/>
+          <DockPanel Margin="0,0,0,4">
+            <TextBlock DockPanel.Dock="Left" Text="Monitor log (live)" Foreground="{DynamicResource AppFgColor}" FontWeight="SemiBold" VerticalAlignment="Center"/>
+            <CheckBox x:Name="ChkMonTail" DockPanel.Dock="Right" Content="Live tail" IsChecked="True" Foreground="{DynamicResource AppFgColor}" VerticalAlignment="Center"/>
+          </DockPanel>
+          <TextBox x:Name="TxtMonLog" Height="160" IsReadOnly="True" VerticalScrollBarVisibility="Auto"
+                   TextWrapping="NoWrap" HorizontalScrollBarVisibility="Auto" FontFamily="Consolas" FontSize="11"
+                   Background="{DynamicResource CardBgColor}" Foreground="{DynamicResource AppFgColor}"/>
+        </StackPanel>
       </TabItem>
     </TabControl>
     <StackPanel Orientation="Horizontal">
       <Button x:Name="BtnMonSave"   Content="Save config" Height="28" MinWidth="110" Margin="0,0,8,0"/>
       <Button x:Name="BtnMonReload" Content="Reload"      Height="28" MinWidth="80"/>
     </StackPanel>
-
-    <Border BorderBrush="{DynamicResource AppIdColor}" BorderThickness="0,1,0,0" Margin="0,12,0,10"/>
-    <DockPanel Margin="0,0,0,4">
-      <TextBlock DockPanel.Dock="Left" Text="Compression" Foreground="{DynamicResource AppFgColor}" FontWeight="SemiBold" VerticalAlignment="Center" Margin="0,0,10,0"/>
-      <TextBlock x:Name="LblMonCompress" Text="idle" Foreground="{DynamicResource AppIdColor}" VerticalAlignment="Center" TextTrimming="CharacterEllipsis"/>
-    </DockPanel>
-    <ProgressBar x:Name="PbMonCompress" Height="6" Minimum="0" Maximum="100" Value="0" Margin="0,0,0,12"/>
-
-    <Border BorderBrush="{DynamicResource AppIdColor}" BorderThickness="0,1,0,0" Margin="0,0,0,10"/>
-    <DockPanel Margin="0,0,0,4">
-      <TextBlock DockPanel.Dock="Left" Text="Monitor log (live)" Foreground="{DynamicResource AppFgColor}" FontWeight="SemiBold" VerticalAlignment="Center"/>
-      <CheckBox x:Name="ChkMonTail" DockPanel.Dock="Right" Content="Live tail" IsChecked="True" Foreground="{DynamicResource AppFgColor}" VerticalAlignment="Center"/>
-    </DockPanel>
-    <TextBox x:Name="TxtMonLog" Height="130" IsReadOnly="True" VerticalScrollBarVisibility="Auto"
-             TextWrapping="NoWrap" HorizontalScrollBarVisibility="Auto" FontFamily="Consolas" FontSize="11"
-             Background="{DynamicResource CardBgColor}" Foreground="{DynamicResource AppFgColor}"/>
   </StackPanel>
 </ScrollViewer>
