@@ -5,6 +5,17 @@ truth; each release is tagged `vX.Y.Z` and published as a GitHub release by `scr
 
 <!-- NEW RELEASES INSERTED BELOW -->
 
+## [v1.0.48] - 2026-10-28
+Changes since v1.0.47:
+
+### Features
+- move the live monitor log into its own sub-tab and Verify deps into General (#72) (31949ca)
+
+### Fixes
+- never prune a dump that still has a pending outbox event (un-flushed) (#75) (18c91c6)
+- delete dumps after the flush handles them; keep only failed-uploads; retire Suppressed/Recycle (#73) (47e7cc7)
+
+
 ## [v1.0.47] - 2026-10-28
 Changes since v1.0.46:
 
@@ -385,6 +396,7 @@ Changes since v1.0.0:
 - WPF/XAML launcher (GUI default, `-CLI` text menu) with shared light/dark theme.
 - Shared components (logging, admin/signature/prompt/version helpers) under `src/Common`.
 - Bootstrap installer (`src/Get.ps1` + `src/run.bat`) with version check against GitHub.
+
 
 
 
