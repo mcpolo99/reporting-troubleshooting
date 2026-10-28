@@ -5,6 +5,16 @@ truth; each release is tagged `vX.Y.Z` and published as a GitHub release by `scr
 
 <!-- NEW RELEASES INSERTED BELOW -->
 
+## [v1.0.43] - 2026-10-28
+Changes since v1.0.42:
+
+### Features
+- upload dumps under the server-issued grant from the events 202 (#38) (d363fce)
+
+### Fixes
+- conform the edge event+upload to the fleet wire contract so grants issue (#38) (42bac6c)
+
+
 ## [v1.0.42] - 2026-10-28
 Changes since v1.0.41:
 
@@ -334,6 +344,7 @@ Changes since v1.0.0:
 - WPF/XAML launcher (GUI default, `-CLI` text menu) with shared light/dark theme.
 - Shared components (logging, admin/signature/prompt/version helpers) under `src/Common`.
 - Bootstrap installer (`src/Get.ps1` + `src/run.bat`) with version check against GitHub.
+
 
 
 
