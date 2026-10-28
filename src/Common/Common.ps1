@@ -57,7 +57,7 @@ function ConvertFrom-ProcDumpArgs {
     $e = $false; $elvl = ''
     for ($i = 0; $i -lt $t.Count; $i++) { if ($t[$i] -ieq '-e') { $e = $true; if ($i + 1 -lt $t.Count -and $t[$i + 1] -match '^\d+$') { $elvl = $t[$i + 1] } } }
     [ordered]@{
-        FullDump        = [bool]($t -contains '-ma')
+        DumpType        = if ($t -contains '-ma') { 'Full' } elseif ($t -contains '-mp') { 'MiniPlus' } else { 'Mini' }   # -ma/-mp are mutually exclusive; neither = Mini
         OnException     = $e
         ExceptionLevel  = $elvl          # '' = -e (unhandled only); '1' = -e 1 (also first-chance)
         OnHang          = [bool]($t -contains '-h')
@@ -69,7 +69,7 @@ function ConvertFrom-ProcDumpArgs {
 function ConvertTo-ProcDumpArgs {
     param($Toggles)
     $a = @('-accepteula')
-    if ($Toggles.FullDump)    { $a += '-ma' }
+    switch ("$($Toggles.DumpType)") { 'Full' { $a += '-ma' } 'MiniPlus' { $a += '-mp' } default { } }   # Mini = neither flag (ProcDump default)
     if ($Toggles.OnException) {
         $a += '-e'
         $lvl = "$($Toggles.ExceptionLevel)".Trim()   # blank/0 = -e (unhandled only); a positive number = -e <n> (e.g. 1 = first-chance)
