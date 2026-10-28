@@ -1,9 +1,49 @@
-# Changelog
+﻿# Changelog
 
 All notable changes to the reporting-troubleshooting toolset. The `VERSION` file is the single source of
 truth; each release is tagged `vX.Y.Z` and published as a GitHub release by `scripts/New-Release.ps1`.
 
 <!-- NEW RELEASES INSERTED BELOW -->
+
+## [v1.0.42] - 2026-10-28
+Changes since v1.0.41:
+
+### Features
+- telemetry enabled by default now that endpoints ship with the build (7280df2)
+- ship the encoded telemetry endpoint blob with the build (1edaf9c)
+- fleet telemetry endpoints are a local untracked encoded blob, Bearer auth (26e7468)
+- Start/Stop Monitor act on the service when enabled, else a non-persistent run (78632ac)
+- a branch install disables the release monitor (stop+disable the shared task) so the branch can be tested (d76910e)
+- make telemetry operable from the monitor - config keys, outbox housekeeping, status (6ce9dab)
+- monitor runs the telemetry forwarder on a timer (off by default) and deploys it (abf8ff4)
+- forwarder uploads the full dump for a new signature and stamps the object key (94796cc)
+- edge telemetry transport client with local-default targets (backend = URL swap) (b10d552)
+- central heap enrichment - count Visual/FrameworkElement/BindingExpression for an escalated dump (58cb2f7)
+
+### Fixes
+- blank BaselinePath no longer crashes the triage worker (53311b3)
+- GUI-launched monitor no longer no-ops from an inherited RT_LIBRARY (e369095)
+- say 'Downloaded to' at the end of Get.ps1 and drop the trailing monitor-tab hint (6e24b43)
+- say 'Downloaded to' at the end of Get.ps1 and drop the trailing monitor-tab hint (fcefa79)
+- Start Monitor falls back to a non-persistent run when the task points at an old path (4c4d29e)
+- install branch builds to the normal location, not an isolated branch dir (92d5fe0)
+- run triage worker from src and keep Get.ps1 to install-only (12641a0)
+- fail loudly on an incomplete engine deploy instead of silently producing no JSON (1d88c23)
+- show the branch name + commit in the version label so a branch build is distinguishable (32eea83)
+- deploy Common recursively so the installed monitor gets the Dump engine (Common\Dump\*) (8a823f4)
+- branch install must not disable the shared monitor task (it broke Start); only stop prod's running capture (647e641)
+
+### Refactoring
+- drop redundant copy-model fallback in the -Triage worker path (ff159fc)
+- run monitor scripts in place from src; Enable only registers the task (no script copying) (5191d18)
+- branch builds install to the normal location (drop the half-isolation + takeover) (d0b44ba)
+- make the heap walk an opt-in edge tool (gated merge, reuse a result), not an auto path (2f988a3)
+
+### Tests
+- aggregate runner for the full dump+telemetry+heap suite (one command, exit code) (e7b3430)
+- deterministic tests for the heap-enrichment merge gating (synthetic result, no walk) (baeb394)
+- deterministic tests for the telemetry transport (synthetic events, local sinks) (4da6846)
+
 
 ## [v1.0.41] - 2026-10-27
 Changes since v1.0.40:
@@ -294,6 +334,7 @@ Changes since v1.0.0:
 - WPF/XAML launcher (GUI default, `-CLI` text menu) with shared light/dark theme.
 - Shared components (logging, admin/signature/prompt/version helpers) under `src/Common`.
 - Bootstrap installer (`src/Get.ps1` + `src/run.bat`) with version check against GitHub.
+
 
 
 
