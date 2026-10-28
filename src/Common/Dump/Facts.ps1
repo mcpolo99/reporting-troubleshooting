@@ -71,6 +71,10 @@ function Get-DumpFacts {
     )
     $action = if ($Decision) { "$($Decision.Action)" } else { 'keep' }
     $escalate = ($action -ne 'suppress')                 # upload the dump only on first sample / provisional
+    $occ = if ($Decision) { [int]$Decision.Count } else { 1 }   # this machine's occurrence count for the signature
+    # First time THIS device has seen the signature (per-machine count == 1). The backend keys its per-device
+    # grant off this so the SAME fault on different PCs each uploads a dump (mawi/fleet-telemetry#11, toolkit #68).
+    $firstSeenOnDevice = ($occ -le 1)
     $confidence = if ($IdObj.WalkPending) { 'low' } else { 'high' }
     $diag = Get-DumpDiagnosis $Sig
 
@@ -146,6 +150,7 @@ function Get-DumpFacts {
         deviceId       = $deviceId
         productVersion = $Sig.ImageVer
         capturedAtUtc  = $(if ($fi) { $fi.LastWriteTimeUtc.ToString('o') } else { $null })
+        firstSeenOnDevice = $firstSeenOnDevice   # top-level so the backend can project it for a per-(signature,deviceId) grant (#68 / fleet-telemetry#11)
         ids          = [ordered]@{
             eventId            = (New-DumpEventId)
             deviceId           = $deviceId
@@ -167,7 +172,7 @@ function Get-DumpFacts {
         severity       = (Get-DumpSeverity $Sig)
         isNewSignature = ($action -ne 'suppress')
         escalateDump   = $escalate
-        occurrenceCount = $(if ($Decision) { [int]$Decision.Count } else { $null })
+        occurrenceCount = $(if ($Decision) { $occ } else { $null })
         product      = [ordered]@{ image = $Sig.ImageName; imageVersion = $Sig.ImageVer }
         environment  = $environment
         dump         = [ordered]@{
