@@ -138,6 +138,14 @@ function Get-DumpFacts {
     [ordered]@{
         schema       = $script:FACTS_SCHEMA
         emittedAtUtc = (Get-Date).ToUniversalTime().ToString('o')
+        # Top-level index-projection keys the wire contract reads (polos-ab-infra CONTRACT.md 7). signatureId
+        # is LOAD-BEARING: first-seen detection and the dump-upload grant (5a) key off this exact top-level
+        # field, so it is mirrored here as well as in ids. class/severity are already top-level below.
+        # Passthrough/additive - does NOT change the signature recipe or grouping (schema stays v1).
+        signatureId    = $IdObj.Id
+        deviceId       = $deviceId
+        productVersion = $Sig.ImageVer
+        capturedAtUtc  = $(if ($fi) { $fi.LastWriteTimeUtc.ToString('o') } else { $null })
         ids          = [ordered]@{
             eventId            = (New-DumpEventId)
             deviceId           = $deviceId

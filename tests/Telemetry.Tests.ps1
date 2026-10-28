@@ -55,6 +55,16 @@ try {
     Write-Host 'idempotent re-run (nothing left to send)'
     $r2 = Send-OutboxEvents -Dir $dir -Config $cfg
     Check 're-run sends nothing'            ($r2.Sent -eq 0 -and $r2.Dumps -eq 0)
+
+    # http path decides dump upload from the /v1/events response grant, not from the event (server-minted,
+    # one-time, bounded by maxBytes). Pure decision - no network.
+    Write-Host 'upload-grant decision (http path)'
+    $withGrant = [pscustomobject]@{ uploadGrant = [pscustomobject]@{ token = 'g1'; maxBytes = 1000 } }
+    Check 'grant + small dump -> upload'    ((Resolve-UploadGrant -Response $withGrant -DumpBytes 500).Ok)
+    Check 'no grant -> no upload'           (-not (Resolve-UploadGrant -Response ([pscustomobject]@{}) -DumpBytes 500).Ok)
+    Check 'grant + oversize -> no upload'   ((Resolve-UploadGrant -Response $withGrant -DumpBytes 5000).Reason -eq 'too-large')
+    Check 'grant, no maxBytes -> upload'    ((Resolve-UploadGrant -Response ([pscustomobject]@{ uploadGrant = [pscustomobject]@{ token = 'g2' } }) -DumpBytes 999999).Ok)
+    Check 'grant decision carries token'    ((Resolve-UploadGrant -Response $withGrant -DumpBytes 500).Token -eq 'g1')
 }
 finally { Remove-Item -Recurse -Force $dir -ErrorAction SilentlyContinue }
 

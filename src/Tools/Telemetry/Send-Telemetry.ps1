@@ -36,6 +36,6 @@ Say $(if ($k -ge 0) { "  baseline now lists $k signature(s)" } else { '  sync fa
 
 Say ("events -> {0}" -f $cfg.EventSink)
 $r = Send-OutboxEvents -Dir $Dir -Config $cfg
-Say ("  sent {0}, uploaded {1} dump(s) for new signatures, failed {2} (failed stay in the outbox for the next run)" -f $r.Sent, $r.Dumps, $r.Failed)
+Say ("  sent {0}, uploaded {1} dump(s) on server grant, failed {2} (failed stay in the outbox for the next run)" -f $r.Sent, $r.Dumps, $r.Failed)
 
 if ($r.Failed -gt 0) { exit 1 }

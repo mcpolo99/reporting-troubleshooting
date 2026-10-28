@@ -63,6 +63,22 @@ Check 'storm, no app -> hang-wpf-storm'    ((Get-DumpDiagnosis (New-Sig @{ Frame
 Check 'shallow framework -> framework-only' ((Get-DumpDiagnosis (New-Sig @{ Frames = @('MS.Win32.HwndSubclass.DefWndProcWrapper'); AppFrame = $null; StormOperations = @(); StormDominantCount = 0; StackDepth = 7 })).category -eq 'hang-framework-only')
 Check 'captureReason hung-window'          ((Get-DumpDiagnosis (New-Sig @{ Frames = @('A.B'); AppFrame = 'A.B'; AppFrameDepth = 1 })).captureReason -eq 'hung-window')
 
+Write-Host 'facts event: wire-contract top-level projection (CONTRACT.md 7 - signatureId is load-bearing)'
+$tmpDump = Join-Path $env:TEMP ('facts_{0}.dmp' -f ([guid]::NewGuid().ToString('N').Substring(0, 8)))
+Set-Content -LiteralPath $tmpDump -Value 'X' -Encoding ascii
+try {
+    $fsig = New-Sig @{ Kind = 'hang'; Frames = @('A.B', 'C.D'); ImageVer = '2.3.4' }
+    $fido = Get-DumpStableId $fsig
+    $fev  = Get-DumpFacts -Sig $fsig -IdObj $fido -DumpPath $tmpDump
+    Check 'top-level signatureId present'       ([bool]$fev.signatureId)
+    Check 'top-level signatureId == ids value'  ($fev.signatureId -eq $fev.ids.signatureId)
+    Check 'top-level signatureId == recipe id'  ($fev.signatureId -eq $fido.Id)
+    Check 'top-level deviceId mirrors ids'      ($fev.deviceId -eq $fev.ids.deviceId)
+    Check 'top-level productVersion = imageVer' ($fev.productVersion -eq '2.3.4')
+    Check 'top-level class + severity present'  ([bool]$fev.class -and [bool]$fev.severity)
+    Check 'top-level capturedAtUtc present'     ([bool]$fev.capturedAtUtc)
+} finally { Remove-Item -LiteralPath $tmpDump -Force -ErrorAction SilentlyContinue }
+
 Write-Host ''
 Write-Host ("{0}/{1} passed" -f ($script:count - $script:fail), $script:count) -ForegroundColor $(if ($script:fail) { 'Red' } else { 'Green' })
 if ($script:fail) { exit 1 } else { exit 0 }
