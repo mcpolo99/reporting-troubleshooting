@@ -28,11 +28,9 @@ $script:SharedStylesSchema = Join-Path $schemasPath 'SharedStyles.xaml'
 # tool entry scripts - relative (CLI launcher) and absolute (GUI runspaces)
 $script:ToolPerfView = 'Tools\PerfView\PerfViewCapture.ps1'
 $script:ToolMonitor  = 'Tools\ProcDump\ProcDumpMonitor.ps1'
-$script:ToolCase     = 'Tools\ProcDump\ProcDumpCase.ps1'
 $script:ToolPackages = 'Tools\Packages\PackagesTool.ps1'
 $script:ToolPerfViewPath = Join-Path $PSScriptRoot $script:ToolPerfView
 $script:ToolMonitorPath  = Join-Path $PSScriptRoot $script:ToolMonitor
-$script:ToolCasePath     = Join-Path $PSScriptRoot $script:ToolCase
 $script:ToolPackagesPath = Join-Path $PSScriptRoot $script:ToolPackages
 
 # A fatal startup failure (e.g. a Group-Policy-enforced execution policy that blocks loading the component

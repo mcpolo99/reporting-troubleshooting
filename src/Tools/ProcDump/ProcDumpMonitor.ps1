@@ -439,6 +439,9 @@ function Get-DumpInfo([string]$Path) {
 }
 
 function Get-DumpApp($cfg, [string]$FileName) {
+    # New scheme: match the <process> token exactly. Fall back to a prefix match for any legacy-named dump.
+    $proc = Get-DumpProcessFromName $FileName
+    if ($proc) { return ($cfg.Apps | Where-Object { [IO.Path]::GetFileNameWithoutExtension($_) -ieq $proc } | Select-Object -First 1) }
     $cfg.Apps | Where-Object { $FileName -like "$([IO.Path]::GetFileNameWithoutExtension($_))*" } | Select-Object -First 1
 }
 
@@ -477,6 +480,27 @@ function Invoke-NewDumps($cfg, $known, $pending, $recent, $lastInfo) {
 
         $app  = Get-DumpApp $cfg $d.Name
         $info = try { Get-DumpInfo $d.FullName } catch { $null }
+
+        # Rename the placeholder ProcDump wrote to the final convention now that the reason is known:
+        # ProcDump_<pc>_<process>_<tag>_<yyyyMMdd>_<HHmmss>.dmp. The monitor is the single owner of the name, so
+        # this happens before the .info.txt sidecar is written and before the deep triage worker is enqueued.
+        $proc = if ($app) { [IO.Path]::GetFileNameWithoutExtension($app) } else { Get-DumpProcessFromName $d.Name }
+        $tag  = Get-DumpTag -Code $(if ($info) { $info.Code } else { $null }) -Trigger $(if ($info) { $info.Trigger } else { '' })
+        $finalName = New-DumpFileName -Computer $env:COMPUTERNAME -Process $proc -Tag $tag -When $d.CreationTime
+        if ($finalName -ne $d.Name) {
+            $finalPath = Join-Path $cfg.DumpDir $finalName
+            if (Test-Path -LiteralPath $finalPath) {   # same pc/process/tag/second -> disambiguate
+                $stem = $finalName -replace '\.dmp$', ''; $n = 2
+                do { $finalName = '{0}_{1}.dmp' -f $stem, $n; $finalPath = Join-Path $cfg.DumpDir $finalName; $n++ } while (Test-Path -LiteralPath $finalPath)
+            }
+            try {
+                Move-Item -LiteralPath $d.FullName -Destination $finalPath -Force -ErrorAction Stop
+                [void]$known.Remove($d.FullName); [void]$known.Add($finalPath)
+                Write-Log "Renamed dump $($d.Name) -> $finalName"
+                $d = Get-Item -LiteralPath $finalPath
+            } catch { Write-Log "Could not rename $($d.Name) to $finalName (in use?): $($_.Exception.Message)" 'WARN' }
+        }
+
         $ver  = if ($app -and $lastInfo[$app]) { $lastInfo[$app] } else { @('(no version info recorded for this app)') }
 
         # ---- duplicate detection (same process frozen at the same event) ----
@@ -1100,7 +1124,7 @@ function Invoke-Monitor {
                     Close-ProcDumpCapture $st
                     $monitors.Remove($app)
                     $code = try { $st.Process.ExitCode } catch { '?' }
-                    $made = @(Get-ChildItem -Path $cfg.DumpDir -Filter "$appName*.dmp" -File -ErrorAction SilentlyContinue |
+                    $made = @(Get-ChildItem -Path $cfg.DumpDir -Filter "ProcDump_*_${appName}_*.dmp" -File -ErrorAction SilentlyContinue |
                               Where-Object { $_.CreationTime -ge $st.Started.AddSeconds(-2) })
                     # Re-arm cooldown. Wait before re-arming whenever the SAME process is still alive - not only
                     # after a dump was written - and never faster than 60s, so a ProcDump that keeps exiting (caught
@@ -1125,9 +1149,11 @@ function Invoke-Monitor {
                     Write-Log "Cooldown for $app over$(if ($pidsNow -ne $cd.Pids) { ' (process changed)' }) - re-arming ProcDump."
                 }
 
-                # Dump filename template: ProcDump substitutes PROCESSNAME/YYMMDD/HHMMSS; we add the computer
-                # name so a dump's origin is obvious. Keeps PROCESSNAME first so "$appName*.dmp" matching holds.
-                $dumpTemplate = Join-Path $cfg.DumpDir ('PROCESSNAME_{0}_YYMMDD_HHMMSS.dmp' -f $env:COMPUTERNAME)
+                # Dump filename template. ProcDump can only substitute PROCESSNAME/YYMMDD/HHMMSS and has no token
+                # for which trigger (exception vs hang) fired, so we capture with a placeholder tag ('pending')
+                # and Invoke-NewDumps renames to the final ProcDump_<pc>_<process>_<tag>_<yyyyMMdd>_<HHmmss>.dmp
+                # once it has read the dump's reason. The computer name makes a dump's origin obvious.
+                $dumpTemplate = Join-Path $cfg.DumpDir ('ProcDump_{0}_PROCESSNAME_pending_YYMMDD_HHMMSS.dmp' -f $env:COMPUTERNAME)
                 $argLine = "$pdArgs $app `"$dumpTemplate`""
                 try {
                     # Capture with the ProcDump matching the app's bitness so the dump stays walkable for a

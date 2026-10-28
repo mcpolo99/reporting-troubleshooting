@@ -79,6 +79,19 @@ try {
     Check 'top-level capturedAtUtc present'     ([bool]$fev.capturedAtUtc)
 } finally { Remove-Item -LiteralPath $tmpDump -Force -ErrorAction SilentlyContinue }
 
+Write-Host 'dump file naming (ProcDump_<pc>_<process>_<tag>_<yyyyMMdd>_<HHmmss>.dmp)'
+$when = Get-Date '2026-10-28 14:30:05'
+$fn = New-DumpFileName -Computer 'PC01' -Process 'bSuite' -Tag 'hang' -When $when
+Check 'builds the full scheme'          ($fn -eq 'ProcDump_PC01_bSuite_hang_20261028_143005.dmp')
+Check 'six underscore-delimited fields' ((([IO.Path]::GetFileNameWithoutExtension($fn)) -split '_').Count -eq 6)
+Check 'tag: exception when code set'     ((Get-DumpTag -Code ([uint32]3221225477) -Trigger '') -eq 'exception')   # 0xC0000005
+Check 'tag: hang from trigger text'      ((Get-DumpTag -Code $null -Trigger 'Hung window detected') -eq 'hang')
+Check 'tag: manual otherwise'            ((Get-DumpTag -Code $null -Trigger 'Timed: process ran') -eq 'manual')
+Check 'process token round-trips'        ((Get-DumpProcessFromName $fn) -eq 'bSuite')
+Check 'process token: legacy name null'  ($null -eq (Get-DumpProcessFromName 'bSuite.exe_261019_084858.dmp'))
+Check 'underscores in token collapse'    ((New-DumpFileName -Computer 'PC01' -Process 'my_app' -Tag 'hang' -When $when) -eq 'ProcDump_PC01_my-app_hang_20261028_143005.dmp')
+Check 'empty token -> fallback'          ((Get-DumpProcessFromName (New-DumpFileName -Computer 'PC01' -Process '' -Tag 'hang' -When $when)) -eq 'app')
+
 Write-Host ''
 Write-Host ("{0}/{1} passed" -f ($script:count - $script:fail), $script:count) -ForegroundColor $(if ($script:fail) { 'Red' } else { 'Green' })
 if ($script:fail) { exit 1 } else { exit 0 }
