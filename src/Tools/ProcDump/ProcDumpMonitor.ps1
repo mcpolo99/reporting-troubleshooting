@@ -119,9 +119,9 @@ function Get-DefaultConfig {
         BaselinePath     = ''           # optional: JSON of already-analysed ids to suppress even the first time (blank = installed baseline beside the script)
         TelemetryEnabled = $false       # periodically forward events / sync known-sigs / upload new-signature dumps
         TelemetrySeconds = 300          # how often the monitor flushes telemetry (when enabled)
-        # The ingest/registry/silo endpoints and the send-only device key are NOT config: they are baked into
-        # the build (encoded, see Common\Telemetry.ps1 Get-TelemetryEndpoints) so they are not clear text in
-        # config.json or the UI. Until a real blob is baked, telemetry stays in local-file mode.
+        # The ingest/registry/silo endpoints and the send-only device key are NOT config: they ship with the
+        # build as an encoded blob (see Common\Telemetry.ps1 Get-TelemetryEndpoints), so they are not clear
+        # text in config.json or the UI and need no manual per-machine step.
         LogKeep          = 20
         LogMaxMB         = 10
         RunMode          = 'Logon'      # Logon = as user at logon (GUI apps, hang detection) | Startup = SYSTEM at boot

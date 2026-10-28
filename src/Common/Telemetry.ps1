@@ -8,25 +8,28 @@
 # baked into the build as one encoded blob (Get-TelemetryEndpoints), so the URL/key are not clear text and do
 # not grep out of the files or repo. It is still only a public send-only ingest key - encoding just stops
 # trivial extraction. Only operational toggles stay in config: TelemetryEnabled / TelemetrySeconds, plus the
-# machine's own DumpDir and local BaselinePath. Until a real blob is baked, the endpoints are blank and the
-# transport runs in local-file mode (under KnownIssues), so the whole flow is testable before any backend.
+# machine's own DumpDir and local BaselinePath. If the blob is ever emptied, the endpoints fall back to local
+# files under KnownIssues, so the flow still runs offline.
 
-# The endpoint set is an encoded blob (gzip+Base64 of {"e":<events>,"k":<known>,"d":<dumps>,"key":<deviceKey>}).
-# It is NEVER committed: the real blob lives only in a local, untracked file placed on each machine out-of-band
-# (the monitor data dir, see below). This source constant stays EMPTY so the public repo carries no key; empty
-# and no local file = local-file mode. Generate the local blob with scripts\New-TelemetryBlob.ps1 -Save.
-$script:TelemetryBlob = ''
+# The endpoint set is an encoded blob (gzip+Base64 of {"e":<events>,"k":<known>,"d":<dumps>,"key":<deviceKey>})
+# that SHIPS WITH THE BUILD: it is committed here and deploys with every update, so machines never need a
+# manual key step. The key is only a public send-only ingest key; encoding keeps the URL/key out of clear text
+# and out of grep - obfuscation, not secrecy. Regenerate with scripts\New-TelemetryBlob.ps1 (prints the blob).
+$script:TelemetryBlob = 'H4sIAAAAAAAEAI2NUQqDMBAF77LfRaPZZKOXKZvkhYJKpOZHSu9ee4L2c2CYeVGmmR6t7cfc9w0rNrTn2e11rYfGLtWNboQ/nAXnZZW23INYEQVr4TyZyfvkRh9THHVAuMCWaJldZqcmIQhgMZTCkoWNyfqN/Ry+P6EHNdK6AAAA'
+# Optional per-machine OVERRIDE: a local untracked telemetry.blob (same format) takes precedence over the
+# shipped blob - e.g. to point a test machine at a different backend. Absent -> the shipped blob is used.
 $script:TelemetryBlobFile = Join-Path $env:ProgramData 'ReportingTroubleshooting\Monitor\telemetry.blob'
 
-# Decode the blob into @{EventSink;KnownSource;DumpTarget;DeviceKey}. Prefers the local untracked file; falls
-# back to the (normally empty) source constant. Any value absent/blank -> $null, which Get-TelemetryConfig
-# turns into the local-file fallback. Never throws: a missing/bad/empty blob = local mode.
+# Decode the blob into @{EventSink;KnownSource;DumpTarget;DeviceKey}. A local override file wins; otherwise the
+# shipped blob. Any value absent/blank -> $null, which Get-TelemetryConfig turns into the local-file fallback.
+# Never throws: a missing/bad/empty blob = local mode.
 function Get-TelemetryEndpoints {
     $empty = @{ EventSink = $null; KnownSource = $null; DumpTarget = $null; DeviceKey = $null }
-    $blob = $script:TelemetryBlob
-    if ([string]::IsNullOrWhiteSpace($blob) -and (Test-Path -LiteralPath $script:TelemetryBlobFile)) {
+    $blob = $null
+    if (Test-Path -LiteralPath $script:TelemetryBlobFile) {
         try { $blob = (Get-Content -LiteralPath $script:TelemetryBlobFile -Raw).Trim() } catch {}
     }
+    if ([string]::IsNullOrWhiteSpace($blob)) { $blob = $script:TelemetryBlob }
     if ([string]::IsNullOrWhiteSpace($blob)) { return $empty }
     try {
         $bytes = [Convert]::FromBase64String($blob)

@@ -4,14 +4,18 @@
   Encode the fleet telemetry endpoints + send-only key into the opaque blob the client reads, and decode one
   back to verify.
 
-  The blob is NEVER committed. It is written to a local, untracked file on each machine
-  (%ProgramData%\ReportingTroubleshooting\Monitor\telemetry.blob); the source constant $script:TelemetryBlob
-  stays empty in git. Encoding only keeps the URL/key out of clear text / out of grep - it is still a public
-  send-only ingest key; this is obfuscation, not secrecy. Keep the clear values out of git entirely.
+  By default it PRINTS the blob to paste into Common\Telemetry.ps1 ($script:TelemetryBlob) - that blob ships
+  with the build, so machines get the endpoints with the normal update and need no manual step. -Save instead
+  writes a local, untracked per-machine override file. Encoding only keeps the URL/key out of clear text / out
+  of grep - it is still a public send-only ingest key; this is obfuscation, not secrecy. Never put the CLEAR
+  values in git - only the encoded blob.
 
 .USAGE
-  # write the blob to the local untracked file on THIS machine (one host for all three endpoints; the client
-  # appends /v1/events, /v1/known-signatures, /v1/dumps):
+  # print the blob to paste into Common\Telemetry.ps1 (ships with updates; client appends /v1/events,
+  # /v1/known-signatures, /v1/dumps to the host):
+  .\New-TelemetryBlob.ps1 -BaseUrl https://telemetry.example.com -DeviceKey ftk_xxx
+
+  # or write a per-machine local override instead of editing source:
   .\New-TelemetryBlob.ps1 -BaseUrl https://telemetry.example.com -DeviceKey ftk_xxx -Save
 
   # or distinct hosts:
@@ -67,7 +71,8 @@ if ($Save) {
     Set-Content -LiteralPath $BlobFile -Value $blob -Encoding ASCII
     Write-Host "Wrote the telemetry blob to $BlobFile (local, untracked - never commit this)."
 } else {
-    Write-Host "Write this to the local untracked file $BlobFile (or re-run with -Save to write it there):"
+    Write-Host "Paste this into Common\Telemetry.ps1 as  `$script:TelemetryBlob = '<blob>'  (ships with updates),"
+    Write-Host "or re-run with -Save to write a local per-machine override at $BlobFile :"
     Write-Host ''
     Write-Host $blob
 }
