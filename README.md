@@ -75,7 +75,6 @@ All source lives under `src/`; repo-level maintainer scripts under `scripts/`; t
 |---|---|---|
 | `PerfView/PerfViewCapture.ps1` | Installs PerfView; one Start/Stop model for every ETW/ETL trace using size-capped collection profiles (Lean / Balanced / Full / Max). Start runs a single `collect` with the stop event always armed; an optional max-seconds field adds a time cap (0 = run until Stop); Stop (or any process writing the event) stops it, merges + zips and reports the file; Abort force-cancels | PerfView parked in a Tools folder |
 | `ProcDump/ProcDumpMonitor.ps1` | Self-installing background monitor (scheduled task) that auto-captures crash / hang / exception dumps and keeps the newest N | Yes (scheduled task; also copies `Common/` next to its installed copy) |
-| `ProcDump/ProcDumpCase.ps1` | One-shot "capture a case": runs an app under ProcDump, collects dumps + evidence, zips it | No - temporary |
 
 The launcher window drives these **in-process**: toggles, profile selection and actions (install,
 start/stop/abort capture, monitor install/start/stop, case capture) run in a background runspace

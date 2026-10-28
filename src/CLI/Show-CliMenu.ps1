@@ -2,8 +2,7 @@
 function Show-CliMenu {
     $items = @(
         @{ Name = 'PerfView performance tracing';   Path = $script:ToolPerfView },
-        @{ Name = 'ProcDump monitor (background)';   Path = $script:ToolMonitor },
-        @{ Name = 'One-shot process dump capture';   Path = $script:ToolCase }
+        @{ Name = 'ProcDump monitor (background)';   Path = $script:ToolMonitor }
     )
     while ($true) {
         Write-Host "`n========== Reporting & Troubleshooting toolset (v$ScriptVersion) ==========" -ForegroundColor Cyan

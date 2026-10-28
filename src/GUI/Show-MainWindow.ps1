@@ -24,7 +24,6 @@ function Show-MainWindow {
         TabPackages = script:Read-Xaml (Join-Path $tabsDir 'PackagesTab.xaml')
         TabPerfView = script:Read-Xaml (Join-Path $tabsDir 'PerfViewTab.xaml')
         TabMonitor  = script:Read-Xaml (Join-Path $tabsDir 'MonitorTab.xaml')
-        TabCase     = script:Read-Xaml (Join-Path $tabsDir 'CaseTab.xaml')
     }
     foreach ($tabName in $script:TabPages.Keys) {
         $tabItem = $w.FindName($tabName)
@@ -45,7 +44,6 @@ function Show-MainWindow {
                    'TxtPvProfName','PnlPvKernel','CmbPvClr','PnlPvProviders','TxtPvProvOther','TxtPvExtra','TxtPvCircular','TxtPvBuffer','BtnPvProfSave','BtnPvProfDelete','BtnPvProfDefault',
                    'TxtPvOutput','TxtPvSym','ChkPvMerge','ChkPvZip','BtnPvSettingsSave',
                    'BtnMonEnable','BtnMonStart','BtnMonStop','BtnMonStatus','BtnMonDisable','LblMonStatus','BtnMonVerify','LblMonVerify','PnlMonConfig','BtnMonSave','BtnMonReload','ChkMonTail','TxtMonLog',
-                   'TxtCaseExe','BtnCaseBrowse','CmbCaseMode','ChkCaseFusion','ChkCaseAppConfig','TxtCaseTimeout','BtnCaseRun','LblCaseStatus',
                    'BtnPkgInstallAll','BtnPkgRefresh','BtnPkgOpen','BtnPkgUpdate','LblPkgUpdate','PnlPackages','LblPkgStatus',
                    'BtnShortcut') {
         $el = $null
@@ -61,7 +59,7 @@ function Show-MainWindow {
     $script:RsMon = New-ToolRunspace -ToolPath $script:ToolMonitorPath  -Load
     $script:RsPkg = New-ToolRunspace -ToolPath $script:ToolPackagesPath -Load
     $script:RsUpd = New-ToolRunspace    # plain runspace for the lightweight GitHub update check (off the Pkg runspace)
-    $script:Busy  = @{ Pv = $false; Mon = $false; Case = $false; Pkg = $false }
+    $script:Busy  = @{ Pv = $false; Mon = $false; Pkg = $false }
     $script:PvProfiles = @()
     $script:PvLoading  = $false
     $script:MonCtls    = @{}
@@ -151,7 +149,7 @@ function Show-MainWindow {
     $script:RefreshPv  = [scriptblock]::Create("Start-ToolJob -Runspace `$script:RsPvCtl -Script { $($pvStatusSB.ToString()) }  -OnText `$script:SetPvStatus  | Out-Null")
     $script:RefreshMon = [scriptblock]::Create("Start-ToolJob -Runspace `$script:RsMon -Script { $($monStatusSB.ToString()) } -OnText `$script:SetMonStatus | Out-Null")
 
-    $script:ToolName = @{ Pv = 'PerfView'; Mon = 'Monitor'; Pkg = 'Packages'; Case = 'Case' }
+    $script:ToolName = @{ Pv = 'PerfView'; Mon = 'Monitor'; Pkg = 'Packages' }
     function script:Invoke-Action($toolKey, $rs, [scriptblock]$sb, [object[]]$argList, [scriptblock]$onDone) {
         if ($script:Busy[$toolKey]) {
             $n = $script:ToolName[$toolKey]; if (-not $n) { $n = $toolKey }
@@ -590,42 +588,6 @@ function Show-MainWindow {
         if ($script:UpdateAvailable) { script:Do-AppUpdate } else { script:Check-ForUpdate }
     })
 
-    # ---------- Case ----------
-    $script:BtnCaseBrowse.Add_Click({
-        $dlg = New-Object System.Windows.Forms.OpenFileDialog
-        $dlg.Filter = 'Executable (*.exe)|*.exe|All files (*.*)|*.*'
-        if ($dlg.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) { $script:TxtCaseExe.Text = $dlg.FileName }
-    })
-    $script:BtnCaseRun.Add_Click({
-        $exe = $script:TxtCaseExe.Text
-        if (-not $exe -or -not (Test-Path $exe)) { & $script:Append 'Case: enter a valid exe path first.'; return }
-        if ($script:Busy['Case']) { & $script:Append 'Case: a capture is already running.'; return }
-        $mode = switch ($script:CmbCaseMode.SelectedIndex) { 1 { 'crash' } 2 { 'hang' } 3 { 'exit' } default { 'auto' } }
-        $fusion = [bool]$script:ChkCaseFusion.IsChecked
-        $appcfg = [bool]$script:ChkCaseAppConfig.IsChecked; $to = 0
-        [void][int]::TryParse($script:TxtCaseTimeout.Text, [ref]$to); if ($to -lt 1) { $to = 300 }
-        $casePath = $script:ToolCasePath
-        $script:Busy['Case'] = $true
-        $script:LblCaseStatus.Text = 'capturing...'
-        & $script:Append "Case: starting capture of $exe (mode: $mode) ..."
-        $script:RsCaseLast = New-ToolRunspace -ToolPath $casePath
-        $sb = {
-            param($casePath, $exe, $mode, $fusion, $appcfg, $to)
-            $a = @{ ExePath = $exe; NoElevate = $true; AllowDownload = $true; TimeoutSeconds = [int]$to }
-            switch ($mode) {
-                'crash' { $a.Unhandled  = $true }
-                'hang'  { $a.Hang       = $true }
-                'exit'  { $a.DumpOnExit = $true }
-                default { $a.Auto       = $true }
-            }
-            if ($fusion) { $a.FusionLog = $true }
-            if ($appcfg) { $a.IncludeAppConfig = $true }
-            & $casePath @a
-        }
-        $done = { $script:Busy['Case'] = $false; $script:LblCaseStatus.Text = 'capture finished'; try { $script:RsCaseLast.Close() } catch {} }
-        Start-ToolJob -Runspace $script:RsCaseLast -Script $sb -ArgList @($casePath, $exe, $mode, $fusion, $appcfg, $to) -OnText $script:Append -OnDone $done | Out-Null
-    })
-
     # ---------- desktop shortcut ----------
     $script:BtnShortcut.Add_Click({
         try {
@@ -635,7 +597,7 @@ function Show-MainWindow {
     })
 
     # ---------- initial load ----------
-    foreach ($nTb in @($script:TxtPvSeconds, $script:TxtPvCircular, $script:TxtPvBuffer, $script:TxtCaseTimeout)) { script:Set-NumericOnly $nTb }
+    foreach ($nTb in @($script:TxtPvSeconds, $script:TxtPvCircular, $script:TxtPvBuffer)) { script:Set-NumericOnly $nTb }
     script:Build-PvToggles
     # crash recovery: a trace left active by a previous (crashed/killed) session is aborted now
     if (Test-Path $script:PvActiveFile) { & $script:Append 'Found an orphaned PerfView trace from a previous session - aborting it.'; script:Stop-PerfViewHard }
