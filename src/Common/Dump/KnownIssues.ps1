@@ -87,7 +87,8 @@ function Register-DumpOccurrence {
         [Parameter(Mandatory)][string]$DumpPath,
         [string]$Dir,
         [string]$BaselinePath,
-        [bool]$SuppressKnown = $true
+        [bool]$SuppressKnown = $true,
+        [bool]$DeviceUploaded = $false   # backend profile (CONTRACT 4a) says THIS device already uploaded this signature
     )
     if (-not $Dir) { $Dir = Get-KnownIssuesDir }
     $machineKey = Get-MachineKey
@@ -133,6 +134,10 @@ function Register-DumpOccurrence {
         if ($baselineKnown) { $issue.baselineKnown = $true }
         if ($provisional) {
             $action = 'defer'; $reason = 'id provisional (stack walk pending) - keeping dump'
+        } elseif ($DeviceUploaded) {
+            # Durable per-device dedup: the backend already holds a dump for this (signature, device), so stop
+            # collecting it here - suppress even if the LOCAL registry was lost (reinstall/reset). No sample kept.
+            $action = 'suppress'; $reason = 'device already uploaded a dump for this signature (profile)'
         } elseif (-not $SuppressKnown) {
             $action = 'keep'; $reason = 'suppression disabled'
             if (-not $hasSample) { $m.sample = $DumpPath }

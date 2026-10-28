@@ -324,7 +324,7 @@ function Sync-DeviceProfile {
         $data = Invoke-RestMethod -Method Get -Uri $uri -Headers (Get-AuthHeaders $Config) -TimeoutSec 30
         $map = @{}
         foreach ($e in @($data.entries)) { if ($e.signatureId) { $map["$($e.signatureId)"] = "$($e.state)" } }
-        $path = Join-Path (Get-KnownIssuesDir) 'device-profile.json'
+        $path = Get-DeviceProfilePath
         $dir = Split-Path -Parent $path
         if ($dir -and -not (Test-Path -LiteralPath $dir)) { New-Item -ItemType Directory -Path $dir -Force -ErrorAction Stop | Out-Null }
         ($map | ConvertTo-Json) | Set-Content -LiteralPath $path -Encoding UTF8 -ErrorAction Stop
@@ -332,18 +332,8 @@ function Sync-DeviceProfile {
     } catch { return -1 }
 }
 
-# Load the cached device profile as @{ signatureId -> state }. Empty if none/unreadable (offline-safe).
-function Get-DeviceProfile {
-    $path = Join-Path (Get-KnownIssuesDir) 'device-profile.json'
-    $map = @{}
-    if (Test-Path -LiteralPath $path) {
-        try {
-            $o = Get-Content -LiteralPath $path -Raw | ConvertFrom-Json
-            if ($o) { foreach ($p in $o.PSObject.Properties) { $map[$p.Name] = "$($p.Value)" } }
-        } catch {}
-    }
-    return $map
-}
+# Get-DeviceProfile / Get-DeviceProfilePath live in Common\Dump\Core.ps1 (dump engine) so the detached triage
+# worker can read the cached profile too; this transport module only writes it (Sync-DeviceProfile above).
 
 # Stream a file to an http endpoint with HttpClient. Windows PowerShell 5.1's Invoke-RestMethod -InFile buffers
 # the WHOLE file into memory before sending, so a ~1.6 GB dump spikes/fails on a constrained machine (#42 defect

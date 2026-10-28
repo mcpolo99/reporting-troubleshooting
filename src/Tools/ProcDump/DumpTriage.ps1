@@ -73,7 +73,7 @@ if ([string]::IsNullOrWhiteSpace("$baseline") -or -not (Test-Path -LiteralPath $
 function Say($m) { if (-not $Quiet) { Write-Host $m } }
 
 function Triage-One([string]$Path) {
-    $r = Invoke-DumpTriage -DumpPath $Path -ClrMdDll $clrmd -BaselinePath $baseline -SuppressKnown $suppressKnown
+    $r = Invoke-DumpTriage -DumpPath $Path -ClrMdDll $clrmd -BaselinePath $baseline -SuppressKnown $suppressKnown -DeviceProfile (Get-DeviceProfile)
     $name = [IO.Path]::GetFileName($Path)
     Say ("{0,-40} {1,-9} id={2} x{3,-4} {4}{5}" -f $name, $r.Action, $r.Id, $r.Count, $r.Leaf, $(if ($r.Disposition -and $r.Disposition -ne 'kept') { " ($($r.Disposition))" } else { '' }))
     return $r
