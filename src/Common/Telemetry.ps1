@@ -74,6 +74,18 @@ function Get-AuthHeaders($Config, [hashtable]$Extra) {
     return $h
 }
 
+# One-line reason from a web error record - the HTTP status when there is a response (e.g. 401 Unauthorized = the
+# device has no/invalid fleet key), else the exception message (DNS/TLS/proxy). Lets a swallowed sync failure say
+# WHY instead of a bare "sync failed".
+function Resolve-HttpError($err, $Config) {
+    try {
+        $r = $err.Exception.Response
+        if ($r -and $r.StatusCode) { return ('HTTP {0} {1}' -f [int]$r.StatusCode, "$($r.StatusCode)") }
+    } catch {}
+    $noKey = if ($Config -and -not $Config.DeviceKey) { ' (no fleet key configured on this device)' } else { '' }
+    return "$($err.Exception.Message)$noKey"
+}
+
 # How many flushes we re-attempt a wanted dump before giving up and parking it in failed-uploads (#42). The
 # event itself (if accepted) is never re-sent beyond this; only the dump upload is capped.
 $script:MaxDumpUploadAttempts = 3
@@ -307,7 +319,7 @@ function Sync-KnownSignatures {
         $b = Get-Content -LiteralPath $Config.BaselinePath -Raw -ErrorAction Stop | ConvertFrom-Json
         $ids = if ($null -eq $b) { @() } elseif ($b.issues) { $b.issues.PSObject.Properties.Name } elseif ($b -is [array]) { $b } else { @($b) }
         return @($ids).Count
-    } catch { return -1 }       # -1 = sync failed (keep the existing baseline)
+    } catch { Write-TelemetryLog ("known-signatures: sync error - {0}" -f (Resolve-HttpError $_ $Config)) 'WARN'; return -1 }   # -1 = keep the existing baseline
 }
 
 # Pull THIS device's collection profile (CONTRACT 4a: GET /v1/profile?deviceId) and cache it locally, so the
@@ -329,7 +341,29 @@ function Sync-DeviceProfile {
         if ($dir -and -not (Test-Path -LiteralPath $dir)) { New-Item -ItemType Directory -Path $dir -Force -ErrorAction Stop | Out-Null }
         ($map | ConvertTo-Json) | Set-Content -LiteralPath $path -Encoding UTF8 -ErrorAction Stop
         return $map.Count
-    } catch { return -1 }
+    } catch { Write-TelemetryLog ("device-profile: sync error - {0}" -f (Resolve-HttpError $_ $Config)) 'WARN'; return -1 }
+}
+
+# Reachability + auth probe for the configured telemetry service, for the "Test telemetry" button. Checks each
+# distinct https endpoint (EventSink / KnownSource / DumpTarget) with the SAME authenticated call the device
+# makes (GET /v1/known-signatures), so a green result means this machine can actually talk to the backend with
+# its fleet key. Returns a human-readable multi-line summary; never throws.
+function Test-Telemetry {
+    param($Config)
+    if (-not $Config) { $Config = Get-TelemetryConfig }
+    $lines = @('fleet key: ' + $(if ($Config.DeviceKey) { 'configured' } else { 'NOT configured on this device' }))
+    $bases = @($Config.EventSink, $Config.KnownSource, $Config.DumpTarget) | Where-Object { Test-IsHttp $_ } | Select-Object -Unique
+    if (@($bases).Count -eq 0) { return 'Telemetry is in local/offline mode (no https endpoint configured) - nothing to reach.' }
+    foreach ($base in $bases) {
+        try {
+            $sw = [Diagnostics.Stopwatch]::StartNew()
+            $null = Invoke-RestMethod -Method Get -Uri ($base.TrimEnd('/') + '/v1/known-signatures') -Headers (Get-AuthHeaders $Config) -TimeoutSec 15
+            $lines += ('OK    {0}  - reached + authenticated ({1} ms)' -f $base, $sw.ElapsedMilliseconds)
+        } catch {
+            $lines += ('FAIL  {0}  - {1}' -f $base, (Resolve-HttpError $_ $Config))
+        }
+    }
+    return ($lines -join "`n")
 }
 
 # Get-DeviceProfile / Get-DeviceProfilePath live in Common\Dump\Core.ps1 (dump engine) so the detached triage

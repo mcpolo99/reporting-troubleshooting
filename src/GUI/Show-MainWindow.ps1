@@ -43,7 +43,7 @@ function Show-MainWindow {
                    'CmbPvProfile','TxtPvLabel','BtnPvStart','BtnPvStop','BtnPvAbort','TxtPvSeconds','BtnPvOpen','BtnPvStatus','LblPvStatus',
                    'TxtPvProfName','PnlPvKernel','CmbPvClr','PnlPvProviders','TxtPvProvOther','TxtPvExtra','TxtPvCircular','TxtPvBuffer','BtnPvProfSave','BtnPvProfDelete','BtnPvProfDefault',
                    'TxtPvOutput','TxtPvSym','ChkPvMerge','ChkPvZip','BtnPvSettingsSave',
-                   'BtnMonEnable','BtnMonStart','BtnMonStop','BtnMonStatus','BtnMonDisable','LblMonStatus','BtnMonVerify','LblMonVerify','PnlCfgProcess','PnlCfgMonitor','PnlCfgGeneral','BtnMonSave','BtnMonReload','ChkMonTail','TxtMonLog','LblMonCompress','PbMonCompress',
+                   'BtnMonEnable','BtnMonStart','BtnMonStop','BtnMonStatus','BtnMonTestTelemetry','BtnMonDisable','LblMonStatus','BtnMonVerify','LblMonVerify','PnlCfgProcess','PnlCfgMonitor','PnlCfgGeneral','BtnMonSave','BtnMonReload','ChkMonTail','TxtMonLog','LblMonCompress','PbMonCompress',
                    'BtnPkgInstallAll','BtnPkgRefresh','BtnPkgOpen','BtnPkgUpdate','LblPkgUpdate','PnlPackages','LblPkgStatus',
                    'BtnShortcut') {
         $el = $null
@@ -501,6 +501,7 @@ function Show-MainWindow {
     $script:BtnMonStart.Add_Click({ & $script:Append 'Monitor: starting... (live attach/dump activity shows in the "Monitor log (live)" panel below)'; script:Invoke-Action 'Mon' $script:RsMon { Start-Monitor } @() $script:RefreshMon })
     $script:BtnMonStop.Add_Click({ & $script:Append 'Monitor: stopping...'; script:Invoke-Action 'Mon' $script:RsMon { Stop-Monitor (Read-Config) } @() $script:RefreshMon })
     $script:BtnMonStatus.Add_Click({ & $script:RefreshMon })
+    $script:BtnMonTestTelemetry.Add_Click({ & $script:Append 'Telemetry: testing reachability + auth...'; script:Invoke-Action 'Mon' $script:RsMon { Test-Telemetry } @() $null })
     $script:BtnMonDisable.Add_Click({ & $script:Append 'Monitor: disabling service...'; script:Invoke-Action 'Mon' $script:RsMon { Disable-Service } @() $script:RefreshMon })
     $script:BtnMonVerify.Add_Click({
         if ($script:Busy['Mon']) { & $script:Append 'Monitor: busy - try again in a moment.'; return }

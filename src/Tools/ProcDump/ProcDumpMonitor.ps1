@@ -94,6 +94,7 @@ if (-not $CommonDir) { throw "Shared components (Common\) not found from $MonScr
 . (Join-Path $CommonDir 'Logging.ps1')
 . (Join-Path $CommonDir 'Common.ps1')
 . (Join-Path $CommonDir 'Packages.ps1')
+. (Join-Path $CommonDir 'Telemetry.ps1')  # telemetry config/endpoints + Test-Telemetry (GUI "Test Telemetry" button)
 . (Join-Path $CommonDir 'DumpId.ps1')     # stable fault-signature + known-issues dedupe engine
 
 # ProcDump lives in the shared package store - single source of truth: Common\Packages.ps1.
