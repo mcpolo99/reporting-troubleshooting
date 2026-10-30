@@ -5,6 +5,13 @@ truth; each release is tagged `vX.Y.Z` and published as a GitHub release by `scr
 
 <!-- NEW RELEASES INSERTED BELOW -->
 
+## [v1.0.55] - 2026-10-30
+Changes since v1.0.54:
+
+### Fixes
+- captureComment is the reason only, not ProcDump's raw command line (dd29f8a)
+
+
 ## [v1.0.54] - 2026-10-30
 Changes since v1.0.53:
 
@@ -460,6 +467,7 @@ Changes since v1.0.0:
 - WPF/XAML launcher (GUI default, `-CLI` text menu) with shared light/dark theme.
 - Shared components (logging, admin/signature/prompt/version helpers) under `src/Common`.
 - Bootstrap installer (`src/Get.ps1` + `src/run.bat`) with version check against GitHub.
+
 
 
 
