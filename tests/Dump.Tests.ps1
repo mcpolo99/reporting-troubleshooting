@@ -99,6 +99,14 @@ try {
     Check 'event: missing file -> throws'   $threwMiss
 } finally { Remove-Item -LiteralPath $nd -Force -ErrorAction SilentlyContinue }
 
+Write-Host 'capture reason (strip ProcDump command line / unexpanded template / local path)'
+$cmt = "*** `"C:\ProgramData\ReportingTroubleshooting\Packages\sysinternals\procdump64.exe`"  -accepteula -ma -e -h -n 1 -w bSuite.exe `"C:\dumps\ProcDump_DESKTOP-795EJC2_PROCESSNAME_pending_YYMMDD_HHMMSS.dmp`" `n*** Hung window detected: e09b4"
+$reason = Get-DumpReason $cmt
+Check 'reason keeps the hang line'       ($reason -eq 'Hung window detected: e09b4')
+Check 'reason drops the procdump cmdline' ($reason -notmatch 'procdump')
+Check 'reason drops the template tokens'  ($reason -notmatch 'PROCESSNAME|YYMMDD|HHMMSS')
+Check 'reason: empty comment -> null'     ($null -eq (Get-DumpReason ''))
+
 Write-Host 'resting dump name (triage folds the tag into the gzip)'
 Check 'resting name replaces pending tag' ((Get-RestingDumpName 'ProcDump_PC01_bSuite_pending_20261028_143005.dmp' 'exception') -eq 'ProcDump_PC01_bSuite_exception_20261028_143005.dmp')
 Check 'resting name: non-scheme -> null'  ($null -eq (Get-RestingDumpName 'random.dmp' 'hang'))

@@ -43,6 +43,19 @@ function ConvertTo-DumpToken([string]$Text, [string]$Fallback = 'unknown') {
     if ($t) { $t } else { $Fallback }
 }
 
+# The human CAPTURE REASON out of ProcDump's comment stream. ProcDump records its full command line as the
+# first "*** ..." line - which echoes our output-filename TEMPLATE with the literal, UNEXPANDED tokens
+# (PROCESSNAME / YYMMDD / HHMMSS) and the local procdump path. That line is noise (and a local-path leak), so
+# we drop any line mentioning procdump and keep only the real reason line(s) (e.g. "Hung window detected: ..").
+# Returns the joined reason, or $null.
+function Get-DumpReason([string]$Comment) {
+    if (-not $Comment) { return $null }
+    $lines  = @("$Comment" -split "`r?`n" | ForEach-Object { ($_ -replace '^\*+\s*', '').Trim() } | Where-Object { $_ })
+    $reason = @($lines | Where-Object { $_ -notmatch '(?i)procdump(64|64a)?(\.exe)?["\s]' })
+    if (-not $reason.Count) { $reason = $lines }   # fallback: nothing matched the filter - keep what we have
+    if ($reason.Count) { $reason -join '; ' } else { $null }
+}
+
 # Capture reason tag from a parsed dump header: an exception record -> 'exception'; a hang trigger with no
 # exception record -> 'hang'; otherwise 'manual'. Takes primitives (not the $info object) so it is unit-testable.
 function Get-DumpTag {
