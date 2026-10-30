@@ -64,10 +64,14 @@ function Cfg($name, $default) { if ($cfg -and $null -ne $cfg.$name -and "$($cfg.
 if (-not $DumpDir) { $DumpDir = Cfg 'DumpDir' 'C:\dumps' }
 $suppressKnown  = [bool](Cfg 'SuppressKnown' $true)
 $clrmd    = Resolve-PackageTool 'clrmd'
-# shipped baseline of already-analysed ids lives beside the installed script; a blank config value means
-# "use that shipped baseline", and if even that is absent there is simply no baseline.
-$baseline = Cfg 'BaselinePath' (Join-Path $ScriptDir 'known-issues.baseline.json')
-if ([string]::IsNullOrWhiteSpace("$baseline") -or -not (Test-Path -LiteralPath $baseline)) { $baseline = $null }
+# Known store resolution order: an explicit config BaselinePath, else the SYNCED copy under KnownIssues (what
+# the backend sync writes), else the baseline SHIPPED with the build beside this script (so a fresh/offline box
+# still ignores already-analysed ids from first run). First existing wins; none -> no baseline.
+$synced = $null; try { $synced = (Get-TelemetryConfig).BaselinePath } catch {}
+$shipped = Join-Path $ScriptDir 'known-issues.baseline.json'
+$cfgBase = "$(Cfg 'BaselinePath' '')"
+$baseline = @($cfgBase, $synced, $shipped) | Where-Object { $_ -and (Test-Path -LiteralPath $_) } | Select-Object -First 1
+if ([string]::IsNullOrWhiteSpace("$baseline")) { $baseline = $null }
 
 # Write to the host, not the success pipeline - so a caller that captures Triage-One's return value gets
 # only the result object, and a detached worker's stdout stays clean.

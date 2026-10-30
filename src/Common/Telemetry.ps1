@@ -331,12 +331,26 @@ function Sync-KnownSignatures {
         $baseDir = Split-Path -Parent $Config.BaselinePath
         if ($baseDir -and -not (Test-Path -LiteralPath $baseDir)) { New-Item -ItemType Directory -Path $baseDir -Force -ErrorAction Stop | Out-Null }
         if (Test-IsHttp $Config.KnownSource) {
+            # ETag/304 (CONTRACT.md 4): send the cached ETag; an unchanged registry answers 304 and we keep the
+            # baseline as-is (cheap). The ETag is cached in a sidecar next to the baseline.
+            $etagFile = "$($Config.BaselinePath).etag"
             $headers = Get-AuthHeaders $Config
-            $data = Invoke-RestMethod -Method Get -Uri ($Config.KnownSource.TrimEnd('/') + '/v1/known-signatures') -Headers $headers -TimeoutSec 30
-            # The registry returns { signatures: [ { signature, status, ... } ], nextCursor }. The triage
-            # baseline only needs the id set, so store the ids as a flat array (the shape Test-BaselineKnown reads).
+            if (Test-Path -LiteralPath $etagFile) { try { $et = (Get-Content -LiteralPath $etagFile -Raw).Trim(); if ($et) { $headers['If-None-Match'] = $et } } catch {} }
+            try {
+                $resp = Invoke-WebRequest -Method Get -Uri ($Config.KnownSource.TrimEnd('/') + '/v1/known-signatures') -Headers $headers -TimeoutSec 30 -UseBasicParsing
+            } catch {
+                # PS 5.1 raises on a 304; treat that as "unchanged" and keep the current baseline.
+                $sc = $null; try { $sc = [int]$_.Exception.Response.StatusCode } catch {}
+                if ($sc -eq 304) { Write-TelemetryLog 'known-signatures: 304 not-modified - baseline unchanged'; return @(Get-KnownIds $Config.BaselinePath).Count }
+                throw
+            }
+            # The registry returns { signatures: [ { signature, status, ... } ], nextCursor }. The triage baseline
+            # only needs the id set, so store the ids as a flat array (the shape Get-KnownIds reads).
+            $data = $resp.Content | ConvertFrom-Json
             $ids = @($data.signatures | ForEach-Object { $_.signature } | Where-Object { $_ })
             (ConvertTo-Json -InputObject $ids) | Set-Content -LiteralPath $Config.BaselinePath -Encoding UTF8 -ErrorAction Stop
+            $newEtag = $null; try { $newEtag = "$($resp.Headers.ETag)" } catch {}
+            if ($newEtag) { try { Set-Content -LiteralPath $etagFile -Value $newEtag -Encoding ascii } catch {} }
         } elseif (Test-Path -LiteralPath $Config.KnownSource) {
             if ($Config.KnownSource -ne $Config.BaselinePath) { Copy-Item -LiteralPath $Config.KnownSource -Destination $Config.BaselinePath -Force -ErrorAction Stop }
         } else { return 0 }
@@ -415,6 +429,19 @@ function Move-ToManualOutbox {
             } catch { Write-TelemetryLog ("manual-collect: could not move dump {0}: {1}" -f $g.Name, $_.Exception.Message) 'WARN' }
         }
     }
+    # A manifest so an operator (and a re-ingest) knows what this set is: which machine, how much, and when.
+    # Resume is safe: dropping these event files back into an online box's outbox re-sends them, and the
+    # Idempotency-Key on each event dedupes any that already reached the backend (CONTRACT.md 3/8).
+    try {
+        $manifest = [ordered]@{
+            deviceId    = $env:COMPUTERNAME
+            collectedUtc = (Get-Date).ToUniversalTime().ToString('o')
+            events      = $events
+            dumps       = $dumps
+            note        = 'Re-ingest: copy the *.json reports into an online outbox (idempotent); upload the *.dmp.gz via the operator dump workflow.'
+        }
+        ($manifest | ConvertTo-Json) | Set-Content -LiteralPath (Join-Path $dest 'manifest.json') -Encoding UTF8
+    } catch {}
     Write-TelemetryLog ("manual-collect: moved {0} event(s) and {1} dump(s) to {2}" -f $events, $dumps, $dest)
     @{ Events = $events; Dumps = $dumps; Dest = $dest }
 }
