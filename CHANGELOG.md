@@ -5,6 +5,31 @@ truth; each release is tagged `vX.Y.Z` and published as a GitHub release by `scr
 
 <!-- NEW RELEASES INSERTED BELOW -->
 
+## [v1.0.54] - 2026-10-30
+Changes since v1.0.53:
+
+### Features
+- context-free Get-DumpEvent + single parse+id path (Resolve-DumpIdentity) (#01) (375f555)
+- offline-first known store + ETag/304 sync + manual-collect manifest (#09 #10) (320a424)
+- gzip dumps at rest, disk-budget retention, and offline-safe telemetry (7e286b7)
+- add Test Telemetry button + surface the real reason for sync failures (895bc9e)
+
+### Refactoring
+- armer only arms; a separate ingest worker owns dump detection/triage/retention (#16) (0af72a1)
+- remove dead duplicate parsers + fold dump-deletion to one helper (#13) (cefa56e)
+- parse-once + rename-fold-in-triage, ledger-based retention, sync/flush split (#15 #07 #14) (be4c670)
+- drop the .info.txt sidecar; derive machine identity from the dump filename (#11) (29bbf9f)
+- replace registry with the device-ledger (held/granted/uploaded) + collect decision (2868aba)
+
+### Documentation
+- split architecture into core (host) and monitor (tool) libraries (b005c71)
+- target architecture for the edge agent (layers, concerns, stores, flows) (2d06008)
+
+### Tests
+- run the real ingest worker (DumpTriage -DumpDir) e2e + add -DryRun (#16 #02) (2260a7e)
+- end-to-end over a generated minidump (#02) (5ab5f74)
+
+
 ## [v1.0.53] - 2026-10-28
 Changes since v1.0.52:
 
@@ -435,6 +460,7 @@ Changes since v1.0.0:
 - WPF/XAML launcher (GUI default, `-CLI` text menu) with shared light/dark theme.
 - Shared components (logging, admin/signature/prompt/version helpers) under `src/Common`.
 - Bootstrap installer (`src/Get.ps1` + `src/run.bat`) with version check against GitHub.
+
 
 
 
