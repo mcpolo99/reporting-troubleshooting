@@ -525,8 +525,6 @@ function Invoke-NewDumps($cfg, $known, $pending, $recent, $lastInfo) {
             } catch { Write-Log "Could not rename $($d.Name) to $finalName (in use?): $($_.Exception.Message)" 'WARN' }
         }
 
-        $ver  = if ($app -and $lastInfo[$app]) { $lastInfo[$app] } else { @('(no version info recorded for this app)') }
-
         # ---- duplicate detection (same process frozen at the same event) ----
         $dupOf = $null; $why = ''
         $prev  = if ($app) { $recent[$app] } else { $null }
@@ -555,24 +553,9 @@ function Invoke-NewDumps($cfg, $known, $pending, $recent, $lastInfo) {
             continue
         }
 
-        $text = @(
-            "Dump        : $($d.Name)"
-            "Created     : {0:yyyy-MM-dd HH:mm:ss}" -f $d.CreationTime
-            "Size        : {0:N0} MB" -f ($d.Length / 1MB)
-            "App         : $app"
-            "Reason      : $(if ($info) { $info.Trigger } else { 'unknown' })"
-            "Exception   : $(if ($info -and $info.Exception) { $info.Exception } else { '(none - not an exception dump)' })"
-            "Process ID  : $(if ($info) { $info.ProcessId })"
-            "Duplicate   : $(if ($dupOf) { "YES - repeat of $dupOf ($why)" } else { 'no (primary)' })"
-            "Computer    : $env:COMPUTERNAME"
-            "OS          : $([Environment]::OSVersion.VersionString)"
-            "Executable(s) at time of dump:"
-        ) + ($ver | ForEach-Object { "  $_" })
-        if ($info -and $info.Comment) { $text += @('', 'ProcDump comment in dump:') + ($info.Comment -split "`r?`n" | ForEach-Object { "  $_" }) }
-
-        try { Set-Content -LiteralPath ([IO.Path]::ChangeExtension($d.FullName, '.info.txt')) -Value $text -Encoding UTF8 -ErrorAction Stop }
-        catch { Write-Log "Could not write info file for $($d.Name): $($_.Exception.Message)" 'WARN' }
-
+        # No .info.txt sidecar is written any more: the procdump-facts report carries the same facts in
+        # machine-readable form, the capturing machine is in the dump filename (and the dump's env block), and
+        # the one-line log entry below keeps a human trace. $ver stays only for that log line.
         $lvl = if ($dupOf) { 'WARN' } else { 'INFO' }
         Write-Log ("Dump complete: {0} ({1:N0} MB) - {2}{3}" -f $d.Name, ($d.Length / 1MB), $summary,
                    $(if ($dupOf) { " - DUPLICATE of $dupOf (kept)" } else { '' })) $lvl

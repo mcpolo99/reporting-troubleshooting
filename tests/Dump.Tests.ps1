@@ -88,6 +88,9 @@ Check 'six underscore-delimited fields' ((([IO.Path]::GetFileNameWithoutExtensio
 Check 'tag: exception when code set'     ((Get-DumpTag -Code ([uint32]3221225477) -Trigger '') -eq 'exception')   # 0xC0000005
 Check 'tag: hang from trigger text'      ((Get-DumpTag -Code $null -Trigger 'Hung window detected') -eq 'hang')
 Check 'tag: manual otherwise'            ((Get-DumpTag -Code $null -Trigger 'Timed: process ran') -eq 'manual')
+Check 'computer token from scheme name'  ((Get-DumpComputerFromName $fn) -eq 'PC01')
+Check 'computer token: legacy name'       ((Get-DumpComputerFromName 'bSuite.exe_BS1000079947_261027_171640.dmp') -eq 'BS1000079947')
+Check 'computer token: gz double-ext'     ((Get-DumpComputerFromName 'ProcDump_PC01_bSuite_hang_20261028_143005.dmp.gz') -eq 'PC01')
 Check 'process token round-trips'        ((Get-DumpProcessFromName $fn) -eq 'bSuite')
 Check 'process token: legacy name null'  ($null -eq (Get-DumpProcessFromName 'bSuite.exe_261019_084858.dmp'))
 Check 'underscores in token collapse'    ((New-DumpFileName -Computer 'PC01' -Process 'my_app' -Tag 'hang' -When $when) -eq 'ProcDump_PC01_my-app_hang_20261028_143005.dmp')

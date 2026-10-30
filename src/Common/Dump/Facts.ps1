@@ -77,22 +77,15 @@ function Get-DumpFacts {
 
     $fi = $null; try { $fi = Get-Item -LiteralPath $DumpPath -ErrorAction Stop } catch {}
 
-    # Computer: prefer what the DUMP records (ProcDump comment on newer dumps, else the ".info.txt" sidecar
-    # beside it) over this host - so an off-box re-scan reports the machine that captured, not the analyst box.
-    # The stable deviceId (MachineGuid) only exists for THIS host; if the dump is from another machine we do
-    # not know its guid, so leave it null rather than stamp the wrong one.
+    # Computer: prefer what the DUMP records (ProcDump comment on newer dumps), else the capturing machine
+    # stamped into the dump FILENAME - so an off-box re-scan reports the machine that captured, not the analyst
+    # box. There is no ".info.txt" sidecar any more (its machine fact is in the filename and the dump env block).
+    # The stable deviceId (MachineGuid) only exists for THIS host; if the dump is from another machine we do not
+    # know its guid, so leave it null rather than stamp the wrong one.
     $hostComputer = $env:COMPUTERNAME
     $dumpComputer = $null
     if ($Sig.ProcDumpComment -and $Sig.ProcDumpComment -match '(?im)^\s*computer\s*[:=]\s*(\S+)') { $dumpComputer = $matches[1] }
-    if (-not $dumpComputer) {
-        $info = $DumpPath -replace '\.dmp$', '.info.txt'
-        if (Test-Path -LiteralPath $info) {
-            try {
-                $m = Select-String -LiteralPath $info -Pattern '^\s*Computer\s*[:=]\s*(\S+)' -ErrorAction Stop | Select-Object -First 1
-                if ($m) { $dumpComputer = $m.Matches[0].Groups[1].Value }
-            } catch {}
-        }
-    }
+    if (-not $dumpComputer) { $dumpComputer = Get-DumpComputerFromName ([IO.Path]::GetFileName($DumpPath)) }
     $computer = if ($dumpComputer) { $dumpComputer } else { $hostComputer }
     $computerSource = if ($dumpComputer) { 'dump' } else { 'host' }
     $offBox = $dumpComputer -and ($dumpComputer -ne $hostComputer)

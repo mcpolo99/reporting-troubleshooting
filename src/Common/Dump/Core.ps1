@@ -71,6 +71,18 @@ function Get-DumpProcessFromName([string]$FileName) {
     return $null
 }
 
+# The computer token from a dump filename. Handles the current scheme (ProcDump_<pc>_<proc>_<tag>_<date>_<time>,
+# field 1) and the legacy <proc>.exe_<machine>_<date>_<time> (field 1 of 4). The capturing box stamps its own
+# name into the filename, so this is the authoritative machine id off-box (where the capturing host's
+# $env:COMPUTERNAME would be wrong). $null if the name matches no known scheme.
+function Get-DumpComputerFromName([string]$FileName) {
+    $stem = [IO.Path]::GetFileNameWithoutExtension("$FileName") -replace '\.dmp$', ''   # tolerate a .dmp.gz double ext
+    $p = $stem -split '_'
+    if ($p.Count -ge 6 -and $p[0] -eq $script:DumpNamePrefix) { return $p[1] }           # ProcDump_<pc>_...
+    if ($p.Count -eq 4 -and $p[0] -match '(?i)\.exe$') { return $p[1] }                   # legacy <proc>.exe_<machine>_<date>_<time>
+    return $null
+}
+
 
 # --- Device ledger location -----------------------------------------------------------------------------------
 # The single local dedup store (state/count/sample per signature). Read/write + the collect decision live in
