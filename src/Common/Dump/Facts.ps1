@@ -161,7 +161,7 @@ function Get-DumpFacts {
         diagnosis    = $diag                           # the plain-language verdict - read this first
         class          = $Sig.Kind
         captureReason  = $diag.captureReason
-        captureComment = $Sig.ProcDumpComment
+        captureComment = (Get-DumpReason $Sig.ProcDumpComment)   # reason only - never ProcDump's raw command line / unexpanded template / local path
         confidence     = $confidence
         severity       = (Get-DumpSeverity $Sig)
         isNewSignature = ($occ -le 1)
