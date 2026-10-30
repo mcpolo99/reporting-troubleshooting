@@ -84,6 +84,19 @@ function Get-DumpComputerFromName([string]$FileName) {
 }
 
 
+# The FINAL dump name for a placeholder, once triage knows the real tag. ProcDump writes a placeholder with the
+# tag field set to 'pending' (it cannot know exception-vs-hang at capture); triage replaces just that field.
+# Returns the final '<...>.dmp' name, or $null if the placeholder does not match the scheme (caller rebuilds via
+# New-DumpFileName). Pure/testable.
+function Get-RestingDumpName([string]$PlaceholderName, [string]$Tag) {
+    $tag = ConvertTo-DumpToken $Tag 'manual'
+    $stem = [IO.Path]::GetFileNameWithoutExtension("$PlaceholderName")
+    $p = $stem -split '_'
+    if ($p.Count -ge 6 -and $p[0] -eq $script:DumpNamePrefix) { $p[3] = $tag; return (($p -join '_') + '.dmp') }
+    return $null
+}
+
+
 # --- Device ledger location -----------------------------------------------------------------------------------
 # The single local dedup store (state/count/sample per signature). Read/write + the collect decision live in
 # Ledger.ps1; the PATH lives here (dump engine) so the detached triage worker and the flush can both reach it.

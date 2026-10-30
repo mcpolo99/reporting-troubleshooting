@@ -78,7 +78,19 @@ try {
     Check 'top-level class + severity present'  ([bool]$fev.class -and [bool]$fev.severity)
     Check 'top-level capturedAtUtc present'     ([bool]$fev.capturedAtUtc)
     Check 'top-level deviceId present'          ([bool]$fev.deviceId)   # CI-bound per CONTRACT 7; required for the per-device grant
+    # Resting-form report (the dump is gzipped, so the file is <...>.dmp.gz and the RAW facts are passed in):
+    # dump.bytes describes the ORIGINAL dump, dump.file is the resting .gz, computer comes from the filename.
+    $fev2 = Get-DumpFacts -Sig $fsig -IdObj $fido `
+        -DumpPath 'C:\d\ProcDump_PC01_app_hang_20261028_143005.dmp.gz' -Sha256 'deadbeef' -RawBytes 123456 -RawCapturedUtc '2026-10-28T14:30:05Z'
+    Check 'resting report: raw bytes kept'      ($fev2.dump.bytes -eq 123456)
+    Check 'resting report: references .dmp.gz'  ($fev2.dump.file -eq 'ProcDump_PC01_app_hang_20261028_143005.dmp.gz')
+    Check 'resting report: raw sha'             ($fev2.dump.sha256 -eq 'deadbeef')
+    Check 'resting report: computer from name'  ($fev2.deviceId -eq 'PC01')
 } finally { Remove-Item -LiteralPath $tmpDump -Force -ErrorAction SilentlyContinue }
+
+Write-Host 'resting dump name (triage folds the tag into the gzip)'
+Check 'resting name replaces pending tag' ((Get-RestingDumpName 'ProcDump_PC01_bSuite_pending_20261028_143005.dmp' 'exception') -eq 'ProcDump_PC01_bSuite_exception_20261028_143005.dmp')
+Check 'resting name: non-scheme -> null'  ($null -eq (Get-RestingDumpName 'random.dmp' 'hang'))
 
 Write-Host 'dump file naming (ProcDump_<pc>_<process>_<tag>_<yyyyMMdd>_<HHmmss>.dmp)'
 $when = Get-Date '2026-10-28 14:30:05'

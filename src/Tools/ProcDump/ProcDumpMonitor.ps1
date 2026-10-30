@@ -484,12 +484,12 @@ function Enqueue-DumpTriage([string]$DumpPath, $Config) {
     } catch { Write-Log "Could not launch fault-id worker: $($_.Exception.Message)" 'WARN' }
 }
 
-# Handles new dumps once fully written: reads the reason, detects repeat captures of the same
-# event, writes <dump>.info.txt, and logs a one-line summary.
-#   $known   : set of dump paths already handled
+# INGEST DETECTOR. Detects a placeholder dump once it is FULLY written and hands it to the detached triage
+# worker. It does NOT parse, rename, dedupe, or write any sidecar - triage owns all of that (parse once, id once,
+# decide, and fold the rename into the gzip). The detector only ever stats a file for completion and enqueues.
+#   $known   : set of dump paths already enqueued
 #   $pending : path -> last seen size (dump still being written)
-#   $recent  : app -> last primary dump info (for duplicate detection)
-function Invoke-NewDumps($cfg, $known, $pending, $recent, $lastInfo) {
+function Invoke-NewDumps($cfg, $known, $pending) {
     $dumps = @(Get-ChildItem -Path $cfg.DumpDir -Filter *.dmp -File -ErrorAction SilentlyContinue | Sort-Object CreationTime)
     foreach ($d in $dumps) {
         if ($known.Contains($d.FullName)) { continue }
@@ -502,98 +502,43 @@ function Invoke-NewDumps($cfg, $known, $pending, $recent, $lastInfo) {
         try { ([IO.File]::Open($d.FullName, 'Open', 'Read', 'Read')).Dispose() } catch { continue }
         $pending.Remove($d.FullName); [void]$known.Add($d.FullName)
 
-        $app  = Get-DumpApp $cfg $d.Name
-        $info = try { Get-DumpInfo $d.FullName } catch { $null }
-
-        # Rename the placeholder ProcDump wrote to the final convention now that the reason is known:
-        # ProcDump_<pc>_<process>_<tag>_<yyyyMMdd>_<HHmmss>.dmp. The monitor is the single owner of the name, so
-        # this happens before the .info.txt sidecar is written and before the deep triage worker is enqueued.
-        $proc = if ($app) { [IO.Path]::GetFileNameWithoutExtension($app) } else { Get-DumpProcessFromName $d.Name }
-        $tag  = Get-DumpTag -Code $(if ($info) { $info.Code } else { $null }) -Trigger $(if ($info) { $info.Trigger } else { '' })
-        $finalName = New-DumpFileName -Computer $env:COMPUTERNAME -Process $proc -Tag $tag -When $d.CreationTime
-        if ($finalName -ne $d.Name) {
-            $finalPath = Join-Path $cfg.DumpDir $finalName
-            if (Test-Path -LiteralPath $finalPath) {   # same pc/process/tag/second -> disambiguate
-                $stem = $finalName -replace '\.dmp$', ''; $n = 2
-                do { $finalName = '{0}_{1}.dmp' -f $stem, $n; $finalPath = Join-Path $cfg.DumpDir $finalName; $n++ } while (Test-Path -LiteralPath $finalPath)
-            }
-            try {
-                Move-Item -LiteralPath $d.FullName -Destination $finalPath -Force -ErrorAction Stop
-                [void]$known.Remove($d.FullName); [void]$known.Add($finalPath)
-                Write-Log "Renamed dump $($d.Name) -> $finalName"
-                $d = Get-Item -LiteralPath $finalPath
-            } catch { Write-Log "Could not rename $($d.Name) to $finalName (in use?): $($_.Exception.Message)" 'WARN' }
-        }
-
-        # ---- duplicate detection (same process frozen at the same event) ----
-        $dupOf = $null; $why = ''
-        $prev  = if ($app) { $recent[$app] } else { $null }
-        if ($info -and $prev -and $info.ProcessId -and $info.ProcessId -eq $prev.Info.ProcessId) {
-            if ($null -ne $info.Code -and $info.Code -eq $prev.Info.Code -and
-                $info.Address -eq $prev.Info.Address -and $info.ThreadId -eq $prev.Info.ThreadId) {
-                $dupOf = $prev.Name; $why = 'same process, thread, exception code and address'
-            }
-            elseif ($null -eq $info.Code -and $null -ne $prev.Info.Code -and
-                    ($d.CreationTime - $prev.Time).TotalSeconds -lt $cfg.DuplicateWindowSeconds) {
-                $dupOf = $prev.Name; $why = 'hang trigger while the process was still stopped at the exception'
-            }
-        }
-        if (-not $dupOf -and $app -and $info) { $recent[$app] = @{ Name = $d.Name; Info = $info; Time = $d.CreationTime } }
-
-        $summary = if ($info) { "$($info.Trigger)$(if ($info.Exception) { ' | ' + $info.Exception })$(if ($info.ProcessId) { ' | PID ' + $info.ProcessId })" }
-                   else { 'could not read dump header' }
-
-        # When known-issues dedupe is on, the triage worker owns all dedup/delete decisions (by stable fault
-        # id, across sessions), so the monitor's own same-session duplicate delete stands down here.
-        if ($dupOf -and $cfg.DuplicateAction -eq 'Delete' -and -not $cfg.KnownIssuesEnabled) {
-            try {
-                Remove-Item -LiteralPath $d.FullName -Force -ErrorAction Stop
-                Write-Log "Duplicate capture deleted: $($d.Name) = repeat of $dupOf ($why)." 'WARN'
-            } catch { Write-Log "Duplicate $($d.Name) could not be deleted: $($_.Exception.Message)" 'WARN' }
-            continue
-        }
-
-        # No .info.txt sidecar is written any more: the procdump-facts report carries the same facts in
-        # machine-readable form, the capturing machine is in the dump filename (and the dump's env block), and
-        # the one-line log entry below keeps a human trace. $ver stays only for that log line.
-        $lvl = if ($dupOf) { 'WARN' } else { 'INFO' }
-        Write-Log ("Dump complete: {0} ({1:N0} MB) - {2}{3}" -f $d.Name, ($d.Length / 1MB), $summary,
-                   $(if ($dupOf) { " - DUPLICATE of $dupOf (kept)" } else { '' })) $lvl
-
-        # Fault-identify this dump and dedupe already-seen problems (runs detached - never blocks the loop).
+        Write-Log ("Dump complete: {0} ({1:N0} MB) - handing to triage." -f $d.Name, ($d.Length / 1MB))
+        # Triage (detached) parses once, computes the id, decides collect/drop, and folds the rename into the gzip
+        # (placeholder -> final .dmp.gz). It writes NO final '.dmp', so this *.dmp scan never re-picks it up.
         if ($cfg.KnownIssuesEnabled) { Enqueue-DumpTriage $d.FullName $cfg }
     }
-    # forget dumps that no longer exist. Re-scan the directory NOW (not the $dumps list captured at entry): a dump
-    # renamed to its final name during this pass is only on disk under the new name, so a stale list would drop the
-    # renamed file from $known and the next pass would re-process it (#70).
+    # forget dumps that no longer exist (triage consumed the placeholder into a .dmp.gz, or dropped it). A .dmp.gz
+    # is not a *.dmp, so it never re-enters this scan.
     $existing = @(Get-ChildItem -Path $cfg.DumpDir -Filter *.dmp -File -ErrorAction SilentlyContinue | ForEach-Object { $_.FullName })
     @($known)        | Where-Object { $_ -notin $existing } | ForEach-Object { [void]$known.Remove($_) }
     @($pending.Keys) | Where-Object { $_ -notin $existing } | ForEach-Object { $pending.Remove($_) }
 }
 
-# Size-based dump retention. Replaces the old "keep newest N" ring buffer: dumps are kept gzipped and bounded by
-# a DISK BUDGET (DumpDiskLimitGB), never by count. Two hard rules:
-#   1. A dump whose event is still PENDING in the outbox is NEVER evicted (its report has not been sent, and the
-#      user rule is that unsent dumps are kept until sent or manually collected).
-#   2. Only ALREADY-HANDLED dumps (event archived to outbox\sent, or no event references them) are evicted, and
-#      only when the total over all kept dumps exceeds the budget - oldest first.
-# If every kept dump is still pending and the box is over budget (a long offline burst), nothing is deleted and a
-# warning is logged - the "Collect for manual handling" button is the relief valve, not silent data loss.
+# Size-based dump retention, keyed off the LEDGER (never by count). A dump is PROTECTED and never evicted when:
+#   - it is a current ledger sample (state held or granted) - we hold it, the backend does not; or
+#   - it is referenced by any event still in the outbox (pending) or outbox\failed (parked) - unsent.
+# Everything else is a stale/orphaned artifact (no ledger sample, no pending report) and is evictable oldest-first
+# when over the disk budget. Uploaded dumps are already deleted at upload, so in practice retention only reaps
+# orphans. If the box is over budget but every dump on disk is protected (a long offline burst of held dumps),
+# nothing is deleted and a warning is logged - manual collect is the relief valve, never silent data loss.
 function Invoke-DumpRetention($cfg) {
     $limitBytes = [Math]::Max([double]$cfg.DumpDiskLimitGB, 0.1) * 1GB
     $roots = @($cfg.DumpDir, (Join-Path $cfg.DumpDir 'failed-uploads'))
+    $ki = Get-KnownIssuesDir
 
-    # Dump filenames (raw and .gz forms) referenced by any PENDING outbox event - protected from eviction.
-    $pending = @{}
-    $obx = Join-Path (Get-KnownIssuesDir) 'outbox'
-    if (Test-Path -LiteralPath $obx) {
-        foreach ($ev in @(Get-ChildItem -LiteralPath $obx -Filter *.json -File -ErrorAction SilentlyContinue)) {
-            try {
-                $j = Get-Content -LiteralPath $ev.FullName -Raw | ConvertFrom-Json
-                foreach ($p in @($j.dump.path, $j.dump.file)) {
-                    if ($p) { $n = [IO.Path]::GetFileName("$p"); $pending[$n] = $true; $pending[($n -replace '\.gz$','')] = $true; $pending["$n.gz"] = $true }
-                }
-            } catch {}
+    # Protected set of filenames (both raw and .gz forms). 1) ledger samples (held/granted).
+    $protected = @{}
+    function Protect([hashtable]$set, [string]$p) {
+        if (-not $p) { return }
+        $n = [IO.Path]::GetFileName("$p"); $set[$n] = $true; $set[($n -replace '\.gz$','')] = $true; $set["$n.gz"] = $true
+    }
+    try { $led = Read-DeviceLedger $ki; foreach ($sig in @($led.entries.Keys)) { Protect $protected $led.entries[$sig].sample } } catch {}
+    # 2) dumps referenced by any UNSENT report - the outbox top level AND the parked outbox\failed.
+    foreach ($sub in @('outbox', 'outbox\failed')) {
+        $d = Join-Path $ki $sub
+        if (-not (Test-Path -LiteralPath $d)) { continue }
+        foreach ($ev in @(Get-ChildItem -LiteralPath $d -Filter *.json -File -ErrorAction SilentlyContinue)) {
+            try { $j = Get-Content -LiteralPath $ev.FullName -Raw | ConvertFrom-Json; Protect $protected $j.dump.path; Protect $protected $j.dump.file } catch {}
         }
     }
 
@@ -606,8 +551,8 @@ function Invoke-DumpRetention($cfg) {
     $total = ($all | Measure-Object Length -Sum).Sum
     if ($total -le $limitBytes) { return }
 
-    # Evict oldest HANDLED dumps until under budget. Pending dumps are skipped (kept).
-    $evictable = @($all | Where-Object { -not $pending[$_.Name] } | Sort-Object LastWriteTime)
+    # Evict oldest UNPROTECTED (orphaned/stale) dumps until under budget. Held/granted/unsent are never touched.
+    $evictable = @($all | Where-Object { -not $protected[$_.Name] } | Sort-Object LastWriteTime)
     foreach ($d in $evictable) {
         if ($total -le $limitBytes) { break }
         try {
@@ -615,11 +560,11 @@ function Invoke-DumpRetention($cfg) {
             Remove-Item -LiteralPath $d.FullName -Force -ErrorAction Stop
             foreach ($sx in '.info.txt', '.versions.txt') { Remove-Item -LiteralPath ($d.FullName -replace '\.dmp(\.gz)?$', $sx) -Force -ErrorAction SilentlyContinue }
             $total -= $sz
-            Write-Log ("Retention: evicted handled dump {0} ({1:N1} MB); budget {2} GB" -f $d.Name, ($sz/1MB), $cfg.DumpDiskLimitGB)
+            Write-Log ("Retention: evicted orphan dump {0} ({1:N1} MB); budget {2} GB" -f $d.Name, ($sz/1MB), $cfg.DumpDiskLimitGB)
         } catch { Write-Log "Retention: could not evict $($d.Name) (in use?), will retry." 'WARN' }
     }
     if ($total -gt $limitBytes) {
-        Write-Log ("Retention: still {0:N1} GB over the {1} GB budget, but all remaining dumps have UNSENT reports - kept. Use 'Collect for manual handling' to offload them." -f (($total-$limitBytes)/1GB), $cfg.DumpDiskLimitGB) 'WARN'
+        Write-Log ("Retention: still {0:N1} GB over the {1} GB budget, but all remaining dumps are held/unsent - kept. Use 'Collect for manual handling' to offload them." -f (($total-$limitBytes)/1GB), $cfg.DumpDiskLimitGB) 'WARN'
     }
 }
 
@@ -1169,7 +1114,7 @@ function Invoke-Monitor {
 
             # 0) Track exe versions of running apps; analyse finished dumps (reason, duplicates)
             Update-AppVersions $cfg $seenProcs $lastInfo
-            Invoke-NewDumps $cfg $known $pending $recent $lastInfo
+            Invoke-NewDumps $cfg $known $pending
 
             $pdArgs = Get-EffectiveArgs $cfg
 

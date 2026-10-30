@@ -43,48 +43,71 @@ function Invoke-DumpTriage {
         Add-DepGap 'tier2-unavailable' ("$($sig.Kind) dump $([IO.Path]::GetFileName($DumpPath)): managed walk unavailable (ClrMD missing or failed) - id provisional, dump kept") $Dir
     }
 
+    # Triage OWNS naming now (the monitor writes a placeholder and never renames). Derive the real tag from the
+    # single parse above and compute the FINAL resting name, so the rename is folded into the gzip - there is
+    # never an intermediate final '.dmp' for the monitor's *.dmp scan to re-pick-up (it only ever sees the
+    # placeholder vanish and a '.dmp.gz' appear, which it ignores).
+    $tag = Get-DumpTag -Code $sig.Code -Trigger "$($sig.ProcDumpComment)"
+    $dumpDir = Split-Path -Parent $DumpPath
+    $restingName = Get-RestingDumpName (Split-Path $DumpPath -Leaf) $tag
+    if (-not $restingName) {
+        $proc = Get-DumpProcessFromName (Split-Path $DumpPath -Leaf); if (-not $proc) { $proc = [IO.Path]::GetFileNameWithoutExtension("$($sig.ImageName)") }
+        $comp = Get-DumpComputerFromName (Split-Path $DumpPath -Leaf); if (-not $comp) { $comp = $env:COMPUTERNAME }
+        $when = try { (Get-Item -LiteralPath $DumpPath).CreationTime } catch { Get-Date }
+        $restingName = New-DumpFileName -Computer $comp -Process $proc -Tag $tag -When $when
+    }
+    $restingGz = (Join-Path $dumpDir $restingName) + '.gz'
+
     # Record against the ledger and get the bytes decision (collect | drop | defer). Dedup state lives ONLY here.
-    $res = Update-DeviceLedger -IdObj $idObj -DumpPath $DumpPath -Dir $Dir -BaselinePath $BaselinePath -SuppressKnown $SuppressKnown -IsOnline $IsOnline
+    # The recorded sample is the final resting .gz (what will exist after the fold).
+    $res = Update-DeviceLedger -IdObj $idObj -DumpPath $restingGz -Dir $Dir -BaselinePath $BaselinePath -SuppressKnown $SuppressKnown -IsOnline $IsOnline
     $res.Kind = $sig.Kind
     $res.Leaf = if ($sig.Frames -and $sig.Frames.Count) { $sig.Frames[0] } elseif ($sig.Module) { '{0}+0x{1:x}' -f $sig.Module, $sig.Offset } else { '' }
 
-    # ALWAYS emit one procdump-facts/v1 report for this capture, while the dump still exists at $DumpPath.
-    # Guarded so a missing/failing emitter never breaks triage.
-    if (Get-Command Get-DumpFacts -ErrorAction SilentlyContinue) {
-        try {
-            $facts = Get-DumpFacts -Sig $sig -IdObj $idObj -DumpPath $DumpPath -Decision $res
-            $res.EventPath = Write-DumpFactsEvent -Facts $facts -Dir $Dir
-        } catch { Add-DepGap 'facts-emit' ("report emission failed for $([IO.Path]::GetFileName($DumpPath)): $($_.Exception.Message)") $Dir }
-    }
+    # Capture the RAW facts from the placeholder while it is still on disk (size + mtime always; sha only when we
+    # keep the bytes - never hash a multi-GB dump we are about to drop).
+    $rawBytes = -1; $rawMtime = $null; $rawSha = $null
+    try { $pi = Get-Item -LiteralPath $DumpPath -ErrorAction Stop; $rawBytes = [long]$pi.Length; $rawMtime = $pi.LastWriteTimeUtc.ToString('o') } catch {}
+    if ($res.Collect -ne 'drop') { try { $rawSha = (Get-FileHash -LiteralPath $DumpPath -Algorithm SHA256).Hash.ToLowerInvariant() } catch {} }
 
+    $emitPath = (Join-Path $dumpDir $restingName)   # logical final raw name; the flush resolves the .dmp.gz
     if ($res.Collect -eq 'drop') {
-        # Discard the bytes (already reported): a recurrence, an already-uploaded id, or a known id offline. The
-        # report is enough. This is the only place the engine deletes a dump; a kept dump is never deleted here -
-        # disk is bounded by the monitor's size-based retention, which only evicts already-uploaded dumps.
-        $sidecars = @($DumpPath) + @('.info.txt', '.versions.txt' | ForEach-Object { $DumpPath -replace '\.dmp$', $_ })
-        foreach ($f in $sidecars) { if (Test-Path -LiteralPath $f) { Remove-Item -LiteralPath $f -Force -ErrorAction SilentlyContinue } }
+        # Discard the bytes (already reported): a recurrence, an already-uploaded id, or a known id offline. Only
+        # place the engine deletes a dump; a kept dump is never deleted here - disk is bounded by retention,
+        # which only ever evicts dumps the backend already holds.
+        foreach ($f in @($DumpPath) + @('.info.txt', '.versions.txt' | ForEach-Object { $DumpPath -replace '\.dmp$', $_ })) {
+            if (Test-Path -LiteralPath $f) { Remove-Item -LiteralPath $f -Force -ErrorAction SilentlyContinue }
+        }
         $res.Disposition = 'dropped'
     } else {
-        # KEEP (collect/defer). gzip the dump at rest NOW, regardless of any server grant: a kept dump always
-        # lives compressed in the dump dir (~5x smaller), so an offline box stores far more within its budget and
-        # the file is already in the shape the flush uploads. The raw .dmp is replaced by <dump>.dmp.gz; the event
-        # carries the RAW sha256/bytes (they describe the original). Guarded: if the compressor is unavailable the
-        # raw dump is kept.
-        $res.Disposition = 'kept'
-        if ((Get-Command Compress-DumpFile -ErrorAction SilentlyContinue) -and ($DumpPath -notmatch '\.gz$') -and (Test-Path -LiteralPath $DumpPath)) {
-            $gz = Compress-DumpFile -SourcePath $DumpPath -DestPath ($DumpPath + '.gz') -Label ([IO.Path]::GetFileName($DumpPath))
+        # KEEP (collect/defer). Write the FINAL-named <...>.dmp.gz straight from the placeholder (rename + gzip in
+        # one), then delete the placeholder. A kept dump always lives compressed (~5x smaller). If the compressor
+        # is somehow unavailable or fails, keep the RAW placeholder in place (no rename -> no monitor re-triage).
+        $res.Disposition = 'kept'; $res.KeptPath = $DumpPath
+        if ((Get-Command Compress-DumpFile -ErrorAction SilentlyContinue) -and (Test-Path -LiteralPath $DumpPath)) {
+            $gz = Compress-DumpFile -SourcePath $DumpPath -DestPath $restingGz -Label $restingName
             if ($gz.Ok) {
                 Remove-Item -LiteralPath $DumpPath -Force -ErrorAction SilentlyContinue
-                $res.Disposition = 'kept-gz'; $res.KeptPath = $gz.Path
-                # the ledger sample now points at the resting .gz, not the raw .dmp
-                try { [void](Set-LedgerSample -Sig $res.Id -Sample $gz.Path -Dir $Dir) } catch {}
+                $res.Disposition = 'kept-gz'; $res.KeptPath = $restingGz; $emitPath = $restingGz
             } else {
-                Add-DepGap 'gzip-at-rest' ("gzip of kept dump $([IO.Path]::GetFileName($DumpPath)) failed: $($gz.Error) - keeping raw") $Dir
-                $res.KeptPath = $DumpPath
+                Add-DepGap 'gzip-at-rest' ("gzip of $([IO.Path]::GetFileName($DumpPath)) failed: $($gz.Error) - keeping raw placeholder") $Dir
+                $emitPath = $DumpPath
+                try { [void](Set-LedgerSample -Sig $res.Id -Sample $DumpPath -Dir $Dir) } catch {}   # sample stays the raw placeholder
             }
         } else {
-            $res.KeptPath = $DumpPath
+            $emitPath = $DumpPath
+            try { [void](Set-LedgerSample -Sig $res.Id -Sample $DumpPath -Dir $Dir) } catch {}
         }
+    }
+
+    # ALWAYS emit one procdump-facts/v1 report, AFTER the dump reached its resting form, referencing that file.
+    # Raw size/sha/mtime were captured above (the report describes the ORIGINAL dump). Guarded so a failing
+    # emitter never breaks triage.
+    if (Get-Command Get-DumpFacts -ErrorAction SilentlyContinue) {
+        try {
+            $facts = Get-DumpFacts -Sig $sig -IdObj $idObj -DumpPath $emitPath -Decision $res -Sha256 $rawSha -RawBytes $rawBytes -RawCapturedUtc $rawMtime
+            $res.EventPath = Write-DumpFactsEvent -Facts $facts -Dir $Dir
+        } catch { Add-DepGap 'facts-emit' ("report emission failed for $restingName : $($_.Exception.Message)") $Dir }
     }
     return $res
 }

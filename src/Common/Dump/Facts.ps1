@@ -67,7 +67,9 @@ function Get-DumpFacts {
         $Decision,                 # from Update-DeviceLedger: @{ Collect='collect'|'drop'|'defer'; Count; ... }
         [string]$DumpTool,
         [string]$DumpType,
-        [string]$Sha256            # precomputed hash to reuse (re-analysis) - avoids re-hashing a multi-GB dump
+        [string]$Sha256,           # precomputed hash to reuse - avoids re-hashing a multi-GB dump
+        [long]$RawBytes = -1,      # raw (uncompressed) dump size, when $DumpPath is the gzipped resting file
+        [string]$RawCapturedUtc    # raw dump mtime (ISO), when the raw file is gone (gzipped / dropped)
     )
     $collect = if ($Decision) { "$($Decision.Collect)" } else { 'collect' }
     $escalate = ($collect -ne 'drop')                    # the dump is escalatable only when we keep the bytes
@@ -95,10 +97,13 @@ function Get-DumpFacts {
     $deviceId = $computer
     $machineGuid = if (-not $offBox) { Get-MachineKey } else { $null }
     $sha = $null
-    if ($escalate -and $fi) {
-        if ($Sha256) { $sha = $Sha256.ToLowerInvariant() }
-        else { try { $sha = (Get-FileHash -LiteralPath $DumpPath -Algorithm SHA256).Hash.ToLowerInvariant() } catch {} }
-    }
+    if ($Sha256) { $sha = $Sha256.ToLowerInvariant() }
+    elseif ($escalate -and $fi -and $RawBytes -lt 0) { try { $sha = (Get-FileHash -LiteralPath $DumpPath -Algorithm SHA256).Hash.ToLowerInvariant() } catch {} }
+    # Raw size/mtime: use the passed raw values when the on-disk file is the gzipped resting form (or gone);
+    # otherwise read them from the file. So dump.bytes always describes the ORIGINAL dump, not the .gz.
+    $dumpBytes = if ($RawBytes -ge 0) { $RawBytes } elseif ($fi) { $fi.Length } else { $null }
+    $capturedUtc = if ($RawCapturedUtc) { $RawCapturedUtc } elseif ($fi) { $fi.LastWriteTimeUtc.ToString('o') } else { $null }
+    $writtenLocal = if ($RawCapturedUtc) { ([datetime]$RawCapturedUtc).ToLocalTime().ToString('yyyy-MM-dd HH:mm:ss') } elseif ($fi) { $fi.LastWriteTime.ToString('yyyy-MM-dd HH:mm:ss') } else { $null }
 
     # Build arrays with STATEMENT-FORM assignments. Windows PowerShell 5.1 unwraps a single-element array
     # returned from an `if`-expression (or a $() subexpression) to a scalar, which would emit `"x"` instead
@@ -139,7 +144,7 @@ function Get-DumpFacts {
         signatureId    = $IdObj.Id
         deviceId       = $deviceId
         productVersion = $Sig.ImageVer
-        capturedAtUtc  = $(if ($fi) { $fi.LastWriteTimeUtc.ToString('o') } else { $null })
+        capturedAtUtc  = $capturedUtc
         ids          = [ordered]@{
             eventId            = (New-DumpEventId)
             deviceId           = $deviceId
@@ -165,11 +170,11 @@ function Get-DumpFacts {
         product      = [ordered]@{ image = $Sig.ImageName; imageVersion = $Sig.ImageVer }
         environment  = $environment
         dump         = [ordered]@{
-            file         = [IO.Path]::GetFileName($DumpPath)
-            path         = $(if ($fi) { $fi.FullName } else { $DumpPath })   # absolute source path, so the flusher finds the dump even when its DumpDir differs from where the capture landed (#42)
-            bytes        = $(if ($fi) { $fi.Length } else { $null })
-            sha256       = $sha
-            writtenLocal = $(if ($fi) { $fi.LastWriteTime.ToString('yyyy-MM-dd HH:mm:ss') } else { $null })
+            file         = [IO.Path]::GetFileName($DumpPath)                  # the resting file (.dmp or .dmp.gz); the flusher resolves either
+            path         = $(if ($fi) { $fi.FullName } else { $DumpPath })    # absolute resting path, so the flusher finds it regardless of DumpDir (#42)
+            bytes        = $dumpBytes                                         # RAW (uncompressed) size - describes the original dump
+            sha256       = $sha                                              # RAW sha256
+            writtenLocal = $writtenLocal
         }
         process      = [ordered]@{ pid = $Sig.ProcessId; faultThreadId = $Sig.ThreadId }
         exception    = [ordered]@{

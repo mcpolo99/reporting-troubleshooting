@@ -220,6 +220,11 @@ function Send-OutboxEvents {
                     $resp = Invoke-RestMethod -Method Post -Uri ($Config.EventSink.TrimEnd('/') + '/v1/events') -Body $body -ContentType 'application/json' -Headers (Get-AuthHeaders $Config @{ 'Idempotency-Key' = $idem }) -TimeoutSec 30
                 } catch {
                     # Event not accepted -> leave it in the outbox and retry next run (durable, unbounded).
+                    # On 429 (the backend's rate-limit backstop, CONTRACT.md 10) STOP this flush entirely and back
+                    # off - hammering the remaining events would just pile up more 429s; the next scheduled flush
+                    # retries. All un-posted events stay in the outbox.
+                    $code = $null; try { $code = [int]$_.Exception.Response.StatusCode } catch {}
+                    if ($code -eq 429) { Write-TelemetryLog ("rate-limited (429) on {0} - backing off; remaining events retry next flush" -f $f.Name) 'WARN'; $failed++; break }
                     Write-TelemetryLog ("event POST failed for {0}: {1}" -f $f.Name, $_.Exception.Message) 'WARN'
                     $failed++; continue
                 }
@@ -371,6 +376,18 @@ function Sync-DeviceLedger {
         foreach ($p in @($r.FreeSamples)) { Remove-DumpArtifacts -DumpPath $p }   # backend has these - free the local copies
         return $r.Count
     } catch { Write-TelemetryLog ("device-ledger: sync error - {0}" -f (Resolve-HttpError $_ $Config)) 'WARN'; return -1 }
+}
+
+# SYNC (pull) - a distinct activity from FLUSH (push). Read-only reconcile: refresh the known store and merge the
+# backend's device view into the ledger. Independent of flushing - a failed sync never affects a flush, and this
+# runs usefully even with an empty outbox (it keeps the collect decision current). Returns @{ Known; Ledger }.
+function Invoke-TelemetrySync {
+    param($Config, [string]$Dir)
+    if (-not $Config) { $Config = Get-TelemetryConfig }
+    if (-not $Dir) { $Dir = Get-KnownIssuesDir }
+    $k = Sync-KnownSignatures -Config $Config
+    $l = Sync-DeviceLedger -Config $Config -Dir $Dir
+    @{ Known = $k; Ledger = $l }
 }
 
 # "Collect for manual handling" (UI button): for a box that cannot reach the backend, gather everything a human
