@@ -126,16 +126,16 @@ try {
     Check 'custom DestPath honored'        ((Compress-DumpFile -SourcePath $srcDump -DestPath (Join-Path $dir 'x.gz')).Path -eq (Join-Path $dir 'x.gz'))
     Check 'missing source -> not ok'       (-not (Compress-DumpFile -SourcePath (Join-Path $dir 'nope.dmp')).Ok)
 
-    # handled-dump deletion (#73): a dump the flush is done with (uploaded / not wanted) is removed with its sidecars.
-    Write-Host 'handled-dump deletion'
+    # dump-artifact deletion: one helper removes a dump (.dmp OR .dmp.gz) + its sidecars, used after a confirmed upload.
+    Write-Host 'dump-artifact deletion'
     $hd = Join-Path $dir 'handled.dmp'; Set-Content $hd -Value 'D' -Encoding ascii
     Set-Content ($hd -replace '\.dmp$', '.info.txt') -Value 'i' -Encoding ascii
     Set-Content ($hd -replace '\.dmp$', '.versions.txt') -Value 'v' -Encoding ascii
-    Remove-HandledDump -DumpPath $hd
+    Remove-DumpArtifacts -DumpPath $hd
     Check 'dump deleted'                   (-not (Test-Path -LiteralPath $hd))
     Check 'info sidecar deleted'           (-not (Test-Path -LiteralPath ($hd -replace '\.dmp$', '.info.txt')))
     Check 'versions sidecar deleted'       (-not (Test-Path -LiteralPath ($hd -replace '\.dmp$', '.versions.txt')))
-    Check 'blank path is a no-op'          ($null -eq (Remove-HandledDump -DumpPath ''))
+    Check 'blank path is a no-op'          ($null -eq (Remove-DumpArtifacts -DumpPath ''))
 
     # delete-on-successful-upload must handle the kept-at-rest .dmp.gz form (stem = path minus .dmp/.dmp.gz).
     Write-Host 'handled-dump deletion (.dmp.gz form)'

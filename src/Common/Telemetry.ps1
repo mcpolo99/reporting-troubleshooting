@@ -140,16 +140,6 @@ function Move-SentEvent { param([string]$EventPath, [string]$SentDir)
     Clear-UploadAttempts -EventPath $EventPath
 }
 
-# Delete a dump the flush is done with (uploaded OK, or the backend did not want it) + its sidecars. DumpDir is
-# staging: the only dumps we retain are the ones that FAILED to upload (in failed-uploads). No-op if $DumpPath is
-# blank/missing (e.g. the dump was already deleted, or a recurrence deleted at triage).
-function Remove-HandledDump { param([string]$DumpPath)
-    if (-not $DumpPath) { return }
-    foreach ($f in @($DumpPath) + @('.info.txt', '.versions.txt' | ForEach-Object { $DumpPath -replace '\.dmp$', $_ })) {
-        if (Test-Path -LiteralPath $f) { Remove-Item -LiteralPath $f -Force -ErrorAction SilentlyContinue }
-    }
-}
-
 # Delete a dump and its sidecars, handling BOTH the raw (.dmp) and the kept-at-rest (.dmp.gz) form - the stem
 # for sidecars is the path with a trailing .dmp or .dmp.gz stripped. Used after a successful upload (the only
 # delete-on-send; the backend now holds the dump). No-op on a blank/missing path.
@@ -350,9 +340,7 @@ function Sync-KnownSignatures {
         } elseif (Test-Path -LiteralPath $Config.KnownSource) {
             if ($Config.KnownSource -ne $Config.BaselinePath) { Copy-Item -LiteralPath $Config.KnownSource -Destination $Config.BaselinePath -Force -ErrorAction Stop }
         } else { return 0 }
-        $b = Get-Content -LiteralPath $Config.BaselinePath -Raw -ErrorAction Stop | ConvertFrom-Json
-        $ids = if ($null -eq $b) { @() } elseif ($b.issues) { $b.issues.PSObject.Properties.Name } elseif ($b -is [array]) { $b } else { @($b) }
-        return @($ids).Count
+        return @(Get-KnownIds $Config.BaselinePath).Count   # single baseline-id reader (Ledger.ps1)
     } catch { Write-TelemetryLog ("known-signatures: sync error - {0}" -f (Resolve-HttpError $_ $Config)) 'WARN'; return -1 }   # -1 = keep the existing baseline
 }
 

@@ -392,71 +392,9 @@ function Update-AppVersions($cfg, $seen, $lastInfo) {
 }
 
 # =============================== DUMP ANALYSIS ===========================
-# keys are hex strings (PowerShell parses 0xC0000005 as a negative Int32, so literals won't match)
-$ExceptionNames = @{
-    'C0000005' = 'ACCESS_VIOLATION';        'C0000374' = 'HEAP_CORRUPTION'
-    'C0000409' = 'STACK_BUFFER_OVERRUN / FAIL_FAST'; 'C00000FD' = 'STACK_OVERFLOW'
-    'E0434352' = '.NET (CLR) EXCEPTION';    'E06D7363' = 'C++ EXCEPTION'
-    '80000003' = 'BREAKPOINT';              '80000004' = 'SINGLE_STEP'
-    'C0000094' = 'INTEGER_DIVIDE_BY_ZERO';  'C000001D' = 'ILLEGAL_INSTRUCTION'
-    'C0000096' = 'PRIVILEGED_INSTRUCTION';  'C0000006' = 'IN_PAGE_ERROR'
-    'C0000008' = 'INVALID_HANDLE';          'C0000420' = 'ASSERTION_FAILURE'
-    'C0000602' = 'FAIL_FAST_EXCEPTION';     'C000041D' = 'FATAL_USER_CALLBACK_EXCEPTION'
-}
+# Reading dump headers / fault signatures is the dump engine's job (Common\Dump\*). The monitor is the
+# ingest detector only - it does NOT parse dumps; triage (detached) does, exactly once.
 
-# Reads header, exception record, process id and ProcDump's comment straight from the .dmp
-# (only a few KB are read, even for multi-GB dumps).
-function Get-DumpInfo([string]$Path) {
-    $r = [pscustomobject]@{ ProcessId = $null; ThreadId = $null; Code = $null; Address = $null
-                            Params = @(); Comment = ''; Trigger = ''; Exception = '' }
-    $fs = [IO.File]::Open($Path, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::ReadWrite)
-    try {
-        $br = New-Object IO.BinaryReader($fs)
-        if ($br.ReadUInt32() -ne 0x504D444D) { return $null }        # 'MDMP'
-        [void]$br.ReadUInt32()
-        $count = $br.ReadUInt32(); $dirRva = $br.ReadUInt32()
-        $fs.Position = $dirRva
-        $dir = @(for ($i = 0; $i -lt $count; $i++) { ,@($br.ReadUInt32(), $br.ReadUInt32(), $br.ReadUInt32()) })
-        foreach ($s in $dir) {
-            $type = $s[0]; $size = $s[1]; $rva = $s[2]
-            if ($type -eq 6 -and $size -ge 40) {                      # ExceptionStream
-                $fs.Position = $rva
-                $r.ThreadId = $br.ReadUInt32(); [void]$br.ReadUInt32()
-                $r.Code = $br.ReadUInt32(); [void]$br.ReadUInt32(); [void]$br.ReadUInt64()
-                $r.Address = $br.ReadUInt64()
-                $np = [Math]::Min($br.ReadUInt32(), 15); [void]$br.ReadUInt32()
-                $r.Params = @(for ($j = 0; $j -lt $np; $j++) { $br.ReadUInt64() })
-            }
-            elseif ($type -eq 15 -and $size -ge 12) {                 # MiscInfoStream
-                $fs.Position = $rva
-                [void]$br.ReadUInt32(); $flags = $br.ReadUInt32(); $p = $br.ReadUInt32()
-                if ($flags -band 1) { $r.ProcessId = $p }
-            }
-            elseif (($type -eq 10 -or $type -eq 11) -and $size -gt 0 -and $size -lt 65536 -and -not $r.Comment) {
-                $fs.Position = $rva                                   # CommentStreamA / W
-                $enc = if ($type -eq 11) { [Text.Encoding]::Unicode } else { [Text.Encoding]::ASCII }
-                $r.Comment = $enc.GetString($br.ReadBytes([int]$size)).Trim([char]0, ' ', "`r", "`n")
-            }
-        }
-    } finally { $fs.Dispose() }
-
-    if ($null -ne $r.Code) {
-        $hex  = '{0:X8}' -f $r.Code
-        $name = $ExceptionNames[$hex]
-        $r.Exception = '0x{0}{1} at 0x{2:X} on thread {3}' -f $hex, $(if ($name) { " $name" } else { '' }), $r.Address, $r.ThreadId
-        if ($hex -eq 'C0000005' -and $r.Params.Count -ge 2) {
-            $op = switch ($r.Params[0]) { 0 { 'read from' } 1 { 'write to' } 8 { 'execute (DEP) at' } default { 'access to' } }
-            $r.Exception += ' ({0} 0x{1:X})' -f $op, $r.Params[1]
-        }
-    }
-    # ProcDump's comment: "*** procdump <args>" + "*** <reason>" lines
-    $reason = @($r.Comment -split "`r?`n" | ForEach-Object { ($_ -replace '^\*+\s*', '').Trim() } |
-                Where-Object { $_ -and $_ -notmatch '^procdump(64|64a)?(\.exe)?\s' })
-    $r.Trigger = if ($reason) { $reason -join '; ' }
-                 elseif ($r.Exception) { 'Exception (no ProcDump comment in dump)' }
-                 else { 'Unknown (no exception record and no ProcDump comment - likely hang/manual trigger)' }
-    $r
-}
 
 function Get-DumpApp($cfg, [string]$FileName) {
     # New scheme: match the <process> token exactly (ignoring a trailing .exe, since ProcDump's PROCESSNAME may
