@@ -193,6 +193,23 @@ function Get-DumpFacts {
     }
 }
 
+# Context-free dump -> event. Given a dump, return its procdump-facts/v1 event object (or compact JSON with
+# -AsJson). Pure: no monitor config, no ledger, no outbox, no decision - it reuses the single parse+id path
+# (Resolve-DumpIdentity) and Get-DumpFacts with no Decision (so the event is a plain 'collect', occurrence 1).
+# For the on-demand "identify this dump", tests, and any off-monitor analysis. ClrMD is resolved from the shared
+# store when not passed (guarded); when unavailable, a hang/managed id degrades to provisional - never throws
+# except on a missing/non-minidump file.
+function Get-DumpEvent {
+    param([Parameter(Mandatory)][string]$DumpPath, [string]$ClrMdDll, [string]$Sha256, [switch]$AsJson)
+    if (-not (Test-Path -LiteralPath $DumpPath)) { throw "dump not found: $DumpPath" }
+    if (-not $ClrMdDll -and (Get-Command Resolve-PackageTool -ErrorAction SilentlyContinue)) { try { $ClrMdDll = Resolve-PackageTool 'clrmd' } catch {} }
+    $ident = Resolve-DumpIdentity -DumpPath $DumpPath -ClrMdDll $ClrMdDll
+    if (-not $ident) { throw "not a minidump: $DumpPath" }
+    $facts = Get-DumpFacts -Sig $ident.Sig -IdObj $ident.IdObj -DumpPath $DumpPath -Sha256 $Sha256
+    if ($AsJson) { return ($facts | ConvertTo-Json -Depth 8 -Compress) }
+    return $facts
+}
+
 # Atomically write one event to the outbox (temp file + move, so a drainer never reads a partial file).
 # Returns the event path, or $null on failure (emission must never break triage).
 function Write-DumpFactsEvent {

@@ -88,6 +88,17 @@ try {
     Check 'resting report: computer from name'  ($fev2.deviceId -eq 'PC01')
 } finally { Remove-Item -LiteralPath $tmpDump -Force -ErrorAction SilentlyContinue }
 
+Write-Host 'Get-DumpEvent / Resolve-DumpIdentity (context-free entrypoint)'
+$nd = Join-Path $env:TEMP ('nd_{0}.dmp' -f ([guid]::NewGuid().ToString('N').Substring(0,8)))
+Set-Content -LiteralPath $nd -Value 'not a minidump' -Encoding ascii
+try {
+    Check 'identity: non-minidump -> null'  ($null -eq (Resolve-DumpIdentity -DumpPath $nd))
+    $threwND = $false; try { [void](Get-DumpEvent -DumpPath $nd) } catch { $threwND = $true }
+    Check 'event: non-minidump -> throws'   $threwND
+    $threwMiss = $false; try { [void](Get-DumpEvent -DumpPath (Join-Path $env:TEMP 'does-not-exist.dmp')) } catch { $threwMiss = $true }
+    Check 'event: missing file -> throws'   $threwMiss
+} finally { Remove-Item -LiteralPath $nd -Force -ErrorAction SilentlyContinue }
+
 Write-Host 'resting dump name (triage folds the tag into the gzip)'
 Check 'resting name replaces pending tag' ((Get-RestingDumpName 'ProcDump_PC01_bSuite_pending_20261028_143005.dmp' 'exception') -eq 'ProcDump_PC01_bSuite_exception_20261028_143005.dmp')
 Check 'resting name: non-scheme -> null'  ($null -eq (Get-RestingDumpName 'random.dmp' 'hang'))

@@ -19,29 +19,10 @@ function Invoke-DumpTriage {
     if (-not (Test-Path -LiteralPath $DumpPath)) { return @{ Collect = 'skip'; Reason = 'dump not found' } }
     if (-not $Dir) { $Dir = Get-KnownIssuesDir }
 
-    $sig = try { Get-DumpSignature $DumpPath } catch { $null }
-    if (-not $sig) { return @{ Collect = 'skip'; Reason = 'not a minidump' } }
-
-    # Tier-2 kinds (hang, managed exception) need the managed stack to get a stable id.
-    if ($sig.Kind -ne 'crash' -and $ClrMdDll -and (Test-Path -LiteralPath $ClrMdDll)) {
-        $tos = if ($sig.ThreadId) { [int]$sig.ThreadId } else { 0 }
-        $walk = Invoke-DumpWalk -Path $DumpPath -ClrMdDll $ClrMdDll -TargetOSID $tos
-        if ($walk) {
-            $sig.Frames = $walk.Frames; $sig.ExceptionType = $walk.ExceptionType
-            if (-not $sig.ThreadId -and $walk.ThreadOSID) { $sig.ThreadId = $walk.ThreadOSID }   # hang: the walked UI/dispatcher thread
-            $sig.UiConfirmed = [bool]$walk.UiConfirmed; $sig.DispatcherFrame = $walk.DispatcherFrame
-            $sig.AppFrame = $walk.AppFrame; $sig.AppFrameDepth = [int]$walk.AppFrameDepth
-            $sig.StormOperations = @($walk.StormOperations); $sig.StormDominantFrame = $walk.StormDominantFrame
-            $sig.StormDominantCount = [int]$walk.StormDominantCount; $sig.StackDepth = [int]$walk.StackDepth
-        }
-    }
-
-    $idObj = Get-DumpStableId $sig
-    # A Tier-2 kind with no frames means the managed walk could not run (ClrMD missing or failed) - the id stays
-    # provisional and the dump is kept (defer). Record the gap.
-    if ($idObj.WalkPending -and $sig.Kind -ne 'crash') {
-        Add-DepGap 'tier2-unavailable' ("$($sig.Kind) dump $([IO.Path]::GetFileName($DumpPath)): managed walk unavailable (ClrMD missing or failed) - id provisional, dump kept") $Dir
-    }
+    # Parse + id ONCE (shared with Get-DumpEvent): signature, Tier-2 walk, stable id.
+    $ident = Resolve-DumpIdentity -DumpPath $DumpPath -ClrMdDll $ClrMdDll -Dir $Dir
+    if (-not $ident) { return @{ Collect = 'skip'; Reason = 'not a minidump' } }
+    $sig = $ident.Sig; $idObj = $ident.IdObj
 
     # Triage OWNS naming now (the monitor writes a placeholder and never renames). Derive the real tag from the
     # single parse above and compute the FINAL resting name, so the rename is folded into the gzip - there is

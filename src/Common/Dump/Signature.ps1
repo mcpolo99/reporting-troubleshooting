@@ -48,3 +48,31 @@ function Get-DumpStableId($Sig, [int]$TopN = 8) {
     }
 }
 
+
+# Parse a dump to its signature AND stable id, ONCE: read the signature, run the Tier-2 managed walk when the
+# kind needs it (merging the frames back), then compute the stable id. The single parse+id path shared by the
+# triage worker and the context-free Get-DumpEvent, so there is exactly one way a dump becomes an identity.
+# Returns @{ Sig; IdObj } or $null if the file is not a minidump.
+function Resolve-DumpIdentity {
+    param([Parameter(Mandatory)][string]$DumpPath, [string]$ClrMdDll, [string]$Dir)
+    $sig = try { Get-DumpSignature $DumpPath } catch { $null }
+    if (-not $sig) { return $null }
+    if ($sig.Kind -ne 'crash' -and $ClrMdDll -and (Test-Path -LiteralPath $ClrMdDll)) {
+        $tos = if ($sig.ThreadId) { [int]$sig.ThreadId } else { 0 }
+        $walk = Invoke-DumpWalk -Path $DumpPath -ClrMdDll $ClrMdDll -TargetOSID $tos
+        if ($walk) {
+            $sig.Frames = $walk.Frames; $sig.ExceptionType = $walk.ExceptionType
+            if (-not $sig.ThreadId -and $walk.ThreadOSID) { $sig.ThreadId = $walk.ThreadOSID }
+            $sig.UiConfirmed = [bool]$walk.UiConfirmed; $sig.DispatcherFrame = $walk.DispatcherFrame
+            $sig.AppFrame = $walk.AppFrame; $sig.AppFrameDepth = [int]$walk.AppFrameDepth
+            $sig.StormOperations = @($walk.StormOperations); $sig.StormDominantFrame = $walk.StormDominantFrame
+            $sig.StormDominantCount = [int]$walk.StormDominantCount; $sig.StackDepth = [int]$walk.StackDepth
+        }
+    }
+    $idObj = Get-DumpStableId $sig
+    if ($idObj.WalkPending -and $sig.Kind -ne 'crash' -and (Get-Command Add-DepGap -ErrorAction SilentlyContinue)) {
+        Add-DepGap 'tier2-unavailable' ("$($sig.Kind) dump $([IO.Path]::GetFileName($DumpPath)): managed walk unavailable (ClrMD missing or failed) - id provisional, dump kept") $Dir
+    }
+    @{ Sig = $sig; IdObj = $idObj }
+}
+
