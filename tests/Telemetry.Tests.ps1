@@ -173,6 +173,18 @@ try {
     Check 'event now under manual-outbox'  (Test-Path (Join-Path $mcDump 'manual-outbox\e1.json'))
     Check 'dump now under manual-outbox'   (Test-Path (Join-Path $mcDump 'manual-outbox\ProcDump_PC_app_hang_20261030_101010.dmp.gz'))
     Check 'event removed from outbox'      (-not (Test-Path (Join-Path $mc 'outbox\e1.json')))
+
+    # retention (ingest-owned): keeps a dump + its sidecar, sweeps an orphaned sidecar. (Eviction itself needs
+    # >100 MB to cross the floor, so it is validated on the machine, not here.)
+    Write-Host 'retention: orphan sidecar sweep'
+    $rt = Join-Path $dir 'rt'; New-Item -ItemType Directory -Force $rt | Out-Null
+    $rtKi = Join-Path $dir 'rtki'; New-Item -ItemType Directory -Force $rtKi | Out-Null
+    Set-Content (Join-Path $rt 'ProcDump_PC_app_hang_20261030_101010.dmp.gz') -Value 'GZ' -Encoding ascii
+    Set-Content (Join-Path $rt 'ProcDump_PC_app_hang_20261030_101010.info.txt') -Value 'i' -Encoding ascii
+    Set-Content (Join-Path $rt 'orphan.info.txt') -Value 'x' -Encoding ascii
+    Invoke-DumpRetention -DumpDir $rt -LimitGB 30 -Dir $rtKi
+    Check 'retention keeps dump + sidecar'  ((Test-Path (Join-Path $rt 'ProcDump_PC_app_hang_20261030_101010.dmp.gz')) -and (Test-Path (Join-Path $rt 'ProcDump_PC_app_hang_20261030_101010.info.txt')))
+    Check 'retention sweeps orphan sidecar' (-not (Test-Path (Join-Path $rt 'orphan.info.txt')))
 }
 finally { Remove-Item -Recurse -Force $dir -ErrorAction SilentlyContinue }
 

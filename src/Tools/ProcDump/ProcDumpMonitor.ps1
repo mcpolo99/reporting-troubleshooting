@@ -407,103 +407,24 @@ function Get-DumpApp($cfg, [string]$FileName) {
     $cfg.Apps | Where-Object { $FileName -like "$([IO.Path]::GetFileNameWithoutExtension($_))*" } | Select-Object -First 1
 }
 
-# Launch the fault-identification + dedupe worker for one freshly written dump, DETACHED and at
-# below-normal priority, so the slow managed stack walk never blocks the monitor loop. The worker
-# (DumpTriage.ps1, run in place from src next to this script) computes the stable id, counts the
-# occurrence, and soft-suppresses recurrences of an already-kept/known id.
-function Enqueue-DumpTriage([string]$DumpPath, $Config) {
+# Launch the INGEST worker (DumpTriage.ps1 -DumpDir), DETACHED and below-normal. This is the ONLY dump handling
+# the monitor triggers - and it never touches a dump itself: the worker scans the dump dir, triages every
+# complete dump (parse once, id once, fold rename into gzip, report), and runs retention. Single-instance: the
+# worker self-guards with a mutex, and we also skip the launch while the previous one is still running, so a busy
+# arm loop never spawns a pile of ingest processes. No-op if the worker is missing.
+$script:IngestProc = $null
+function Enqueue-Ingest($Config) {
+    if ($script:IngestProc -and -not $script:IngestProc.HasExited) { return }   # previous ingest still running
     $worker = $InstalledTriage
-    if (-not (Test-Path $worker)) { Write-Log 'DumpTriage.ps1 not found - fault-id skipped for this dump.' 'WARN'; return }
+    if (-not (Test-Path $worker)) { Write-Log 'DumpTriage.ps1 not found - ingest skipped.' 'WARN'; return }
+    $dir = if ($Config -and $Config.DumpDir) { $Config.DumpDir } else { (Read-Config).DumpDir }
     try {
         $p = Start-Process powershell.exe -WindowStyle Hidden -PassThru -ArgumentList @(
-            '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', "`"$worker`"", '-DumpPath', "`"$DumpPath`"", '-Quiet')
+            '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', "`"$worker`"", '-DumpDir', "`"$dir`"", '-Quiet')
         try { $p.PriorityClass = Resolve-WorkerPriority $Config } catch {}
-        Write-Log "Fault-id worker queued for $([IO.Path]::GetFileName($DumpPath)) (PID $($p.Id))."
-    } catch { Write-Log "Could not launch fault-id worker: $($_.Exception.Message)" 'WARN' }
-}
-
-# INGEST DETECTOR. Detects a placeholder dump once it is FULLY written and hands it to the detached triage
-# worker. It does NOT parse, rename, dedupe, or write any sidecar - triage owns all of that (parse once, id once,
-# decide, and fold the rename into the gzip). The detector only ever stats a file for completion and enqueues.
-#   $known   : set of dump paths already enqueued
-#   $pending : path -> last seen size (dump still being written)
-function Invoke-NewDumps($cfg, $known, $pending) {
-    $dumps = @(Get-ChildItem -Path $cfg.DumpDir -Filter *.dmp -File -ErrorAction SilentlyContinue | Sort-Object CreationTime)
-    foreach ($d in $dumps) {
-        if ($known.Contains($d.FullName)) { continue }
-
-        # complete = size unchanged since last check, and no writer holds the file
-        if (-not $pending.ContainsKey($d.FullName) -or $pending[$d.FullName] -ne $d.Length) {
-            if (-not $pending.ContainsKey($d.FullName)) { Write-Log "Dump being written: $($d.Name)" }
-            $pending[$d.FullName] = $d.Length; continue
-        }
-        try { ([IO.File]::Open($d.FullName, 'Open', 'Read', 'Read')).Dispose() } catch { continue }
-        $pending.Remove($d.FullName); [void]$known.Add($d.FullName)
-
-        Write-Log ("Dump complete: {0} ({1:N0} MB) - handing to triage." -f $d.Name, ($d.Length / 1MB))
-        # Triage (detached) parses once, computes the id, decides collect/drop, and folds the rename into the gzip
-        # (placeholder -> final .dmp.gz). It writes NO final '.dmp', so this *.dmp scan never re-picks it up.
-        if ($cfg.KnownIssuesEnabled) { Enqueue-DumpTriage $d.FullName $cfg }
-    }
-    # forget dumps that no longer exist (triage consumed the placeholder into a .dmp.gz, or dropped it). A .dmp.gz
-    # is not a *.dmp, so it never re-enters this scan.
-    $existing = @(Get-ChildItem -Path $cfg.DumpDir -Filter *.dmp -File -ErrorAction SilentlyContinue | ForEach-Object { $_.FullName })
-    @($known)        | Where-Object { $_ -notin $existing } | ForEach-Object { [void]$known.Remove($_) }
-    @($pending.Keys) | Where-Object { $_ -notin $existing } | ForEach-Object { $pending.Remove($_) }
-}
-
-# Size-based dump retention, keyed off the LEDGER (never by count). A dump is PROTECTED and never evicted when:
-#   - it is a current ledger sample (state held or granted) - we hold it, the backend does not; or
-#   - it is referenced by any event still in the outbox (pending) or outbox\failed (parked) - unsent.
-# Everything else is a stale/orphaned artifact (no ledger sample, no pending report) and is evictable oldest-first
-# when over the disk budget. Uploaded dumps are already deleted at upload, so in practice retention only reaps
-# orphans. If the box is over budget but every dump on disk is protected (a long offline burst of held dumps),
-# nothing is deleted and a warning is logged - manual collect is the relief valve, never silent data loss.
-function Invoke-DumpRetention($cfg) {
-    $limitBytes = [Math]::Max([double]$cfg.DumpDiskLimitGB, 0.1) * 1GB
-    $roots = @($cfg.DumpDir, (Join-Path $cfg.DumpDir 'failed-uploads'))
-    $ki = Get-KnownIssuesDir
-
-    # Protected set of filenames (both raw and .gz forms). 1) ledger samples (held/granted).
-    $protected = @{}
-    function Protect([hashtable]$set, [string]$p) {
-        if (-not $p) { return }
-        $n = [IO.Path]::GetFileName("$p"); $set[$n] = $true; $set[($n -replace '\.gz$','')] = $true; $set["$n.gz"] = $true
-    }
-    try { $led = Read-DeviceLedger $ki; foreach ($sig in @($led.entries.Keys)) { Protect $protected $led.entries[$sig].sample } } catch {}
-    # 2) dumps referenced by any UNSENT report - the outbox top level AND the parked outbox\failed.
-    foreach ($sub in @('outbox', 'outbox\failed')) {
-        $d = Join-Path $ki $sub
-        if (-not (Test-Path -LiteralPath $d)) { continue }
-        foreach ($ev in @(Get-ChildItem -LiteralPath $d -Filter *.json -File -ErrorAction SilentlyContinue)) {
-            try { $j = Get-Content -LiteralPath $ev.FullName -Raw | ConvertFrom-Json; Protect $protected $j.dump.path; Protect $protected $j.dump.file } catch {}
-        }
-    }
-
-    $all = @()
-    foreach ($r in $roots) {
-        if (-not (Test-Path -LiteralPath $r)) { continue }
-        $all += @(Get-ChildItem -LiteralPath $r -File -ErrorAction SilentlyContinue | Where-Object { $_.Name -match '\.dmp(\.gz)?$' })
-    }
-    if (-not $all.Count) { return }
-    $total = ($all | Measure-Object Length -Sum).Sum
-    if ($total -le $limitBytes) { return }
-
-    # Evict oldest UNPROTECTED (orphaned/stale) dumps until under budget. Held/granted/unsent are never touched.
-    $evictable = @($all | Where-Object { -not $protected[$_.Name] } | Sort-Object LastWriteTime)
-    foreach ($d in $evictable) {
-        if ($total -le $limitBytes) { break }
-        try {
-            $sz = $d.Length
-            Remove-Item -LiteralPath $d.FullName -Force -ErrorAction Stop
-            foreach ($sx in '.info.txt', '.versions.txt') { Remove-Item -LiteralPath ($d.FullName -replace '\.dmp(\.gz)?$', $sx) -Force -ErrorAction SilentlyContinue }
-            $total -= $sz
-            Write-Log ("Retention: evicted orphan dump {0} ({1:N1} MB); budget {2} GB" -f $d.Name, ($sz/1MB), $cfg.DumpDiskLimitGB)
-        } catch { Write-Log "Retention: could not evict $($d.Name) (in use?), will retry." 'WARN' }
-    }
-    if ($total -gt $limitBytes) {
-        Write-Log ("Retention: still {0:N1} GB over the {1} GB budget, but all remaining dumps are held/unsent - kept. Use 'Collect for manual handling' to offload them." -f (($total-$limitBytes)/1GB), $cfg.DumpDiskLimitGB) 'WARN'
-    }
+        $script:IngestProc = $p
+        Write-Log "Ingest worker launched (PID $($p.Id)); triages new dumps + runs retention."
+    } catch { Write-Log "Could not launch ingest worker: $($_.Exception.Message)" 'WARN' }
 }
 
 # Effective ProcDump arguments. -n comes from the config; if ProcDumpArgs has no -n, -n 1 is used.
@@ -1050,9 +971,10 @@ function Invoke-Monitor {
                 break
             }
 
-            # 0) Track exe versions of running apps; analyse finished dumps (reason, duplicates)
+            # 0) Track exe versions of running apps. (Dump detection/triage/retention is NOT the armer's job -
+            #    the detached ingest worker owns the dump dir; it is launched below on a timer and when a dump
+            #    was just written.)
             Update-AppVersions $cfg $seenProcs $lastInfo
-            Invoke-NewDumps $cfg $known $pending
 
             $pdArgs = Get-EffectiveArgs $cfg
 
@@ -1078,6 +1000,10 @@ function Invoke-Monitor {
                     # nothing, or a saved config with a low/zero CooldownSeconds) cannot spin the monitor in a tight
                     # re-arm loop. A changed/absent PID set clears the cooldown immediately (see below), so a genuinely
                     # new process is still picked up promptly.
+                    # A dump was just written -> trigger the ingest worker promptly (don't wait for the cleanup
+                    # timer), so a fresh capture is triaged within seconds. The armer reacts to ProcDump's exit,
+                    # it still does not touch the dump itself.
+                    if ($made) { Enqueue-Ingest $cfg }
                     $coolSecs = [Math]::Max([int]$cfg.CooldownSeconds, 60)
                     if ($pidsNow) {
                         $cooldown[$app] = @{ Until = (Get-Date).AddSeconds($coolSecs); Pids = $pidsNow }
@@ -1097,9 +1023,9 @@ function Invoke-Monitor {
                 }
 
                 # Dump filename template. ProcDump can only substitute PROCESSNAME/YYMMDD/HHMMSS and has no token
-                # for which trigger (exception vs hang) fired, so we capture with a placeholder tag ('pending')
-                # and Invoke-NewDumps renames to the final ProcDump_<pc>_<process>_<tag>_<yyyyMMdd>_<HHmmss>.dmp
-                # once it has read the dump's reason. The computer name makes a dump's origin obvious.
+                # for which trigger (exception vs hang) fired, so we capture with a placeholder tag ('pending');
+                # the ingest worker's triage folds the real tag into the final ProcDump_<pc>_<process>_<tag>_<date>_<time>.dmp.gz.
+                # The computer name makes a dump's origin obvious.
                 $dumpTemplate = Join-Path $cfg.DumpDir ('ProcDump_{0}_PROCESSNAME_pending_YYMMDD_HHMMSS.dmp' -f $env:COMPUTERNAME)
                 $argLine = "$pdArgs $app `"$dumpTemplate`""
                 try {
@@ -1118,17 +1044,9 @@ function Invoke-Monitor {
             if (((Get-Date) - $lastCleanup).TotalSeconds -ge $cfg.CleanupSeconds) {
                 $lastCleanup = Get-Date
 
-                # Dump retention is size-based now (DumpDiskLimitGB), not count-based, and it never evicts a dump
-                # whose report is still pending - see Invoke-DumpRetention. Covers the dump dir and failed-uploads.
-                Invoke-DumpRetention $cfg
-
-                # info/version files whose dump is gone (.versions.txt = older script version). A dump is "gone"
-                # only when neither the raw .dmp nor the .dmp.gz (kept-at-rest form) exists.
-                Get-ChildItem -Path $cfg.DumpDir -Filter *.txt -File -ErrorAction SilentlyContinue |
-                    Where-Object { $_.Name -match '\.(info|versions)\.txt$' -and
-                                   -not (Test-Path -LiteralPath ($_.FullName -replace '\.(info|versions)\.txt$', '.dmp')) -and
-                                   -not (Test-Path -LiteralPath ($_.FullName -replace '\.(info|versions)\.txt$', '.dmp.gz')) } |
-                    Remove-Item -Force -ErrorAction SilentlyContinue
+                # Dump handling (detect/triage/retention) is the ingest worker's job, not the armer's. Launch it
+                # here as a periodic safety net (it self-guards single-instance and no-ops if already running).
+                Enqueue-Ingest $cfg
 
                 # Legacy cleanup: recurrences are deleted at triage now, so the old KnownIssues\Suppressed store is
                 # retired - remove it wholesale if a previous version left one behind.
@@ -1200,7 +1118,7 @@ function Invoke-Monitor {
 # =============================== ENTRY POINT =============================
 # Loaded as a library (RT_LIBRARY=1, e.g. the GUI runspace dot-sources this for its functions): expose
 # functions only, no auto-run. BUT an explicit action switch must still run: a monitor/worker the GUI
-# launches as its own process (Start-MonitorRun, Enqueue-DumpTriage) inherits RT_LIBRARY=1 from the GUI's
+# launches as its own process (Start-MonitorRun, Enqueue-Ingest) inherits RT_LIBRARY=1 from the GUI's
 # process environment, and must not be silenced by it - that would "start" a process that does nothing.
 if ($env:RT_LIBRARY -eq '1' -and -not ($Monitor -or $Install -or $Update -or $Uninstall -or $Triage)) { return }
 

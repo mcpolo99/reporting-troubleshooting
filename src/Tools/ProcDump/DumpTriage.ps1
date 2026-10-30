@@ -90,16 +90,34 @@ function Triage-One([string]$Path) {
     return $r
 }
 
+# A dump is "complete" (ProcDump finished writing) when it can be opened for read without a sharing violation.
+# A still-being-written placeholder is locked by ProcDump; skip it this pass and catch it the next.
+function Test-DumpComplete([string]$Path) {
+    try { ([IO.File]::Open($Path, 'Open', 'Read', 'Read')).Dispose(); return $true } catch { return $false }
+}
+
 if ($DumpPath) {
     [void](Triage-One $DumpPath)
 } else {
+    # INGEST PASS (the monitor launches this on a timer; it is the only thing that touches the dump dir). Single
+    # instance across passes so two scans never triage the same dump concurrently.
     if (-not (Test-Path $DumpDir)) { Say "Dump folder not found: $DumpDir"; return }
-    $dumps = @(Get-ChildItem -Path $DumpDir -Filter *.dmp -File -ErrorAction SilentlyContinue | Sort-Object CreationTime)
-    Say ("Triaging {0} dump(s) in {1} (walk tool: {2})`n" -f $dumps.Count, $DumpDir, $(if ($clrmd) { 'ClrMD' } else { 'NONE - hangs stay provisional' }))
-    $kept = 0; $dropped = 0; $defer = 0
-    foreach ($d in $dumps) {
-        $r = Triage-One $d.FullName
-        switch ($r.Collect) { 'collect' { $kept++ } 'drop' { $dropped++ } 'defer' { $defer++ } }
-    }
-    Say ("`nDone: {0} collected, {1} dropped, {2} deferred (provisional)." -f $kept, $dropped, $defer)
+    $mtx = New-Object System.Threading.Mutex($false, 'Global\RTDumpIngest'); $owned = $false
+    try { $owned = $mtx.WaitOne(0) } catch [System.Threading.AbandonedMutexException] { $owned = $true }
+    if (-not $owned) { Say 'Another ingest pass is already running - exiting.'; $mtx.Dispose(); return }
+    try {
+        $dumps = @(Get-ChildItem -Path $DumpDir -Filter *.dmp -File -ErrorAction SilentlyContinue | Sort-Object CreationTime)
+        Say ("Triaging {0} dump(s) in {1} (walk tool: {2})`n" -f $dumps.Count, $DumpDir, $(if ($clrmd) { 'ClrMD' } else { 'NONE - hangs stay provisional' }))
+        $kept = 0; $dropped = 0; $defer = 0; $skipped = 0
+        foreach ($d in $dumps) {
+            if (-not (Test-DumpComplete $d.FullName)) { $skipped++; continue }   # still being written - next pass
+            $r = Triage-One $d.FullName
+            switch ($r.Collect) { 'collect' { $kept++ } 'drop' { $dropped++ } 'defer' { $defer++ } }
+        }
+        Say ("`nDone: {0} collected, {1} dropped, {2} deferred, {3} still-writing." -f $kept, $dropped, $defer, $skipped)
+        # The ingest worker owns the dump dir, so it runs size-based retention too (never the armer).
+        if (Get-Command Invoke-DumpRetention -ErrorAction SilentlyContinue) {
+            try { Invoke-DumpRetention -DumpDir $DumpDir -LimitGB ([double](Cfg 'DumpDiskLimitGB' 30)) } catch {}
+        }
+    } finally { if ($owned) { try { $mtx.ReleaseMutex() } catch {} }; $mtx.Dispose() }
 }

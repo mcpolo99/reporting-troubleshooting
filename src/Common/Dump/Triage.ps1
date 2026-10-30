@@ -1,4 +1,63 @@
-# Dump engine: triage one dump end-to-end (signature -> walk -> id -> ledger decision -> report -> collect/drop).
+# Dump engine: triage one dump end-to-end (signature -> walk -> id -> ledger decision -> report -> collect/drop),
+# plus size-based retention over the dump dir. Owned by the INGEST concern (triage worker), never the armer.
+
+
+# Size-based dump retention, keyed off the LEDGER (never by count). A dump is PROTECTED and never evicted when
+# it is a current ledger sample (held/granted) or is referenced by any unsent report (outbox or outbox\failed).
+# Everything else is a stale/orphaned artifact and is evictable oldest-first when over the disk budget (uploaded
+# dumps are already deleted at upload, so in practice this only reaps orphans). Over budget with only protected
+# dumps -> warn, never silent data loss. Also sweeps orphaned .info/.versions sidecars.
+function Invoke-DumpRetention {
+    param([Parameter(Mandatory)][string]$DumpDir, [double]$LimitGB = 30, [string]$Dir)
+    if (-not $Dir) { $Dir = Get-KnownIssuesDir }
+    $limitBytes = [Math]::Max($LimitGB, 0.1) * 1GB
+    $roots = @($DumpDir, (Join-Path $DumpDir 'failed-uploads'))
+
+    $protected = @{}
+    $add = { param($p) if ($p) { $n = [IO.Path]::GetFileName("$p"); $protected[$n] = $true; $protected[($n -replace '\.gz$','')] = $true; $protected["$n.gz"] = $true } }
+    try { $led = Read-DeviceLedger $Dir; foreach ($sig in @($led.entries.Keys)) { & $add $led.entries[$sig].sample } } catch {}
+    foreach ($sub in @('outbox', 'outbox\failed')) {
+        $d = Join-Path $Dir $sub
+        if (-not (Test-Path -LiteralPath $d)) { continue }
+        foreach ($ev in @(Get-ChildItem -LiteralPath $d -Filter *.json -File -ErrorAction SilentlyContinue)) {
+            try { $j = Get-Content -LiteralPath $ev.FullName -Raw | ConvertFrom-Json; & $add $j.dump.path; & $add $j.dump.file } catch {}
+        }
+    }
+
+    # Orphaned sidecars (a .info/.versions whose dump is gone) - sweep regardless of budget.
+    foreach ($r in $roots) {
+        if (-not (Test-Path -LiteralPath $r)) { continue }
+        Get-ChildItem -LiteralPath $r -Filter *.txt -File -ErrorAction SilentlyContinue |
+            Where-Object { $_.Name -match '\.(info|versions)\.txt$' -and
+                           -not (Test-Path -LiteralPath ($_.FullName -replace '\.(info|versions)\.txt$', '.dmp')) -and
+                           -not (Test-Path -LiteralPath ($_.FullName -replace '\.(info|versions)\.txt$', '.dmp.gz')) } |
+            Remove-Item -Force -ErrorAction SilentlyContinue
+    }
+
+    $all = @()
+    foreach ($r in $roots) {
+        if (-not (Test-Path -LiteralPath $r)) { continue }
+        $all += @(Get-ChildItem -LiteralPath $r -File -ErrorAction SilentlyContinue | Where-Object { $_.Name -match '\.dmp(\.gz)?$' })
+    }
+    if (-not $all.Count) { return }
+    $total = ($all | Measure-Object Length -Sum).Sum
+    if ($total -le $limitBytes) { return }
+
+    $evictable = @($all | Where-Object { -not $protected[$_.Name] } | Sort-Object LastWriteTime)
+    foreach ($d in $evictable) {
+        if ($total -le $limitBytes) { break }
+        try {
+            $sz = $d.Length
+            Remove-Item -LiteralPath $d.FullName -Force -ErrorAction Stop
+            foreach ($sx in '.info.txt', '.versions.txt') { Remove-Item -LiteralPath ($d.FullName -replace '\.dmp(\.gz)?$', $sx) -Force -ErrorAction SilentlyContinue }
+            $total -= $sz
+            Write-TelemetryLog ("retention: evicted orphan dump {0} ({1:N1} MB); budget {2} GB" -f $d.Name, ($sz/1MB), $LimitGB)
+        } catch { Write-TelemetryLog "retention: could not evict $($d.Name) (in use?), will retry." 'WARN' }
+    }
+    if ($total -gt $limitBytes) {
+        Write-TelemetryLog ("retention: still {0:N1} GB over the {1} GB budget, but all remaining dumps are held/unsent - kept (use Collect for manual handling)." -f (($total-$limitBytes)/1GB), $LimitGB) 'WARN'
+    }
+}
 
 
 # =============================== TRIAGE (one dump) =====================
