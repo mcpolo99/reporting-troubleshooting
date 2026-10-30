@@ -1,26 +1,28 @@
-# Edge agent - target architecture
+# Architecture - reporting-troubleshooting
 
-How the failure-evidence edge agent should be. Target design, not a description of today's code -
-everything here is how we want the service to work. Scope: this repo only.
+Target architecture for the whole application. It is an admin **host shell** a technician runs on a
+customer PC to capture troubleshooting evidence; the shell hosts a set of **tools**, each its own
+subsystem. Everything here is how we want it to be, not a description of today's code.
 
-## Reading order
+```
+reporting-troubleshooting (host app)
+├── core      ← the host/shell + shared platform (launcher, GUI/CLI, tool hosting, package store, logging)
+└── tools
+    ├── monitor    ← always-on crash/hang capture + telemetry agent   (fully specified)
+    ├── perfview   ← on-demand ETW/ETL capture                        (tool, not yet specified here)
+    └── packages   ← shared tool-binary install/verify surface        (platform; see core)
+```
 
-| # | Topic | Answers |
-|---|---|---|
-| [01](01-concept.md) | Concept | What the agent is - purpose, actors, invariants |
-| [02](02-capabilities-and-contexts.md) | Capabilities & concerns | What it must handle, and the single-responsibility concerns that own each |
-| [03](03-layers-and-dependency-rule.md) | Layers & dependency rule | The four domain layers and the inward-only dependency direction |
-| [04](04-ports-and-contracts.md) | Ports & contracts | Boundaries by role, and the one contract between concerns (the stores) |
-| [05](05-stores-and-data-model.md) | Stores & data model | The ledger as the single local source of truth |
-| [06](06-backend-contract.md) | Backend contract | The backend the agent consumes, behind one gateway |
-| [07](07-capability-flows.md) | Capability flows | Ingest, sync/flush, the collect decision, link lifecycle |
-| [08](08-rules.md) | Rules | The plainly-stated rules that bind every part |
+## Libraries
 
-## One-paragraph concept
+| Area | What it covers |
+|---|---|
+| [core/](core/README.md) | The application itself: self-elevating bootstrap/update, the GUI and CLI shells, the isolated-runspace tool-hosting model and the tool plugin contract, the shared package store + install engine, logging and config conventions. |
+| [monitor/](monitor/README.md) | The Monitor tool: the background agent that arms capture, turns a dump into a deduplicated report + compressed evidence, keeps a per-machine ledger, and reconciles with the backend online / offline / manually. |
 
-An unattended, per-machine agent that keeps failure capture armed on chosen applications, turns each raw
-dump into a durable factual **report** plus a compressed **evidence** artifact, keeps a per-machine
-**ledger** of which failure **signatures** it already holds so it never hoards duplicates - even with no
-network - and **reconciles** that memory with a central backend when a link exists, degrading cleanly to
-fully offline and to manual hand-off. The backend holds the real data; the edge holds exactly enough
-local truth to never duplicate and never lose evidence.
+A tool (monitor, perfview) is a **plugin** the core hosts: a standalone entry script with its own
+per-tool config, hosted off the UI thread in an isolated runspace, dot-sourcing the shared platform. Core
+knows how to launch and host a tool; it does not know a tool's internals. Each tool's own subsystem
+architecture lives in its folder here.
+
+Start with [core/](core/README.md) for the host, then [monitor/](monitor/README.md) for the agent.
