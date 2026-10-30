@@ -13,6 +13,7 @@
 #>
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot '..\src\Common\DumpId.ps1')
+. (Join-Path $PSScriptRoot '..\src\Common\Packages.ps1')    # Resolve-PackageTool 'clrmd' - so the in-process self-test resolves ClrMD the SAME way the worker does (else ids diverge)
 . (Join-Path $PSScriptRoot '..\src\Common\Telemetry.ps1')   # Compress-DumpFile (gzip at rest)
 
 $script:fail = 0; $script:count = 0
@@ -77,6 +78,39 @@ try {
         # Compare resolved paths (the recorded path may be in 8.3 short form; the file is the same).
         $sampleReal = if ($sample -and (Test-Path -LiteralPath $sample)) { (Get-Item -LiteralPath $sample).FullName } else { $null }
         Check 'ledger sample is the .dmp.gz'   ($gz.Count -eq 1 -and $sampleReal -eq $gz[0].FullName)
+
+        # --- the REAL ingest worker entrypoint: DumpTriage.ps1 -DumpDir, dry-run then real ---
+        Write-Host 'ingest worker (DumpTriage.ps1 -DumpDir): dry-run then real'
+        $wdd = Join-Path $root 'wdumps'; $wki = Join-Path $root 'wki'
+        New-Item -ItemType Directory -Force $wdd, $wki | Out-Null
+        $wph = Join-Path $wdd ('ProcDump_{0}_powershell_pending_{1:yyyyMMdd_HHmmss}.dmp' -f $env:COMPUTERNAME, (Get-Date))
+        $gen2 = $false
+        try { $gen2 = New-TestMinidump $wph } catch {}
+        if (-not $gen2) {
+            Write-Host '  SKIP worker e2e - second minidump generation failed' -ForegroundColor Yellow
+        } else {
+            $expected = (Get-DumpEvent -DumpPath $wph).signatureId   # the self-test signatureId
+            $worker = Join-Path $PSScriptRoot '..\src\Tools\ProcDump\DumpTriage.ps1'
+
+            # DRY RUN: identify only - must report the SAME signatureId and change nothing.
+            $dry = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $worker -DumpDir $wdd -KnownDir $wki -DryRun 2>&1 | Out-String
+            Check 'dry-run reports the self-test id' ($dry -match [regex]::Escape($expected))
+            Check 'dry-run left the dump intact'     (Test-Path -LiteralPath $wph)
+            Check 'dry-run wrote no .dmp.gz'         (@(Get-ChildItem -LiteralPath $wdd -Filter *.dmp.gz -File -ErrorAction SilentlyContinue).Count -eq 0)
+            Check 'dry-run wrote no ledger'          (-not (Test-Path -LiteralPath (Join-Path $wki 'device-ledger.json')))
+
+            # REAL RUN: triages inline + writes report + ledger, all keyed on that same signatureId.
+            & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $worker -DumpDir $wdd -KnownDir $wki -Quiet | Out-Null
+            Check 'real run consumed the placeholder' (-not (Test-Path -LiteralPath $wph))
+            $wgz = @(Get-ChildItem -LiteralPath $wdd -Filter *.dmp.gz -File -ErrorAction SilentlyContinue)
+            Check 'real run wrote the .dmp.gz'        ($wgz.Count -eq 1)
+            $wled = Read-DeviceLedger $wki
+            Check 'real run ledger holds the id'      ($wled.entries.ContainsKey($expected) -and $wled.entries[$expected].state -eq 'held')
+            $wout = @(Get-ChildItem -LiteralPath (Join-Path $wki 'outbox') -Filter *.json -File -ErrorAction SilentlyContinue)
+            Check 'real run wrote one report'         ($wout.Count -eq 1)
+            $rep = if ($wout.Count -eq 1) { Get-Content -LiteralPath $wout[0].FullName -Raw | ConvertFrom-Json } else { $null }
+            Check 'report signatureId == self-test'   ($rep -and $rep.signatureId -eq $expected)
+        }
     }
 }
 finally { Remove-Item -Recurse -Force $root -ErrorAction SilentlyContinue }

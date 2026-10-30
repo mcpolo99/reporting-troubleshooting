@@ -19,8 +19,10 @@
 #>
 [CmdletBinding()]
 param(
-    [string]$DumpPath,       # a single dump (the monitor's per-dump worker)
-    [string]$DumpDir,        # triage every .dmp here (on-demand); defaults to the monitor's configured DumpDir
+    [string]$DumpPath,       # a single dump (on-demand)
+    [string]$DumpDir,        # the INGEST pass: triage every complete .dmp here; defaults to the configured DumpDir
+    [string]$KnownDir,       # state dir for the ledger/outbox (defaults to the machine KnownIssues); for isolation/tests
+    [switch]$DryRun,         # identify only: compute + print each dump's signatureId, mutate NOTHING (no gzip/delete/report/ledger/retention)
     [switch]$Quiet
 )
 
@@ -83,9 +85,19 @@ function Say($m) { if (-not $Quiet) { Write-Host $m } }
 $script:IsOnline = $false
 try { $script:IsOnline = [bool](Test-IsHttp (Get-TelemetryConfig).EventSink) } catch {}
 
+# State dir for the ledger/outbox: an explicit -KnownDir (isolation/tests), else the machine KnownIssues.
+$script:StateDir = if ($KnownDir) { $KnownDir } else { Get-KnownIssuesDir }
+
 function Triage-One([string]$Path) {
-    $r = Invoke-DumpTriage -DumpPath $Path -ClrMdDll $clrmd -BaselinePath $baseline -SuppressKnown $suppressKnown -IsOnline $script:IsOnline
     $name = [IO.Path]::GetFileName($Path)
+    if ($DryRun) {
+        # Identify only - compute the signatureId via the pure entrypoint; mutate nothing.
+        $ev = try { Get-DumpEvent -DumpPath $Path } catch { $null }
+        if ($ev) { Say ("{0,-40} dry       id={1} {2}" -f $name, $ev.signatureId, $ev.class) }
+        else     { Say ("{0,-40} dry       (not a minidump / unreadable)" -f $name) }
+        return @{ Collect = 'dry'; Id = $(if ($ev) { "$($ev.signatureId)" } else { $null }); Leaf = ''; Count = 0 }
+    }
+    $r = Invoke-DumpTriage -DumpPath $Path -ClrMdDll $clrmd -Dir $script:StateDir -BaselinePath $baseline -SuppressKnown $suppressKnown -IsOnline $script:IsOnline
     Say ("{0,-40} {1,-9} id={2} x{3,-4} {4}{5}" -f $name, $r.Collect, $r.Id, $r.Count, $r.Leaf, $(if ($r.Disposition -and $r.Disposition -ne 'kept') { " ($($r.Disposition))" } else { '' }))
     return $r
 }
@@ -114,10 +126,10 @@ if ($DumpPath) {
             $r = Triage-One $d.FullName
             switch ($r.Collect) { 'collect' { $kept++ } 'drop' { $dropped++ } 'defer' { $defer++ } }
         }
-        Say ("`nDone: {0} collected, {1} dropped, {2} deferred, {3} still-writing." -f $kept, $dropped, $defer, $skipped)
-        # The ingest worker owns the dump dir, so it runs size-based retention too (never the armer).
-        if (Get-Command Invoke-DumpRetention -ErrorAction SilentlyContinue) {
-            try { Invoke-DumpRetention -DumpDir $DumpDir -LimitGB ([double](Cfg 'DumpDiskLimitGB' 30)) } catch {}
+        Say ("`nDone: {0} collected, {1} dropped, {2} deferred, {3} still-writing.{4}" -f $kept, $dropped, $defer, $skipped, $(if ($DryRun) { ' (DRY RUN - nothing changed)' } else { '' }))
+        # The ingest worker owns the dump dir, so it runs size-based retention too (never the armer). Not in a dry run.
+        if (-not $DryRun -and (Get-Command Invoke-DumpRetention -ErrorAction SilentlyContinue)) {
+            try { Invoke-DumpRetention -DumpDir $DumpDir -LimitGB ([double](Cfg 'DumpDiskLimitGB' 30)) -Dir $script:StateDir } catch {}
         }
     } finally { if ($owned) { try { $mtx.ReleaseMutex() } catch {} }; $mtx.Dispose() }
 }
