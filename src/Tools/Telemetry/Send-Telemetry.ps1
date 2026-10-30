@@ -39,6 +39,14 @@ $script:LogCount = 0
 New-LogFile
 try { Remove-OldLogs 10 } catch {}
 
+# Single instance. The monitor launches this forwarder on a timer; a slow flush (a big upload, or a long
+# offline retry sweep) must never let the next tick start a SECOND forwarder racing on the same outbox/dumps.
+# A machine-wide mutex makes the flush exclusive: if another forwarder already holds it, this one exits at once.
+$FlushMutex = New-Object System.Threading.Mutex($false, 'Global\RTTelemetryFlush')
+$FlushOwned = $false
+try { $FlushOwned = $FlushMutex.WaitOne(0) } catch [System.Threading.AbandonedMutexException] { $FlushOwned = $true }
+if (-not $FlushOwned) { Write-Log 'Another telemetry flush is already running - exiting (single instance).' 'WARN'; $FlushMutex.Dispose(); exit 0 }
+
 if (-not $Dir) { $Dir = Get-KnownIssuesDir }
 $cfg = Get-TelemetryConfig
 $mode = if (Test-IsHttp $cfg.EventSink) { 'http' } else { 'local' }
@@ -49,9 +57,13 @@ try {
     if ($k -ge 0) { Write-Log "known-signatures: baseline now lists $k signature(s)" }
     else { Write-Log 'known-signatures: sync failed - keeping existing baseline' 'WARN' }
 
+    # Device profile: pull it from the backend when reachable; otherwise (local mode, or a failed http sync)
+    # BUILD it locally from the registry + baseline so offline dedup still holds - one dump per signature, not
+    # one per recurrence - instead of leaving the flush with no profile at all.
     $p = Sync-DeviceProfile -Config $cfg
-    if ($p -ge 0) { Write-Log "device-profile: $p signature(s) already collected for this device" }
-    else { Write-Log 'device-profile: sync failed - keeping cached profile' 'WARN' }
+    if ($p -gt 0) { Write-Log "device-profile: $p signature(s) already collected for this device (from backend)" }
+    elseif ($p -eq 0) { $lp = Build-LocalDeviceProfile -Config $cfg; Write-Log "device-profile: local/offline - built $lp entry(ies) from registry + baseline" }
+    else { $lp = Build-LocalDeviceProfile -Config $cfg; Write-Log "device-profile: backend sync failed - rebuilt $lp entry(ies) locally" 'WARN' }
 
     $r = Send-OutboxEvents -Dir $Dir -Config $cfg
     $level = if ($r.FailedUploads -gt 0) { 'ERROR' } elseif ($r.Failed -gt 0) { 'WARN' } else { 'INFO' }

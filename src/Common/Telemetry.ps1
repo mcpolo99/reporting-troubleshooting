@@ -109,23 +109,28 @@ function Get-UploadAttempts { param([string]$EventPath)
 function Set-UploadAttempts { param([string]$EventPath, [int]$Count) try { Set-Content -LiteralPath "$EventPath.try" -Value $Count -Encoding ascii } catch {} }
 function Clear-UploadAttempts { param([string]$EventPath) $p = "$EventPath.try"; if (Test-Path -LiteralPath $p) { Remove-Item -LiteralPath $p -Force -ErrorAction SilentlyContinue } }
 
-# Resolve where the granted dump actually is. Prefers an absolute path the producer stamped (dump.path), then a
-# rooted dump.file, then DumpDir + the bare filename. Returns @{ Path = <first existing | $null>; Tried = @() }.
+# Resolve where the dump for an event actually is. Prefers an absolute path the producer stamped (dump.path),
+# then a rooted dump.file, then DumpDir + the bare filename. The event records the RAW .dmp name/path, but the
+# triage worker gzips every kept dump at rest (<dump>.dmp -> <dump>.dmp.gz), so for each candidate we also try
+# the ".gz" form - raw-first so a not-yet-gzipped dump still resolves. Returns @{ Path; Tried; IsGz }.
 # (#42 defect 3: a bare filename + a DumpDir that differs from where the capture landed skipped upload silently.)
 function Resolve-DumpPath { param($Evt, $Config)
     $d = if ($Evt) { $Evt.dump } else { $null }
-    $tried = @()
+    $bases = @()
     if ($d) {
-        if ($d.path) { $tried += "$($d.path)" }
+        if ($d.path) { $bases += "$($d.path)" }
         $file = "$($d.file)"
         if ($file) {
-            if ([IO.Path]::IsPathRooted($file)) { $tried += $file }
-            if ($Config.DumpDir) { $tried += (Join-Path $Config.DumpDir ([IO.Path]::GetFileName($file))) }
+            if ([IO.Path]::IsPathRooted($file)) { $bases += $file }
+            if ($Config.DumpDir) { $bases += (Join-Path $Config.DumpDir ([IO.Path]::GetFileName($file))) }
         }
     }
+    # Each base expands to [raw, raw.gz]; a base already ending in .gz is tried as-is.
+    $tried = @()
+    foreach ($b in $bases) { if ($b) { if ($b -match '\.gz$') { $tried += $b } else { $tried += $b; $tried += ($b + '.gz') } } }
     $hit = $null
     foreach ($c in $tried) { if ($c -and (Test-Path -LiteralPath $c)) { $hit = $c; break } }
-    return @{ Path = $hit; Tried = @($tried) }
+    return @{ Path = $hit; Tried = @($tried); IsGz = [bool]($hit -and $hit -match '\.gz$') }
 }
 
 # Archive an event that is fully handled (sent, and its dump obligation met or n/a): move it to outbox\sent and
@@ -141,6 +146,17 @@ function Move-SentEvent { param([string]$EventPath, [string]$SentDir)
 function Remove-HandledDump { param([string]$DumpPath)
     if (-not $DumpPath) { return }
     foreach ($f in @($DumpPath) + @('.info.txt', '.versions.txt' | ForEach-Object { $DumpPath -replace '\.dmp$', $_ })) {
+        if (Test-Path -LiteralPath $f) { Remove-Item -LiteralPath $f -Force -ErrorAction SilentlyContinue }
+    }
+}
+
+# Delete a dump and its sidecars, handling BOTH the raw (.dmp) and the kept-at-rest (.dmp.gz) form - the stem
+# for sidecars is the path with a trailing .dmp or .dmp.gz stripped. Used after a successful upload (the only
+# delete-on-send; the backend now holds the dump). No-op on a blank/missing path.
+function Remove-DumpArtifacts { param([string]$DumpPath)
+    if (-not $DumpPath) { return }
+    $stem = $DumpPath -replace '\.dmp(\.gz)?$', ''
+    foreach ($f in @($DumpPath) + @('.info.txt', '.versions.txt' | ForEach-Object { $stem + $_ })) {
         if (Test-Path -LiteralPath $f) { Remove-Item -LiteralPath $f -Force -ErrorAction SilentlyContinue }
     }
 }
@@ -192,12 +208,13 @@ function Send-OutboxEvents {
                 $evt = $null; try { $evt = $body | ConvertFrom-Json } catch {}
                 $idem = if ($evt -and $evt.ids -and $evt.ids.eventId) { "$($evt.ids.eventId)" } else { [IO.Path]::GetFileNameWithoutExtension($f.Name) }
                 # Profile shortcut (CONTRACT 4a): if THIS device already uploaded a dump for this signature, the
-                # held dump is redundant - discard it now (offline-aware, before any grant round-trip). The grant
-                # still decides any actual upload; this only avoids holding/retrying a dump the backend already has.
+                # backend already has a sample - we will NOT be granted another, so don't bother holding a grant
+                # round-trip's worth of work on it. We do NOT delete the local dump (kept dumps are never deleted
+                # on the send path; size-based retention evicts handled dumps later). The grant still decides any
+                # actual upload; this only skips churn for a signature the backend already has.
                 $sigId = if ($evt) { if ($evt.signatureId) { "$($evt.signatureId)" } elseif ($evt.ids) { "$($evt.ids.signatureId)" } else { '' } } else { '' }
                 if ($sigId -and $profile[$sigId] -eq 'uploaded') {
-                    $locP = Resolve-DumpPath -Evt $evt -Config $Config
-                    if ($locP.Path) { Remove-HandledDump -DumpPath $locP.Path; Write-TelemetryLog ("device already uploaded a dump for {0} - discarded local {1}" -f $sigId, (Split-Path $locP.Path -Leaf)) }
+                    Write-TelemetryLog ("device already uploaded a dump for {0} - any held dump kept locally, not re-collected" -f $sigId)
                 }
                 try {
                     $resp = Invoke-RestMethod -Method Post -Uri ($Config.EventSink.TrimEnd('/') + '/v1/events') -Body $body -ContentType 'application/json' -Headers (Get-AuthHeaders $Config @{ 'Idempotency-Key' = $idem }) -TimeoutSec 30
@@ -206,12 +223,13 @@ function Send-OutboxEvents {
                     Write-TelemetryLog ("event POST failed for {0}: {1}" -f $f.Name, $_.Exception.Message) 'WARN'
                     $failed++; continue
                 }
-                # 2) No grant token -> the backend did not want this capture's dump -> the event is done and the
-                #    local dump (if any) is not needed - delete it (DumpDir is staging, not a keep-store).
+                # 2) No grant token -> the backend did not want this capture's dump -> the EVENT is done. We KEEP
+                #    the local (gzipped) dump: dumps are never deleted on the send path (user rule). The dump stays
+                #    in the dump dir, available for manual collection, and size-based retention evicts it (oldest
+                #    handled first) only when the disk budget is exceeded.
                 $grantTok = if ($resp -and $resp.uploadGrant) { "$($resp.uploadGrant.token)" } else { '' }
                 if ([string]::IsNullOrWhiteSpace($grantTok)) {
-                    $locNG = Resolve-DumpPath -Evt $evt -Config $Config
-                    if ($locNG.Path) { Remove-HandledDump -DumpPath $locNG.Path; Write-TelemetryLog ("dump not requested for {0} - deleted {1}" -f $f.Name, (Split-Path $locNG.Path -Leaf)) }
+                    Write-TelemetryLog ("dump not requested for {0} - event archived, local dump kept" -f $f.Name)
                     Move-SentEvent -EventPath $f.FullName -SentDir $sentDir; $sent++
                     continue
                 }
@@ -224,40 +242,50 @@ function Send-OutboxEvents {
                     else { Set-UploadAttempts -EventPath $f.FullName -Count $n; $failed++ }
                     continue
                 }
-                # 4) A grant was issued and the dump is on disk, so it WILL be uploaded - only now do we compress it
-                #    (#64: a dump that is not being uploaded is never compressed; the no-grant case already returned
-                #    at step 2). Process-memory dumps compress ~5x, so gzipping just before the POST is a large
-                #    transfer win and makes the body far more likely to fit the grant cap. The backend stores the
-                #    body opaquely (CONTRACT 5b), so we upload the .gz as-is and signal it with a .gz name; the silo
-                #    consumer decompresses. The event already carries the RAW bytes/sha256 (emitted at capture), so
-                #    those still describe the original dump. Size-gate the COMPRESSED bytes, stream up, clean the .gz.
-                $rawName = Split-Path $loc.Path -Leaf
-                $gzPath = $null
-                $comp = Compress-DumpFile -SourcePath $loc.Path -DestPath ($loc.Path + '.gz') -Label $rawName
-                if ($comp.Ok) { $gzPath = $comp.Path; $uploadPath = $gzPath; $uploadName = $rawName + '.gz' }
-                else { Write-TelemetryLog ("compress failed for {0}: {1} - uploading raw" -f $rawName, $comp.Error) 'WARN'; $uploadPath = $loc.Path; $uploadName = $rawName }
+                # 4) A grant was issued and the dump is on disk, so it WILL be uploaded. The triage worker already
+                #    gzipped every kept dump at rest (process memory compresses ~5x), so normally the resolved file
+                #    IS the .gz and we upload it as-is - a large transfer win that also makes the body far more
+                #    likely to fit the grant cap. Only a dump that somehow stayed raw is compressed here to a
+                #    TEMPORARY .gz (deleted after). The backend stores the body opaquely (CONTRACT 5b); the event
+                #    already carries the RAW bytes/sha256, which still describe the original dump. We NEVER delete
+                #    the kept .gz after upload - size-based retention owns disk; the send path only archives the event.
+                $diskName = Split-Path $loc.Path -Leaf                 # e.g. ProcDump_..._.dmp.gz (already compressed)
+                $rawName  = $diskName -replace '\.gz$', ''             # the original .dmp name the silo reconstructs
+                $tempGz = $null
+                if ($loc.IsGz) {
+                    $uploadPath = $loc.Path; $uploadName = $rawName + '.gz'
+                } else {
+                    $comp = Compress-DumpFile -SourcePath $loc.Path -DestPath ($loc.Path + '.upload.gz') -Label $rawName
+                    if ($comp.Ok) { $tempGz = $comp.Path; $uploadPath = $tempGz; $uploadName = $rawName + '.gz' }
+                    else { Write-TelemetryLog ("compress failed for {0}: {1} - uploading raw" -f $rawName, $comp.Error) 'WARN'; $uploadPath = $loc.Path; $uploadName = $rawName }
+                }
                 try {
                     $bytes = (Get-Item -LiteralPath $uploadPath).Length
                     $grant = Resolve-UploadGrant -Response $resp -DumpBytes $bytes
                     if ($grant.Reason -eq 'too-large') {
-                        Write-TelemetryLog ("granted dump {0} is {1} bytes compressed, over the grant cap - moving to failed-uploads" -f $rawName, $bytes) 'ERROR'
-                        Move-FailedUpload -EventPath $f.FullName -DumpPath $loc.Path -Config $Config -Reason 'too-large'; $failedUploads++
+                        # Over the grant cap: park the EVENT (so it is not retried forever), but KEEP the dump in
+                        # place (never deleted). Record the reason beside the parked event.
+                        Write-TelemetryLog ("granted dump {0} is {1} bytes compressed, over the grant cap - parking event, dump kept" -f $rawName, $bytes) 'ERROR'
+                        Move-FailedUpload -EventPath $f.FullName -DumpPath $null -Config $Config -Reason 'too-large'; $failedUploads++
                         continue
                     }
                     $up = Send-EscalatedDump -DumpPath $uploadPath -UploadName $uploadName -Config $Config -Grant $grant.Token
                     if ($up.Ok) {
-                        Write-TelemetryLog ("uploaded dump {0} as {1} ({2} bytes compressed) -> {3}" -f $rawName, $uploadName, $bytes, $up.Key) 'INFO'
-                        Remove-HandledDump -DumpPath $loc.Path   # uploaded OK -> the local raw dump is no longer needed
+                        # Uploaded OK -> the backend now holds this dump, so the local copy is redundant and MAY be
+                        # deleted (frees disk). This is the ONLY delete-on-send: a dump that was NOT uploaded
+                        # (no grant, failed, over cap) is always kept. Removes the on-disk dump (.dmp.gz or raw) + sidecars.
+                        Write-TelemetryLog ("uploaded dump {0} as {1} ({2} bytes compressed) -> {3}; local copy removed (backend holds it)" -f $rawName, $uploadName, $bytes, $up.Key) 'INFO'
+                        Remove-DumpArtifacts -DumpPath $loc.Path
                         Move-SentEvent -EventPath $f.FullName -SentDir $sentDir; $sent++; $dumps++
                     } else {
                         $n = (Get-UploadAttempts -EventPath $f.FullName) + 1
                         Write-TelemetryLog ("dump upload failed for {0}: {1}; attempt {2}/{3}" -f $rawName, $up.Detail, $n, $script:MaxDumpUploadAttempts) 'ERROR'
-                        if ($n -ge $script:MaxDumpUploadAttempts) { Move-FailedUpload -EventPath $f.FullName -DumpPath $loc.Path -Config $Config -Reason ("upload-failed: " + $up.Detail); $failedUploads++ }
+                        if ($n -ge $script:MaxDumpUploadAttempts) { Move-FailedUpload -EventPath $f.FullName -DumpPath $null -Config $Config -Reason ("upload-failed: " + $up.Detail); $failedUploads++ }
                         else { Set-UploadAttempts -EventPath $f.FullName -Count $n; $failed++ }
                         continue
                     }
                 } finally {
-                    if ($gzPath -and (Test-Path -LiteralPath $gzPath)) { Remove-Item -LiteralPath $gzPath -Force -ErrorAction SilentlyContinue }
+                    if ($tempGz -and (Test-Path -LiteralPath $tempGz)) { Remove-Item -LiteralPath $tempGz -Force -ErrorAction SilentlyContinue }
                 }
             } else {
                 # Local/offline stand-in: no server to grant, so a NEW signature (escalateDump) drops its dump
@@ -342,6 +370,82 @@ function Sync-DeviceProfile {
         ($map | ConvertTo-Json) | Set-Content -LiteralPath $path -Encoding UTF8 -ErrorAction Stop
         return $map.Count
     } catch { Write-TelemetryLog ("device-profile: sync error - {0}" -f (Resolve-HttpError $_ $Config)) 'WARN'; return -1 }
+}
+
+# Offline / server-unreachable fallback for the device profile. When there is no backend to ask (local mode)
+# or the http sync failed, we still must avoid re-keeping a dump for a signature this box already holds a sample
+# for - otherwise a long offline period keeps one dump per RECURRENCE instead of one per signature. We derive
+# the profile LOCALLY from the per-machine registry (ids this machine has a kept sample for) merged with the
+# known baseline (ids already analysed), marking them 'uploaded' so triage/flush treat them as already-collected.
+# This only ever ADDS local knowledge; it never invents a 'granted' obligation. Returns the entry count.
+function Build-LocalDeviceProfile {
+    param($Config, [string]$DeviceId)
+    if (-not $Config) { $Config = Get-TelemetryConfig }
+    $map = @{}
+    try {
+        # ids with a kept sample on THIS machine (registry is per-machine already)
+        $reg = Read-LocalRegistry (Get-KnownIssuesDir)
+        $machineKey = Get-MachineKey
+        foreach ($id in @($reg.issues.Keys)) {
+            $iss = $reg.issues[$id]
+            $m = if ($iss.machines) { $iss.machines[$machineKey] } else { $null }
+            if ($m -and $m.sample) { $map["$id"] = 'uploaded' }
+        }
+        # ids already analysed centrally (shipped/synced baseline) - also "already collected" for our purposes
+        if ($Config.BaselinePath -and (Test-Path -LiteralPath $Config.BaselinePath)) {
+            try {
+                $b = Get-Content -LiteralPath $Config.BaselinePath -Raw | ConvertFrom-Json
+                $ids = if ($null -eq $b) { @() } elseif ($b.issues) { $b.issues.PSObject.Properties.Name } elseif ($b -is [array]) { $b } else { @($b) }
+                foreach ($id in @($ids)) { if ($id) { $map["$id"] = 'uploaded' } }
+            } catch {}
+        }
+        $path = Get-DeviceProfilePath
+        $dir = Split-Path -Parent $path
+        if ($dir -and -not (Test-Path -LiteralPath $dir)) { New-Item -ItemType Directory -Path $dir -Force -ErrorAction Stop | Out-Null }
+        ($map | ConvertTo-Json) | Set-Content -LiteralPath $path -Encoding UTF8 -ErrorAction Stop
+        return $map.Count
+    } catch { Write-TelemetryLog ("device-profile: local build error - {0}" -f $_.Exception.Message) 'WARN'; return -1 }
+}
+
+# "Collect for manual handling" (UI button): for a box that cannot reach the backend, gather everything a human
+# needs to carry to an online PC into ONE folder, <DumpDir>\manual-outbox. That is the pending event JSONs (the
+# reports) and the gzipped dumps - two separate kinds of file, NOT packaged together. The events are MOVED out of
+# the outbox (so the forwarder stops trying to send them - manual takeover) and the dumps are MOVED out of the
+# dump dir. Replaying them later is an online-PC / operator step. Returns @{ Events; Dumps; Dest }.
+function Move-ToManualOutbox {
+    param($Config, [string]$Dir)
+    if (-not $Config) { $Config = Get-TelemetryConfig }
+    if (-not $Dir) { $Dir = Get-KnownIssuesDir }
+    $dest = Join-Path $Config.DumpDir 'manual-outbox'
+    if (-not (Test-Path -LiteralPath $dest)) { New-Item -ItemType Directory -Path $dest -Force | Out-Null }
+    $events = 0; $dumps = 0
+    # 1) pending events (+ their .try sidecars) from the outbox top level (never the already-archived 'sent')
+    $outbox = Join-Path $Dir 'outbox'
+    if (Test-Path -LiteralPath $outbox) {
+        foreach ($e in @(Get-ChildItem -LiteralPath $outbox -Filter *.json -File -ErrorAction SilentlyContinue)) {
+            try {
+                Move-Item -LiteralPath $e.FullName -Destination (Join-Path $dest $e.Name) -Force
+                $try = "$($e.FullName).try"; if (Test-Path -LiteralPath $try) { Move-Item -LiteralPath $try -Destination (Join-Path $dest ($e.Name + '.try')) -Force }
+                $events++
+            } catch { Write-TelemetryLog ("manual-collect: could not move event {0}: {1}" -f $e.Name, $_.Exception.Message) 'WARN' }
+        }
+    }
+    # 2) gzipped dumps (+ their .info/.versions sidecars) from the dump dir top level and failed-uploads
+    foreach ($root in @($Config.DumpDir, (Join-Path $Config.DumpDir 'failed-uploads'))) {
+        if (-not (Test-Path -LiteralPath $root)) { continue }
+        foreach ($g in @(Get-ChildItem -LiteralPath $root -Filter *.dmp.gz -File -ErrorAction SilentlyContinue)) {
+            try {
+                Move-Item -LiteralPath $g.FullName -Destination (Join-Path $dest $g.Name) -Force
+                foreach ($sx in '.info.txt', '.versions.txt') {
+                    $sc = ($g.FullName -replace '\.dmp\.gz$', $sx)
+                    if (Test-Path -LiteralPath $sc) { Move-Item -LiteralPath $sc -Destination (Join-Path $dest ([IO.Path]::GetFileName($sc))) -Force }
+                }
+                $dumps++
+            } catch { Write-TelemetryLog ("manual-collect: could not move dump {0}: {1}" -f $g.Name, $_.Exception.Message) 'WARN' }
+        }
+    }
+    Write-TelemetryLog ("manual-collect: moved {0} event(s) and {1} dump(s) to {2}" -f $events, $dumps, $dest)
+    @{ Events = $events; Dumps = $dumps; Dest = $dest }
 }
 
 # Reachability + auth probe for the configured telemetry service, for the "Test telemetry" button. Checks each

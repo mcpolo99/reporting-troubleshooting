@@ -136,6 +136,44 @@ try {
     Check 'info sidecar deleted'           (-not (Test-Path -LiteralPath ($hd -replace '\.dmp$', '.info.txt')))
     Check 'versions sidecar deleted'       (-not (Test-Path -LiteralPath ($hd -replace '\.dmp$', '.versions.txt')))
     Check 'blank path is a no-op'          ($null -eq (Remove-HandledDump -DumpPath ''))
+
+    # delete-on-successful-upload must handle the kept-at-rest .dmp.gz form (stem = path minus .dmp/.dmp.gz).
+    Write-Host 'handled-dump deletion (.dmp.gz form)'
+    $hg = Join-Path $dir 'handled.dmp.gz'; Set-Content $hg -Value 'GZ' -Encoding ascii
+    Set-Content (Join-Path $dir 'handled.info.txt') -Value 'i' -Encoding ascii
+    Remove-DumpArtifacts -DumpPath $hg
+    Check 'gz dump deleted'                (-not (Test-Path -LiteralPath $hg))
+    Check 'gz dump info sidecar deleted'   (-not (Test-Path -LiteralPath (Join-Path $dir 'handled.info.txt')))
+
+    # dumps live gzipped at rest: the event records the RAW name, so resolution must find <name>.dmp.gz, and
+    # raw-first so a not-yet-gzipped dump still resolves.
+    Write-Host 'gzip-at-rest dump resolution'
+    $gzOnly = Join-Path $dumpDir 'app.exe_gzonly.dmp'
+    Set-Content -LiteralPath ($gzOnly + '.gz') -Value 'GZ' -Encoding ascii          # only the .gz exists on disk
+    $evGz = [pscustomobject]@{ dump = [pscustomobject]@{ file = 'app.exe_gzonly.dmp' } }   # event still names the raw .dmp
+    $rGz = Resolve-DumpPath -Evt $evGz -Config ([ordered]@{ DumpDir = $dumpDir })
+    Check 'resolves <name>.dmp.gz by raw name' ($rGz.Path -eq ($gzOnly + '.gz'))
+    Check 'flags the hit as gz'                 ($rGz.IsGz)
+
+    # local/offline device profile: the baseline (ids already analysed) feeds the locally-built profile, so dedup
+    # holds with no backend. (The registry half reads ProgramData at runtime and is covered in Dump.Tests.)
+    Write-Host 'local device-profile build (offline dedup)'
+    $lpBase = Join-Path $dir 'lp_baseline.json'; '["sigFromBaseline"]' | Set-Content -LiteralPath $lpBase -Encoding UTF8
+    $n = Build-LocalDeviceProfile -Config ([ordered]@{ BaselinePath = $lpBase })
+    Check 'local profile includes baseline id' ($n -ge 1)
+
+    # manual collect: pending reports + gzipped dumps are MOVED into <DumpDir>\manual-outbox for hand-carry.
+    Write-Host 'collect for manual handling'
+    $mc = Join-Path $dir 'mc'; New-Item -ItemType Directory -Force (Join-Path $mc 'outbox') | Out-Null
+    $mcDump = Join-Path $mc 'dumps'; New-Item -ItemType Directory -Force $mcDump | Out-Null
+    Set-Content (Join-Path $mc 'outbox\e1.json') -Value '{}' -Encoding UTF8
+    Set-Content (Join-Path $mcDump 'ProcDump_PC_app_hang_20261030_101010.dmp.gz') -Value 'GZ' -Encoding ascii
+    $res = Move-ToManualOutbox -Config ([ordered]@{ DumpDir = $mcDump }) -Dir $mc
+    Check 'collect moved 1 event'          ($res.Events -eq 1)
+    Check 'collect moved 1 dump'           ($res.Dumps -eq 1)
+    Check 'event now under manual-outbox'  (Test-Path (Join-Path $mcDump 'manual-outbox\e1.json'))
+    Check 'dump now under manual-outbox'   (Test-Path (Join-Path $mcDump 'manual-outbox\ProcDump_PC_app_hang_20261030_101010.dmp.gz'))
+    Check 'event removed from outbox'      (-not (Test-Path (Join-Path $mc 'outbox\e1.json')))
 }
 finally { Remove-Item -Recurse -Force $dir -ErrorAction SilentlyContinue }
 

@@ -9,6 +9,8 @@
       <Button x:Name="BtnMonStop"    Content="Stop Monitor"    Height="30" MinWidth="100" Margin="0,0,8,0"/>
       <Button x:Name="BtnMonStatus"  Content="Status"          Height="30" MinWidth="80"  Margin="0,0,8,0"/>
       <Button x:Name="BtnMonTestTelemetry" Content="Test Telemetry" Height="30" MinWidth="110" Margin="0,0,8,0"/>
+      <Button x:Name="BtnMonCollect" Content="Collect for manual handling" Height="30" MinWidth="170" Margin="0,0,8,0"
+              ToolTip="Move all pending reports (outbox) and gzipped dumps into &lt;dump dir&gt;\manual-outbox, to copy to an online PC when this machine cannot reach the telemetry service."/>
       <Button x:Name="BtnMonDisable" Content="Disable Service" Height="30" MinWidth="110"/>
     </StackPanel>
     <TextBlock x:Name="LblMonStatus" Foreground="{DynamicResource AppIdColor}" TextWrapping="Wrap" Margin="0,0,0,12"/>

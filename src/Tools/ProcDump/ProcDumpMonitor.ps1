@@ -107,7 +107,7 @@ function Get-DefaultConfig {
     [pscustomobject]@{
         Apps             = @('AppA.exe')
         DumpDir          = 'C:\dumps'
-        KeepDumps        = 15
+        DumpDiskLimitGB  = 30           # size budget for kept (gzipped) dumps; oldest ALREADY-HANDLED dumps are evicted over this. Dumps are never pruned by count, and a dump whose event is still pending is never evicted.
         CheckSeconds     = 5
         CleanupSeconds   = 300
         ProcDumpArgs     = '-accepteula -ma -e -h -n 1 -w'   # -n = dumps per ProcDump session (default 1 if omitted)
@@ -181,14 +181,23 @@ function Resolve-WorkerPriority($cfg) {
     }
 }
 
+$script:TelemetryProc = $null
 function Enqueue-Telemetry($Config) {
     $worker = $InstalledTelemetry
     if (-not (Test-Path $worker)) { Write-Log "Telemetry flush skipped: forwarder not found at $worker" 'WARN'; return }
+    # Single instance: never start a second forwarder while the previous one is still running (a slow upload or a
+    # long offline retry sweep can outlast the flush interval). The forwarder ALSO self-guards with a machine-wide
+    # mutex, so this is belt-and-suspenders; here we simply skip the relaunch and keep the loop cheap.
+    if ($script:TelemetryProc -and -not $script:TelemetryProc.HasExited) {
+        Write-Log "Telemetry flush skipped: previous forwarder (PID $($script:TelemetryProc.Id)) still running."
+        return
+    }
     try {
         Write-Log 'Telemetry flush: launching forwarder (sync known-sigs, forward events, upload granted dumps)'
         $p = Start-Process powershell.exe -WindowStyle Hidden -PassThru -ArgumentList @(
             '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', "`"$worker`"", '-Quiet')
         try { $p.PriorityClass = Resolve-WorkerPriority $Config } catch {}
+        $script:TelemetryProc = $p
         Write-Log "Telemetry forwarder launched (PID $($p.Id)); outcome in Logs\Telemetry_*.log"
     } catch { Write-Log "Could not launch telemetry forwarder: $($_.Exception.Message)" 'WARN' }
 }
@@ -579,6 +588,58 @@ function Invoke-NewDumps($cfg, $known, $pending, $recent, $lastInfo) {
     @($pending.Keys) | Where-Object { $_ -notin $existing } | ForEach-Object { $pending.Remove($_) }
 }
 
+# Size-based dump retention. Replaces the old "keep newest N" ring buffer: dumps are kept gzipped and bounded by
+# a DISK BUDGET (DumpDiskLimitGB), never by count. Two hard rules:
+#   1. A dump whose event is still PENDING in the outbox is NEVER evicted (its report has not been sent, and the
+#      user rule is that unsent dumps are kept until sent or manually collected).
+#   2. Only ALREADY-HANDLED dumps (event archived to outbox\sent, or no event references them) are evicted, and
+#      only when the total over all kept dumps exceeds the budget - oldest first.
+# If every kept dump is still pending and the box is over budget (a long offline burst), nothing is deleted and a
+# warning is logged - the "Collect for manual handling" button is the relief valve, not silent data loss.
+function Invoke-DumpRetention($cfg) {
+    $limitBytes = [Math]::Max([double]$cfg.DumpDiskLimitGB, 0.1) * 1GB
+    $roots = @($cfg.DumpDir, (Join-Path $cfg.DumpDir 'failed-uploads'))
+
+    # Dump filenames (raw and .gz forms) referenced by any PENDING outbox event - protected from eviction.
+    $pending = @{}
+    $obx = Join-Path (Get-KnownIssuesDir) 'outbox'
+    if (Test-Path -LiteralPath $obx) {
+        foreach ($ev in @(Get-ChildItem -LiteralPath $obx -Filter *.json -File -ErrorAction SilentlyContinue)) {
+            try {
+                $j = Get-Content -LiteralPath $ev.FullName -Raw | ConvertFrom-Json
+                foreach ($p in @($j.dump.path, $j.dump.file)) {
+                    if ($p) { $n = [IO.Path]::GetFileName("$p"); $pending[$n] = $true; $pending[($n -replace '\.gz$','')] = $true; $pending["$n.gz"] = $true }
+                }
+            } catch {}
+        }
+    }
+
+    $all = @()
+    foreach ($r in $roots) {
+        if (-not (Test-Path -LiteralPath $r)) { continue }
+        $all += @(Get-ChildItem -LiteralPath $r -File -ErrorAction SilentlyContinue | Where-Object { $_.Name -match '\.dmp(\.gz)?$' })
+    }
+    if (-not $all.Count) { return }
+    $total = ($all | Measure-Object Length -Sum).Sum
+    if ($total -le $limitBytes) { return }
+
+    # Evict oldest HANDLED dumps until under budget. Pending dumps are skipped (kept).
+    $evictable = @($all | Where-Object { -not $pending[$_.Name] } | Sort-Object LastWriteTime)
+    foreach ($d in $evictable) {
+        if ($total -le $limitBytes) { break }
+        try {
+            $sz = $d.Length
+            Remove-Item -LiteralPath $d.FullName -Force -ErrorAction Stop
+            foreach ($sx in '.info.txt', '.versions.txt') { Remove-Item -LiteralPath ($d.FullName -replace '\.dmp(\.gz)?$', $sx) -Force -ErrorAction SilentlyContinue }
+            $total -= $sz
+            Write-Log ("Retention: evicted handled dump {0} ({1:N1} MB); budget {2} GB" -f $d.Name, ($sz/1MB), $cfg.DumpDiskLimitGB)
+        } catch { Write-Log "Retention: could not evict $($d.Name) (in use?), will retry." 'WARN' }
+    }
+    if ($total -gt $limitBytes) {
+        Write-Log ("Retention: still {0:N1} GB over the {1} GB budget, but all remaining dumps have UNSENT reports - kept. Use 'Collect for manual handling' to offload them." -f (($total-$limitBytes)/1GB), $cfg.DumpDiskLimitGB) 'WARN'
+    }
+}
+
 # Effective ProcDump arguments. -n comes from the config; if ProcDumpArgs has no -n, -n 1 is used.
 # With -n 1 the monitor re-arms ProcDump after each dump (with a cooldown), so a process that stays
 # frozen after an exception isn't captured over and over by the hang trigger.
@@ -964,7 +1025,7 @@ function Edit-Config($cfg) {
     $cfg.Apps = @($apps -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ } |
                   ForEach-Object { if ($_ -notlike '*.exe') { "$_.exe" } else { $_ } })
     $cfg.DumpDir        = Read-Value 'Dump folder' $cfg.DumpDir
-    $cfg.KeepDumps      = Read-Int   'Number of newest dumps to keep' $cfg.KeepDumps
+    $cfg.DumpDiskLimitGB = Read-Int  'Dump disk budget in GB (oldest already-sent dumps evicted over this; unsent dumps kept)' $cfg.DumpDiskLimitGB 1
     $cfg.ProcDumpArgs   = Read-Value 'ProcDump arguments (-e 1 = also first-chance exceptions; -n = dumps per session, 1 recommended)' $cfg.ProcDumpArgs
     $cfg.CooldownSeconds = Read-Int  'Cooldown before re-arming on the same process (seconds; 60 minimum, enforced)' $cfg.CooldownSeconds 60
     while ($true) {
@@ -1018,9 +1079,9 @@ function Show-Status {
     Write-Host ("Monitors   : {0} running" -f $pd.Count)
     $pd | ForEach-Object { Write-Host ("             PID {0}: {1}" -f $_.ProcessId, ($_.CommandLine -replace '^.*?\.exe"?\s*', '')) }
 
-    $dumps = @(Get-ChildItem $cfg.DumpDir -Filter *.dmp -File -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending)
+    $dumps = @(Get-ChildItem $cfg.DumpDir -File -ErrorAction SilentlyContinue | Where-Object { $_.Name -match '\.dmp(\.gz)?$' } | Sort-Object LastWriteTime -Descending)
     $size  = ($dumps | Measure-Object Length -Sum).Sum / 1GB
-    Write-Host ("Dumps      : {0} of max {1} in {2} ({3:N2} GB)" -f $dumps.Count, $cfg.KeepDumps, $cfg.DumpDir, $size)
+    Write-Host ("Dumps      : {0} ({1:N2} GB of {2} GB budget) in {3}" -f $dumps.Count, $size, $cfg.DumpDiskLimitGB, $cfg.DumpDir)
     if ($dumps) { Write-Host ("Newest     : {0}  {1}" -f $dumps[0].LastWriteTime, $dumps[0].Name) }
 
     $log = Get-ChildItem $LogDir -Filter "${AppName}_*.log" -File -ErrorAction SilentlyContinue |
@@ -1093,7 +1154,7 @@ function Invoke-Monitor {
     try {
         Write-Log ('=' * 70)
         Write-Log "Monitor v$ScriptVersion starting. User: $env:USERDOMAIN\$env:USERNAME  Session: $((Get-Process -Id $PID).SessionId)  PS: $($PSVersionTable.PSVersion)"
-        Write-Log "Apps: $($cfg.Apps -join ', ') | Args: $(Get-EffectiveArgs $cfg) | Keep $($cfg.KeepDumps) dumps | Check $($cfg.CheckSeconds)s | Cleanup $($cfg.CleanupSeconds)s | Cooldown $($cfg.CooldownSeconds)s | Duplicates: $($cfg.DuplicateAction)"
+        Write-Log "Apps: $($cfg.Apps -join ', ') | Args: $(Get-EffectiveArgs $cfg) | Dump budget $($cfg.DumpDiskLimitGB) GB | Check $($cfg.CheckSeconds)s | Cleanup $($cfg.CleanupSeconds)s | Cooldown $($cfg.CooldownSeconds)s | Duplicates: $($cfg.DuplicateAction)"
 
         if (-not (Test-Path $ProcDumpExe) -and -not (Install-Sysinternals)) {
             Write-Log 'ProcDump missing and could not be installed - exiting.' 'ERROR'
@@ -1191,35 +1252,16 @@ function Invoke-Monitor {
             if (((Get-Date) - $lastCleanup).TotalSeconds -ge $cfg.CleanupSeconds) {
                 $lastCleanup = Get-Date
 
-                # Dumps still referenced by a PENDING outbox event (not yet uploaded) must never be pruned, or a
-                # burst / long offline period would delete them before the flush sends them (#75). Build the set of
-                # dump names any pending event points at, and exclude them from the ring-buffer prune.
-                $pendingDumps = @{}
-                $obx = Join-Path (Get-KnownIssuesDir) 'outbox'
-                if (Test-Path -LiteralPath $obx) {
-                    foreach ($ev in @(Get-ChildItem -LiteralPath $obx -Filter *.json -File -ErrorAction SilentlyContinue)) {
-                        try {
-                            $j = Get-Content -LiteralPath $ev.FullName -Raw | ConvertFrom-Json
-                            foreach ($p in @($j.dump.path, $j.dump.file)) { if ($p) { $pendingDumps[[IO.Path]::GetFileName("$p")] = $true } }
-                        } catch {}
-                    }
-                }
+                # Dump retention is size-based now (DumpDiskLimitGB), not count-based, and it never evicts a dump
+                # whose report is still pending - see Invoke-DumpRetention. Covers the dump dir and failed-uploads.
+                Invoke-DumpRetention $cfg
 
-                Get-ChildItem -Path $cfg.DumpDir -Filter *.dmp -File -ErrorAction SilentlyContinue |
-                    Where-Object { -not $pendingDumps[$_.Name] } |
-                    Sort-Object LastWriteTime -Descending | Select-Object -Skip $cfg.KeepDumps |
-                    ForEach-Object {
-                        try {
-                            Remove-Item $_.FullName -Force -ErrorAction Stop
-                            Remove-Item ([IO.Path]::ChangeExtension($_.FullName, '.info.txt')) -Force -ErrorAction SilentlyContinue
-                            Write-Log "Deleted old dump $($_.Name)"
-                        }
-                        catch { Write-Log "Could not delete $($_.Name) (in use?), will retry." 'WARN' }
-                    }
-                # info/version files whose dump is gone (.versions.txt = older script version)
+                # info/version files whose dump is gone (.versions.txt = older script version). A dump is "gone"
+                # only when neither the raw .dmp nor the .dmp.gz (kept-at-rest form) exists.
                 Get-ChildItem -Path $cfg.DumpDir -Filter *.txt -File -ErrorAction SilentlyContinue |
                     Where-Object { $_.Name -match '\.(info|versions)\.txt$' -and
-                                   -not (Test-Path -LiteralPath ($_.FullName -replace '\.(info|versions)\.txt$', '.dmp')) } |
+                                   -not (Test-Path -LiteralPath ($_.FullName -replace '\.(info|versions)\.txt$', '.dmp')) -and
+                                   -not (Test-Path -LiteralPath ($_.FullName -replace '\.(info|versions)\.txt$', '.dmp.gz')) } |
                     Remove-Item -Force -ErrorAction SilentlyContinue
 
                 # Legacy cleanup: recurrences are deleted at triage now, so the old KnownIssues\Suppressed store is
@@ -1228,21 +1270,6 @@ function Invoke-Monitor {
                 if (Test-Path -LiteralPath $supDir) {
                     try { Remove-Item -LiteralPath $supDir -Recurse -Force -ErrorAction Stop; Write-Log "Removed legacy Suppressed store ($supDir)" }
                     catch { Write-Log "Could not remove legacy Suppressed store (in use?), will retry." 'WARN' }
-                }
-
-                # Bound the ONLY retained dump store: DumpDir\failed-uploads (dumps that exhausted upload retries).
-                # Keep the newest KeepDumps + drop their sidecars so it can never grow unbounded.
-                $fuDir = Join-Path $cfg.DumpDir 'failed-uploads'
-                if (Test-Path -LiteralPath $fuDir) {
-                    Get-ChildItem -LiteralPath $fuDir -Filter *.dmp -File -ErrorAction SilentlyContinue |
-                        Sort-Object LastWriteTime -Descending | Select-Object -Skip $cfg.KeepDumps |
-                        ForEach-Object {
-                            try {
-                                Remove-Item -LiteralPath $_.FullName -Force -ErrorAction Stop
-                                foreach ($sx in '.info.txt', '.versions.txt') { Remove-Item -LiteralPath ($_.FullName -replace '\.dmp$', $sx) -Force -ErrorAction SilentlyContinue }
-                                Write-Log "Pruned failed-upload dump $($_.Name)"
-                            } catch { Write-Log "Could not prune failed-upload $($_.Name) (in use?), will retry." 'WARN' }
-                        }
                 }
 
                 Update-LogRoll

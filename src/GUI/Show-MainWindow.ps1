@@ -43,7 +43,7 @@ function Show-MainWindow {
                    'CmbPvProfile','TxtPvLabel','BtnPvStart','BtnPvStop','BtnPvAbort','TxtPvSeconds','BtnPvOpen','BtnPvStatus','LblPvStatus',
                    'TxtPvProfName','PnlPvKernel','CmbPvClr','PnlPvProviders','TxtPvProvOther','TxtPvExtra','TxtPvCircular','TxtPvBuffer','BtnPvProfSave','BtnPvProfDelete','BtnPvProfDefault',
                    'TxtPvOutput','TxtPvSym','ChkPvMerge','ChkPvZip','BtnPvSettingsSave',
-                   'BtnMonEnable','BtnMonStart','BtnMonStop','BtnMonStatus','BtnMonTestTelemetry','BtnMonDisable','LblMonStatus','BtnMonVerify','LblMonVerify','PnlCfgProcess','PnlCfgMonitor','PnlCfgGeneral','BtnMonSave','BtnMonReload','ChkMonTail','TxtMonLog','LblMonCompress','PbMonCompress',
+                   'BtnMonEnable','BtnMonStart','BtnMonStop','BtnMonStatus','BtnMonTestTelemetry','BtnMonCollect','BtnMonDisable','LblMonStatus','BtnMonVerify','LblMonVerify','PnlCfgProcess','PnlCfgMonitor','PnlCfgGeneral','BtnMonSave','BtnMonReload','ChkMonTail','TxtMonLog','LblMonCompress','PbMonCompress',
                    'BtnPkgInstallAll','BtnPkgRefresh','BtnPkgOpen','BtnPkgUpdate','LblPkgUpdate','PnlPackages','LblPkgStatus',
                    'BtnShortcut') {
         $el = $null
@@ -75,7 +75,7 @@ function Show-MainWindow {
     $script:MonFieldGroup = @{
         Apps = 'Monitor'; DumpDir = 'Monitor'; CheckSeconds = 'Monitor'; CooldownSeconds = 'Monitor'
         DuplicateAction = 'Monitor'; DuplicateWindowSeconds = 'Monitor'; RunMode = 'Monitor'; TaskUser = 'Monitor'; HeadlessLauncher = 'Monitor'
-        KeepDumps = 'General'; CleanupSeconds = 'General'; KnownIssuesEnabled = 'General'; SuppressKnown = 'General'; WorkerPriority = 'General'
+        DumpDiskLimitGB = 'General'; CleanupSeconds = 'General'; KnownIssuesEnabled = 'General'; SuppressKnown = 'General'; WorkerPriority = 'General'
         BaselinePath = 'General'; TelemetryEnabled = 'General'; TelemetrySeconds = 'General'; LogKeep = 'General'; LogMaxMB = 'General'
     }
 
@@ -171,7 +171,7 @@ function Show-MainWindow {
             $pending = if (Test-Path $ob) { @(Get-ChildItem $ob -Filter *.json -File -ErrorAction SilentlyContinue).Count } else { 0 }
             $tel = "  |  telemetry: $pending event(s) pending"
         }
-        "Task: $state  |  apps: $($cfg.Apps -join ', ')  |  keep: $($cfg.KeepDumps)  |  dumps in $($cfg.DumpDir)$tel"
+        "Task: $state  |  apps: $($cfg.Apps -join ', ')  |  dump budget: $($cfg.DumpDiskLimitGB) GB  |  dumps in $($cfg.DumpDir)$tel"
     }
     $script:RefreshPv  = [scriptblock]::Create("Start-ToolJob -Runspace `$script:RsPvCtl -Script { $($pvStatusSB.ToString()) }  -OnText `$script:SetPvStatus  | Out-Null")
     $script:RefreshMon = [scriptblock]::Create("Start-ToolJob -Runspace `$script:RsMon -Script { $($monStatusSB.ToString()) } -OnText `$script:SetMonStatus | Out-Null")
@@ -502,6 +502,7 @@ function Show-MainWindow {
     $script:BtnMonStop.Add_Click({ & $script:Append 'Monitor: stopping...'; script:Invoke-Action 'Mon' $script:RsMon { Stop-Monitor (Read-Config) } @() $script:RefreshMon })
     $script:BtnMonStatus.Add_Click({ & $script:RefreshMon })
     $script:BtnMonTestTelemetry.Add_Click({ & $script:Append 'Telemetry: testing reachability + auth...'; script:Invoke-Action 'Mon' $script:RsMon { Test-Telemetry } @() $null })
+    $script:BtnMonCollect.Add_Click({ & $script:Append 'Telemetry: collecting pending reports + gzipped dumps into <dump dir>\manual-outbox...'; script:Invoke-Action 'Mon' $script:RsMon { $r = Move-ToManualOutbox; "Collected $($r.Events) report(s) and $($r.Dumps) dump(s) to $($r.Dest)" } @() $script:RefreshMon })
     $script:BtnMonDisable.Add_Click({ & $script:Append 'Monitor: disabling service...'; script:Invoke-Action 'Mon' $script:RsMon { Disable-Service } @() $script:RefreshMon })
     $script:BtnMonVerify.Add_Click({
         if ($script:Busy['Mon']) { & $script:Append 'Monitor: busy - try again in a moment.'; return }

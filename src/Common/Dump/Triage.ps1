@@ -57,13 +57,32 @@ function Invoke-DumpTriage {
     }
 
     if ($res.Action -eq 'suppress') {
-        # A recurrence of an already-kept id: the first sample is enough, so delete this one (dump + sidecars).
-        # We never hoard recurrences (no Recycle / Suppressed store).
+        # A recurrence of an already-kept id (or an already-analysed/known id): the first sample is enough, so
+        # delete this one (dump + sidecars). We never hoard recurrences (no Recycle / Suppressed store). This is
+        # the only place the engine deletes a dump; a KEPT dump is never deleted here - disk is bounded by the
+        # monitor's size-based retention (DumpDiskLimitGB), which only ever evicts already-handled dumps.
         $sidecars = @($DumpPath) + @('.info.txt', '.versions.txt' | ForEach-Object { $DumpPath -replace '\.dmp$', $_ })
         foreach ($f in $sidecars) { if (Test-Path -LiteralPath $f) { Remove-Item -LiteralPath $f -Force -ErrorAction SilentlyContinue } }
         $res.Disposition = 'deleted'
     } else {
+        # KEEP. gzip the dump at rest NOW, regardless of whether a server ever grants an upload: a kept dump
+        # always lives compressed in the dump dir (~5x smaller for process memory), so an offline box stores far
+        # more within its disk budget and the file is already in the exact shape the flush uploads. The raw .dmp
+        # is replaced by <dump>.dmp.gz; the event already carries the RAW sha256/bytes (they describe the original)
+        # and the flush resolves the .gz by name. Guarded: if the compressor is unavailable the raw dump is kept.
         $res.Disposition = 'kept'
+        if ((Get-Command Compress-DumpFile -ErrorAction SilentlyContinue) -and ($DumpPath -notmatch '\.gz$') -and (Test-Path -LiteralPath $DumpPath)) {
+            $gz = Compress-DumpFile -SourcePath $DumpPath -DestPath ($DumpPath + '.gz') -Label ([IO.Path]::GetFileName($DumpPath))
+            if ($gz.Ok) {
+                Remove-Item -LiteralPath $DumpPath -Force -ErrorAction SilentlyContinue   # raw replaced by the .gz we keep
+                $res.Disposition = 'kept-gz'; $res.KeptPath = $gz.Path
+            } else {
+                Add-DepGap 'gzip-at-rest' ("gzip of kept dump $([IO.Path]::GetFileName($DumpPath)) failed: $($gz.Error) - keeping raw") $Dir
+                $res.KeptPath = $DumpPath
+            }
+        } else {
+            $res.KeptPath = $DumpPath
+        }
     }
     return $res
 }

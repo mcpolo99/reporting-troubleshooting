@@ -1,4 +1,9 @@
-# Dump engine: local known-issues registry, per-machine dedupe, occurrences log, baseline.
+# Dump engine: local known-issues registry, per-machine dedupe, baseline.
+#
+# The per-machine registry (registry_<machineKey>.json) is the single source of truth for what this box has
+# seen and kept: each id carries per-machine counters + the kept sample path. There is deliberately NO
+# separate occurrences.jsonl audit log any more - it duplicated the registry's counts/lastSeen and was never
+# read back; the registry alone answers "have we kept this id, and how often has it recurred".
 
 
 # =============================== LOCAL REGISTRY =========================
@@ -11,12 +16,6 @@ function Get-RegistryPath([string]$Dir) {
     if (-not $Dir) { $Dir = Get-KnownIssuesDir }
     Join-Path $Dir ('registry_{0}.json' -f (Get-MachineKey))
 }
-
-function Get-OccurrencesPath([string]$Dir) {
-    if (-not $Dir) { $Dir = Get-KnownIssuesDir }
-    Join-Path $Dir 'occurrences.jsonl'
-}
-
 
 # PSCustomObject (from ConvertFrom-Json) -> nested [hashtable] so arbitrary id/machine keys are mutable.
 function ConvertTo-HashtableDeep($obj) {
@@ -51,15 +50,6 @@ function Save-LocalRegistry($Registry, [string]$Dir) {
     if (-not (Test-Path -LiteralPath $Dir)) { New-Item -ItemType Directory -Path $Dir -Force | Out-Null }
     $json = $Registry | ConvertTo-Json -Depth 8
     Set-Content -LiteralPath (Get-RegistryPath $Dir) -Value $json -Encoding UTF8
-}
-
-
-# Append one occurrence to the audit log (every event, even suppressed/kept). One JSON object per line.
-function Add-Occurrence([hashtable]$Record, [string]$Dir) {
-    if (-not $Dir) { $Dir = Get-KnownIssuesDir }
-    if (-not (Test-Path -LiteralPath $Dir)) { New-Item -ItemType Directory -Path $Dir -Force | Out-Null }
-    $line = ($Record | ConvertTo-Json -Depth 5 -Compress)
-    Add-Content -LiteralPath (Get-OccurrencesPath $Dir) -Value $line -Encoding UTF8
 }
 
 
@@ -124,11 +114,14 @@ function Register-DumpOccurrence {
         $total = 0; foreach ($mk in $issue.machines.Keys) { $total += [int]$issue.machines[$mk].count }
         $issue.totalCount = $total
 
-        # decision: one dump KEPT per (signature, machine). A different PC = different conditions = independent
-        # evidence for the vendor, so the FIRST sample on each machine is kept even when the signature was
-        # already analysed elsewhere (baseline) or seen on other machines; baseline-known only annotates the
-        # reason (for muting analyst alerts), it no longer suppresses a machine's first sample. Recurrences on
-        # the same machine are counted and suppressed.
+        # decision: keep one dump per (signature, machine), and IGNORE anything already analysed.
+        #   - provisional id  -> defer (never suppress on a walk-pending id; keep the dump).
+        #   - device uploaded -> suppress (durable per-device dedup; the centre already has a sample).
+        #   - baseline-known  -> suppress: the shipped/synced known list says this id is already analysed, so
+        #     we do NOT keep or ship it again. This is the point of the known list (and, offline, of the
+        #     update-package baseline) - it must actually stop collection, not merely annotate.
+        #   - recurrence (we already kept a sample on this machine) -> suppress, count it.
+        #   - otherwise -> keep the FIRST sample on this machine.
         $hasSample = [bool]$m.sample -and (Test-Path -LiteralPath "$($m.sample)")
         $baselineKnown = Test-BaselineKnown $id $BaselinePath
         if ($baselineKnown) { $issue.baselineKnown = $true }
@@ -138,20 +131,18 @@ function Register-DumpOccurrence {
             # Durable per-device dedup: the backend already holds a dump for this (signature, device), so stop
             # collecting it here - suppress even if the LOCAL registry was lost (reinstall/reset). No sample kept.
             $action = 'suppress'; $reason = 'device already uploaded a dump for this signature (profile)'
+        } elseif ($SuppressKnown -and $baselineKnown) {
+            $action = 'suppress'; $reason = 'already analysed (known list / baseline) - ignored'
         } elseif (-not $SuppressKnown) {
             $action = 'keep'; $reason = 'suppression disabled'
             if (-not $hasSample) { $m.sample = $DumpPath }
         } elseif ($hasSample) {
             $action = 'suppress'; $reason = 'recurrence (dump already kept on this machine)'
         } else {
-            $action = 'keep'; $m.sample = $DumpPath
-            $reason = if ($baselineKnown) { 'first sample on this machine (signature already analysed elsewhere)' } else { 'first sample on this machine' }
+            $action = 'keep'; $m.sample = $DumpPath; $reason = 'first sample on this machine'
         }
 
         Save-LocalRegistry $reg $Dir
-        Add-Occurrence @{ ts = $now; id = $id; kind = $IdObj.Kind; machine = $machineKey
-                          computer = $env:COMPUTERNAME; pid = $Sig.ProcessId; dump = [IO.Path]::GetFileName($DumpPath)
-                          action = $action; reason = $reason; count = $m.count; provisional = $provisional } $Dir
         @{ Action = $action; Reason = $reason; Id = $id; Count = $m.count }
     })
 }

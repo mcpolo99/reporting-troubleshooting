@@ -54,6 +54,7 @@ if (-not $CommonDir) { throw "Shared components (Common\) not found from $Script
 . (Join-Path $CommonDir 'Common.ps1')
 . (Join-Path $CommonDir 'Packages.ps1')
 . (Join-Path $CommonDir 'DumpId.ps1')
+. (Join-Path $CommonDir 'Telemetry.ps1')   # Compress-DumpFile: triage gzips every kept dump at rest
 
 # read the monitor config for the dedupe settings (this is a separate process from the monitor)
 $MonConfig = Join-Path $env:ProgramData 'ReportingTroubleshooting\Monitor\config.json'

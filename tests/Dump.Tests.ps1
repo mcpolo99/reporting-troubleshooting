@@ -115,6 +115,15 @@ try {
     Check 'profile uploaded -> suppress'    ($up.Action -eq 'suppress')
     $keep = Register-DumpOccurrence -IdObj $ido -Sig $sig -DumpPath $dmp -Dir (Join-Path $pdir 'ki_keep') -DeviceUploaded $false
     Check 'not uploaded -> keep first'      ($keep.Action -eq 'keep')
+
+    # Known list / baseline must actually IGNORE (suppress) an already-analysed id, not merely annotate it. A
+    # fresh machine (empty registry) with the id in the shipped/synced baseline keeps NO sample for it.
+    $base = Join-Path $pdir 'baseline.json'
+    (@($ido.Id) | ConvertTo-Json) | Set-Content -LiteralPath $base -Encoding UTF8
+    $bk = Register-DumpOccurrence -IdObj $ido -Sig $sig -DumpPath $dmp -Dir (Join-Path $pdir 'ki_base') -BaselinePath $base -SuppressKnown $true -DeviceUploaded $false
+    Check 'baseline-known -> suppress'      ($bk.Action -eq 'suppress')
+    $bk2 = Register-DumpOccurrence -IdObj $ido -Sig $sig -DumpPath $dmp -Dir (Join-Path $pdir 'ki_base2') -BaselinePath $base -SuppressKnown $false -DeviceUploaded $false
+    Check 'baseline-known + no-suppress keeps' ($bk2.Action -eq 'keep')
 } finally { Remove-Item -Recurse -Force $pdir -ErrorAction SilentlyContinue }
 
 Write-Host ''
