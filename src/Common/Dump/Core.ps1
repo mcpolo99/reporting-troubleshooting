@@ -72,22 +72,11 @@ function Get-DumpProcessFromName([string]$FileName) {
 }
 
 
-# --- Per-device collection profile (CONTRACT 4a) --------------------------------------------------------------
-# The backend's per-device ledger, cached locally by the telemetry forwarder (Sync-DeviceProfile) so triage and
-# the flush know - durably, even offline - which signatures THIS device has already uploaded. Lives here (dump
-# engine) so the detached triage worker can read it; the http pull stays in Telemetry.ps1.
-function Get-DeviceProfilePath { Join-Path (Get-KnownIssuesDir) 'device-profile.json' }
-
-# Load the cached profile as @{ signatureId -> state } (state = 'uploaded' | 'granted'). Empty if none/unreadable.
-function Get-DeviceProfile([string]$Path) {
-    if (-not $Path) { $Path = Get-DeviceProfilePath }
-    $map = @{}
-    if (Test-Path -LiteralPath $Path) {
-        try {
-            $o = Get-Content -LiteralPath $Path -Raw | ConvertFrom-Json
-            if ($o) { foreach ($p in $o.PSObject.Properties) { $map[$p.Name] = "$($p.Value)" } }
-        } catch {}
-    }
-    $map
+# --- Device ledger location -----------------------------------------------------------------------------------
+# The single local dedup store (state/count/sample per signature). Read/write + the collect decision live in
+# Ledger.ps1; the PATH lives here (dump engine) so the detached triage worker and the flush can both reach it.
+function Get-DeviceLedgerPath([string]$Dir) {
+    if (-not $Dir) { $Dir = Get-KnownIssuesDir }
+    Join-Path $Dir 'device-ledger.json'
 }
 

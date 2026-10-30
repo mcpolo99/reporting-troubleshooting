@@ -73,10 +73,16 @@ if ([string]::IsNullOrWhiteSpace("$baseline") -or -not (Test-Path -LiteralPath $
 # only the result object, and a detached worker's stdout stays clean.
 function Say($m) { if (-not $Quiet) { Write-Host $m } }
 
+# A backend endpoint being configured means a grant could still come, so a known signature is KEPT (held) and
+# offered rather than dropped. Pure local/offline mode (no http endpoint) means no grant can ever come, so a
+# known signature's bytes are dropped. Get-TelemetryConfig is available (Telemetry.ps1 is dot-sourced above).
+$script:IsOnline = $false
+try { $script:IsOnline = [bool](Test-IsHttp (Get-TelemetryConfig).EventSink) } catch {}
+
 function Triage-One([string]$Path) {
-    $r = Invoke-DumpTriage -DumpPath $Path -ClrMdDll $clrmd -BaselinePath $baseline -SuppressKnown $suppressKnown -DeviceProfile (Get-DeviceProfile)
+    $r = Invoke-DumpTriage -DumpPath $Path -ClrMdDll $clrmd -BaselinePath $baseline -SuppressKnown $suppressKnown -IsOnline $script:IsOnline
     $name = [IO.Path]::GetFileName($Path)
-    Say ("{0,-40} {1,-9} id={2} x{3,-4} {4}{5}" -f $name, $r.Action, $r.Id, $r.Count, $r.Leaf, $(if ($r.Disposition -and $r.Disposition -ne 'kept') { " ($($r.Disposition))" } else { '' }))
+    Say ("{0,-40} {1,-9} id={2} x{3,-4} {4}{5}" -f $name, $r.Collect, $r.Id, $r.Count, $r.Leaf, $(if ($r.Disposition -and $r.Disposition -ne 'kept') { " ($($r.Disposition))" } else { '' }))
     return $r
 }
 
@@ -86,10 +92,10 @@ if ($DumpPath) {
     if (-not (Test-Path $DumpDir)) { Say "Dump folder not found: $DumpDir"; return }
     $dumps = @(Get-ChildItem -Path $DumpDir -Filter *.dmp -File -ErrorAction SilentlyContinue | Sort-Object CreationTime)
     Say ("Triaging {0} dump(s) in {1} (walk tool: {2})`n" -f $dumps.Count, $DumpDir, $(if ($clrmd) { 'ClrMD' } else { 'NONE - hangs stay provisional' }))
-    $kept = 0; $supp = 0; $defer = 0
+    $kept = 0; $dropped = 0; $defer = 0
     foreach ($d in $dumps) {
         $r = Triage-One $d.FullName
-        switch ($r.Action) { 'keep' { $kept++ } 'suppress' { $supp++ } 'defer' { $defer++ } }
+        switch ($r.Collect) { 'collect' { $kept++ } 'drop' { $dropped++ } 'defer' { $defer++ } }
     }
-    Say ("`nDone: {0} kept, {1} suppressed, {2} deferred (provisional)." -f $kept, $supp, $defer)
+    Say ("`nDone: {0} collected, {1} dropped, {2} deferred (provisional)." -f $kept, $dropped, $defer)
 }

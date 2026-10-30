@@ -64,13 +64,13 @@ function Get-DumpFacts {
         [Parameter(Mandatory)]$Sig,
         [Parameter(Mandatory)]$IdObj,
         [Parameter(Mandatory)][string]$DumpPath,
-        $Decision,                 # from Register-DumpOccurrence: @{ Action; Count; ... }
+        $Decision,                 # from Update-DeviceLedger: @{ Collect='collect'|'drop'|'defer'; Count; ... }
         [string]$DumpTool,
         [string]$DumpType,
         [string]$Sha256            # precomputed hash to reuse (re-analysis) - avoids re-hashing a multi-GB dump
     )
-    $action = if ($Decision) { "$($Decision.Action)" } else { 'keep' }
-    $escalate = ($action -ne 'suppress')                 # upload the dump only on first sample / provisional
+    $collect = if ($Decision) { "$($Decision.Collect)" } else { 'collect' }
+    $escalate = ($collect -ne 'drop')                    # the dump is escalatable only when we keep the bytes
     $occ = if ($Decision) { [int]$Decision.Count } else { 1 }   # this machine's occurrence count for the signature
     $confidence = if ($IdObj.WalkPending) { 'low' } else { 'high' }
     $diag = Get-DumpDiagnosis $Sig
@@ -166,7 +166,7 @@ function Get-DumpFacts {
         captureComment = $Sig.ProcDumpComment
         confidence     = $confidence
         severity       = (Get-DumpSeverity $Sig)
-        isNewSignature = ($action -ne 'suppress')
+        isNewSignature = ($occ -le 1)
         escalateDump   = $escalate
         occurrenceCount = $(if ($Decision) { $occ } else { $null })
         product      = [ordered]@{ image = $Sig.ImageName; imageVersion = $Sig.ImageVer }

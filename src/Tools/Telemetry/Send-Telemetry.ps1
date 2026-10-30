@@ -57,13 +57,12 @@ try {
     if ($k -ge 0) { Write-Log "known-signatures: baseline now lists $k signature(s)" }
     else { Write-Log 'known-signatures: sync failed - keeping existing baseline' 'WARN' }
 
-    # Device profile: pull it from the backend when reachable; otherwise (local mode, or a failed http sync)
-    # BUILD it locally from the registry + baseline so offline dedup still holds - one dump per signature, not
-    # one per recurrence - instead of leaving the flush with no profile at all.
-    $p = Sync-DeviceProfile -Config $cfg
-    if ($p -gt 0) { Write-Log "device-profile: $p signature(s) already collected for this device (from backend)" }
-    elseif ($p -eq 0) { $lp = Build-LocalDeviceProfile -Config $cfg; Write-Log "device-profile: local/offline - built $lp entry(ies) from registry + baseline" }
-    else { $lp = Build-LocalDeviceProfile -Config $cfg; Write-Log "device-profile: backend sync failed - rebuilt $lp entry(ies) locally" 'WARN' }
+    # Device ledger: when the backend is reachable, MERGE its view into the local ledger (uploaded/granted
+    # overlaid on local held, freeing any copy the backend already has). Offline is a clean no-op - the ledger
+    # already drives dedup locally, so there is nothing to merge and nothing destructive to do.
+    $p = Sync-DeviceLedger -Config $cfg -Dir $Dir
+    if ($p -ge 0) { Write-Log "device-ledger: reconciled with backend ($p entry(ies)); offline = no-op" }
+    else { Write-Log 'device-ledger: backend sync failed - local ledger left untouched' 'WARN' }
 
     $r = Send-OutboxEvents -Dir $Dir -Config $cfg
     $level = if ($r.FailedUploads -gt 0) { 'ERROR' } elseif ($r.Failed -gt 0) { 'WARN' } else { 'INFO' }

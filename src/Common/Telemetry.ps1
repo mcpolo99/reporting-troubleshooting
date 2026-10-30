@@ -195,7 +195,7 @@ function Send-OutboxEvents {
     $http = Test-IsHttp $Config.EventSink
     if (-not $http -and -not (Test-Path -LiteralPath $Config.EventSink)) { New-Item -ItemType Directory -Path $Config.EventSink -Force | Out-Null }
 
-    $profile = Get-DeviceProfile   # per-device collection profile (CONTRACT 4a), offline-aware cache
+    $ledger = Read-DeviceLedger $Dir   # the single local dedup ledger (state per signature)
     $sent = 0; $failed = 0; $dumps = 0; $failedUploads = 0
     foreach ($f in @(Get-ChildItem -LiteralPath $outbox -Filter *.json -File -ErrorAction SilentlyContinue)) {
         try {
@@ -213,8 +213,8 @@ function Send-OutboxEvents {
                 # on the send path; size-based retention evicts handled dumps later). The grant still decides any
                 # actual upload; this only skips churn for a signature the backend already has.
                 $sigId = if ($evt) { if ($evt.signatureId) { "$($evt.signatureId)" } elseif ($evt.ids) { "$($evt.ids.signatureId)" } else { '' } } else { '' }
-                if ($sigId -and $profile[$sigId] -eq 'uploaded') {
-                    Write-TelemetryLog ("device already uploaded a dump for {0} - any held dump kept locally, not re-collected" -f $sigId)
+                if ($sigId -and (Get-LedgerState $ledger $sigId) -eq 'uploaded') {
+                    Write-TelemetryLog ("ledger says backend already holds a dump for {0} - held bytes kept locally, not re-collected" -f $sigId)
                 }
                 try {
                     $resp = Invoke-RestMethod -Method Post -Uri ($Config.EventSink.TrimEnd('/') + '/v1/events') -Body $body -ContentType 'application/json' -Headers (Get-AuthHeaders $Config @{ 'Idempotency-Key' = $idem }) -TimeoutSec 30
@@ -275,6 +275,7 @@ function Send-OutboxEvents {
                         # deleted (frees disk). This is the ONLY delete-on-send: a dump that was NOT uploaded
                         # (no grant, failed, over cap) is always kept. Removes the on-disk dump (.dmp.gz or raw) + sidecars.
                         Write-TelemetryLog ("uploaded dump {0} as {1} ({2} bytes compressed) -> {3}; local copy removed (backend holds it)" -f $rawName, $uploadName, $bytes, $up.Key) 'INFO'
+                        if ($sigId) { [void](Set-LedgerUploaded -Sig $sigId -Dir $Dir) }   # ledger: held -> uploaded (frees the sample)
                         Remove-DumpArtifacts -DumpPath $loc.Path
                         Move-SentEvent -EventPath $f.FullName -SentDir $sentDir; $sent++; $dumps++
                     } else {
@@ -350,61 +351,26 @@ function Sync-KnownSignatures {
     } catch { Write-TelemetryLog ("known-signatures: sync error - {0}" -f (Resolve-HttpError $_ $Config)) 'WARN'; return -1 }   # -1 = keep the existing baseline
 }
 
-# Pull THIS device's collection profile (CONTRACT 4a: GET /v1/profile?deviceId) and cache it locally, so the
-# flush knows - even offline - which signatures this device has already uploaded (discard the held dump) vs still
-# owes (keep + retry). Advisory only: the grant (5a) remains the sole upload authority. Returns the entry count,
-# or -1 on failure (keep the cached profile). No-op (0) in local/offline mode.
-function Sync-DeviceProfile {
-    param($Config, [string]$DeviceId)
+# Sync THIS device's collection state from the backend (GET /v1/profile?deviceId) and MERGE it into the local
+# ledger - never a blind overwrite. Backend 'uploaded' wins over local 'held' (and the freed sample is deleted);
+# backend 'granted' sets granted while we still hold the dump; a signature the backend does not mention keeps
+# its local state. Offline (no http) is a clean no-op: the ledger already drives dedup, so nothing to do and
+# nothing destructive. Returns the merged entry count, or -1 on a failed http sync (ledger left untouched).
+function Sync-DeviceLedger {
+    param($Config, [string]$DeviceId, [string]$Dir)
     if (-not $Config) { $Config = Get-TelemetryConfig }
     if (-not $DeviceId) { $DeviceId = $env:COMPUTERNAME }
-    if (-not (Test-IsHttp $Config.KnownSource)) { return 0 }
+    if (-not $Dir) { $Dir = Get-KnownIssuesDir }
+    if (-not (Test-IsHttp $Config.KnownSource)) { return 0 }   # offline/local: ledger is already the truth
     try {
         $uri = $Config.KnownSource.TrimEnd('/') + '/v1/profile?deviceId=' + [uri]::EscapeDataString($DeviceId)
         $data = Invoke-RestMethod -Method Get -Uri $uri -Headers (Get-AuthHeaders $Config) -TimeoutSec 30
-        $map = @{}
-        foreach ($e in @($data.entries)) { if ($e.signatureId) { $map["$($e.signatureId)"] = "$($e.state)" } }
-        $path = Get-DeviceProfilePath
-        $dir = Split-Path -Parent $path
-        if ($dir -and -not (Test-Path -LiteralPath $dir)) { New-Item -ItemType Directory -Path $dir -Force -ErrorAction Stop | Out-Null }
-        ($map | ConvertTo-Json) | Set-Content -LiteralPath $path -Encoding UTF8 -ErrorAction Stop
-        return $map.Count
-    } catch { Write-TelemetryLog ("device-profile: sync error - {0}" -f (Resolve-HttpError $_ $Config)) 'WARN'; return -1 }
-}
-
-# Offline / server-unreachable fallback for the device profile. When there is no backend to ask (local mode)
-# or the http sync failed, we still must avoid re-keeping a dump for a signature this box already holds a sample
-# for - otherwise a long offline period keeps one dump per RECURRENCE instead of one per signature. We derive
-# the profile LOCALLY from the per-machine registry (ids this machine has a kept sample for) merged with the
-# known baseline (ids already analysed), marking them 'uploaded' so triage/flush treat them as already-collected.
-# This only ever ADDS local knowledge; it never invents a 'granted' obligation. Returns the entry count.
-function Build-LocalDeviceProfile {
-    param($Config, [string]$DeviceId)
-    if (-not $Config) { $Config = Get-TelemetryConfig }
-    $map = @{}
-    try {
-        # ids with a kept sample on THIS machine (registry is per-machine already)
-        $reg = Read-LocalRegistry (Get-KnownIssuesDir)
-        $machineKey = Get-MachineKey
-        foreach ($id in @($reg.issues.Keys)) {
-            $iss = $reg.issues[$id]
-            $m = if ($iss.machines) { $iss.machines[$machineKey] } else { $null }
-            if ($m -and $m.sample) { $map["$id"] = 'uploaded' }
-        }
-        # ids already analysed centrally (shipped/synced baseline) - also "already collected" for our purposes
-        if ($Config.BaselinePath -and (Test-Path -LiteralPath $Config.BaselinePath)) {
-            try {
-                $b = Get-Content -LiteralPath $Config.BaselinePath -Raw | ConvertFrom-Json
-                $ids = if ($null -eq $b) { @() } elseif ($b.issues) { $b.issues.PSObject.Properties.Name } elseif ($b -is [array]) { $b } else { @($b) }
-                foreach ($id in @($ids)) { if ($id) { $map["$id"] = 'uploaded' } }
-            } catch {}
-        }
-        $path = Get-DeviceProfilePath
-        $dir = Split-Path -Parent $path
-        if ($dir -and -not (Test-Path -LiteralPath $dir)) { New-Item -ItemType Directory -Path $dir -Force -ErrorAction Stop | Out-Null }
-        ($map | ConvertTo-Json) | Set-Content -LiteralPath $path -Encoding UTF8 -ErrorAction Stop
-        return $map.Count
-    } catch { Write-TelemetryLog ("device-profile: local build error - {0}" -f $_.Exception.Message) 'WARN'; return -1 }
+        $backend = @{}
+        foreach ($e in @($data.entries)) { if ($e.signatureId) { $backend["$($e.signatureId)"] = "$($e.state)" } }
+        $r = Merge-BackendProfile -BackendEntries $backend -Dir $Dir
+        foreach ($p in @($r.FreeSamples)) { Remove-DumpArtifacts -DumpPath $p }   # backend has these - free the local copies
+        return $r.Count
+    } catch { Write-TelemetryLog ("device-ledger: sync error - {0}" -f (Resolve-HttpError $_ $Config)) 'WARN'; return -1 }
 }
 
 # "Collect for manual handling" (UI button): for a box that cannot reach the backend, gather everything a human
@@ -470,8 +436,9 @@ function Test-Telemetry {
     return ($lines -join "`n")
 }
 
-# Get-DeviceProfile / Get-DeviceProfilePath live in Common\Dump\Core.ps1 (dump engine) so the detached triage
-# worker can read the cached profile too; this transport module only writes it (Sync-DeviceProfile above).
+# The device ledger (read/write + the collect decision) lives in Common\Dump\Ledger.ps1, and its path in
+# Core.ps1, so the detached triage worker and this transport both reach it. Sync-DeviceLedger (above) merges
+# the backend's view into it; it never keeps a competing copy.
 
 # Stream a file to an http endpoint with HttpClient. Windows PowerShell 5.1's Invoke-RestMethod -InFile buffers
 # the WHOLE file into memory before sending, so a ~1.6 GB dump spikes/fails on a constrained machine (#42 defect

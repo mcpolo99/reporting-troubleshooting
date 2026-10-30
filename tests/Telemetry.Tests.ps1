@@ -155,12 +155,11 @@ try {
     Check 'resolves <name>.dmp.gz by raw name' ($rGz.Path -eq ($gzOnly + '.gz'))
     Check 'flags the hit as gz'                 ($rGz.IsGz)
 
-    # local/offline device profile: the baseline (ids already analysed) feeds the locally-built profile, so dedup
-    # holds with no backend. (The registry half reads ProgramData at runtime and is covered in Dump.Tests.)
-    Write-Host 'local device-profile build (offline dedup)'
-    $lpBase = Join-Path $dir 'lp_baseline.json'; '["sigFromBaseline"]' | Set-Content -LiteralPath $lpBase -Encoding UTF8
-    $n = Build-LocalDeviceProfile -Config ([ordered]@{ BaselinePath = $lpBase })
-    Check 'local profile includes baseline id' ($n -ge 1)
+    # offline, the device-ledger sync is a clean no-op (no http endpoint) - the ledger already drives dedup, so
+    # there is nothing to merge and nothing destructive to do.
+    Write-Host 'device-ledger sync is a no-op offline'
+    $n = Sync-DeviceLedger -Config ([ordered]@{ KnownSource = (Join-Path $dir 'known.json') }) -Dir $dir
+    Check 'offline ledger sync -> 0 (no-op)' ($n -eq 0)
 
     # manual collect: pending reports + gzipped dumps are MOVED into <DumpDir>\manual-outbox for hand-carry.
     Write-Host 'collect for manual handling'
