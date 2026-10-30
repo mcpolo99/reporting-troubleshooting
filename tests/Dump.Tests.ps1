@@ -78,7 +78,30 @@ try {
     Check 'top-level class + severity present'  ([bool]$fev.class -and [bool]$fev.severity)
     Check 'top-level capturedAtUtc present'     ([bool]$fev.capturedAtUtc)
     Check 'top-level deviceId present'          ([bool]$fev.deviceId)   # CI-bound per CONTRACT 7; required for the per-device grant
+    # Resting-form report (the dump is gzipped, so the file is <...>.dmp.gz and the RAW facts are passed in):
+    # dump.bytes describes the ORIGINAL dump, dump.file is the resting .gz, computer comes from the filename.
+    $fev2 = Get-DumpFacts -Sig $fsig -IdObj $fido `
+        -DumpPath 'C:\d\ProcDump_PC01_app_hang_20261028_143005.dmp.gz' -Sha256 'deadbeef' -RawBytes 123456 -RawCapturedUtc '2026-10-28T14:30:05Z'
+    Check 'resting report: raw bytes kept'      ($fev2.dump.bytes -eq 123456)
+    Check 'resting report: references .dmp.gz'  ($fev2.dump.file -eq 'ProcDump_PC01_app_hang_20261028_143005.dmp.gz')
+    Check 'resting report: raw sha'             ($fev2.dump.sha256 -eq 'deadbeef')
+    Check 'resting report: computer from name'  ($fev2.deviceId -eq 'PC01')
 } finally { Remove-Item -LiteralPath $tmpDump -Force -ErrorAction SilentlyContinue }
+
+Write-Host 'Get-DumpEvent / Resolve-DumpIdentity (context-free entrypoint)'
+$nd = Join-Path $env:TEMP ('nd_{0}.dmp' -f ([guid]::NewGuid().ToString('N').Substring(0,8)))
+Set-Content -LiteralPath $nd -Value 'not a minidump' -Encoding ascii
+try {
+    Check 'identity: non-minidump -> null'  ($null -eq (Resolve-DumpIdentity -DumpPath $nd))
+    $threwND = $false; try { [void](Get-DumpEvent -DumpPath $nd) } catch { $threwND = $true }
+    Check 'event: non-minidump -> throws'   $threwND
+    $threwMiss = $false; try { [void](Get-DumpEvent -DumpPath (Join-Path $env:TEMP 'does-not-exist.dmp')) } catch { $threwMiss = $true }
+    Check 'event: missing file -> throws'   $threwMiss
+} finally { Remove-Item -LiteralPath $nd -Force -ErrorAction SilentlyContinue }
+
+Write-Host 'resting dump name (triage folds the tag into the gzip)'
+Check 'resting name replaces pending tag' ((Get-RestingDumpName 'ProcDump_PC01_bSuite_pending_20261028_143005.dmp' 'exception') -eq 'ProcDump_PC01_bSuite_exception_20261028_143005.dmp')
+Check 'resting name: non-scheme -> null'  ($null -eq (Get-RestingDumpName 'random.dmp' 'hang'))
 
 Write-Host 'dump file naming (ProcDump_<pc>_<process>_<tag>_<yyyyMMdd>_<HHmmss>.dmp)'
 $when = Get-Date '2026-10-28 14:30:05'
@@ -88,6 +111,9 @@ Check 'six underscore-delimited fields' ((([IO.Path]::GetFileNameWithoutExtensio
 Check 'tag: exception when code set'     ((Get-DumpTag -Code ([uint32]3221225477) -Trigger '') -eq 'exception')   # 0xC0000005
 Check 'tag: hang from trigger text'      ((Get-DumpTag -Code $null -Trigger 'Hung window detected') -eq 'hang')
 Check 'tag: manual otherwise'            ((Get-DumpTag -Code $null -Trigger 'Timed: process ran') -eq 'manual')
+Check 'computer token from scheme name'  ((Get-DumpComputerFromName $fn) -eq 'PC01')
+Check 'computer token: legacy name'       ((Get-DumpComputerFromName 'bSuite.exe_BS1000079947_261027_171640.dmp') -eq 'BS1000079947')
+Check 'computer token: gz double-ext'     ((Get-DumpComputerFromName 'ProcDump_PC01_bSuite_hang_20261028_143005.dmp.gz') -eq 'PC01')
 Check 'process token round-trips'        ((Get-DumpProcessFromName $fn) -eq 'bSuite')
 Check 'process token: legacy name null'  ($null -eq (Get-DumpProcessFromName 'bSuite.exe_261019_084858.dmp'))
 Check 'underscores in token collapse'    ((New-DumpFileName -Computer 'PC01' -Process 'my_app' -Tag 'hang' -When $when) -eq 'ProcDump_PC01_my-app_hang_20261028_143005.dmp')
@@ -95,26 +121,69 @@ Check 'empty token -> fallback'          ((Get-DumpProcessFromName (New-DumpFile
 Check 'trailing .exe stripped'           ((Get-DumpProcessFromName (New-DumpFileName -Computer 'PC01' -Process 'bSuite.exe' -Tag 'hang' -When $when)) -eq 'bSuite')
 Check 'only .exe stripped, dotted kept'  ((Get-DumpProcessFromName (New-DumpFileName -Computer 'PC01' -Process 'bSuite.NotRespondingHandler.exe' -Tag 'hang' -When $when)) -eq 'bSuite.NotRespondingHandler')
 
-Write-Host 'device profile: fetch-and-overwrite cache, read-only use (#84)'
-$pdir = Join-Path $env:TEMP ('devprof_{0}' -f ([guid]::NewGuid().ToString('N').Substring(0, 8)))
+Write-Host 'device ledger: the single local dedup source + the collect decision'
+$pdir = Join-Path $env:TEMP ('ledger_{0}' -f ([guid]::NewGuid().ToString('N').Substring(0, 8)))
 New-Item -ItemType Directory -Force $pdir | Out-Null
 try {
-    $ppath = Join-Path $pdir 'device-profile.json'
-    '{"sigAAA":"uploaded","sigBBB":"granted"}' | Set-Content -LiteralPath $ppath -Encoding UTF8
-    $prof = Get-DeviceProfile $ppath
-    Check 'profile reads uploaded state'    ($prof['sigAAA'] -eq 'uploaded')
-    Check 'profile reads granted state'     ($prof['sigBBB'] -eq 'granted')
-    Check 'missing profile -> empty map'    ((Get-DeviceProfile (Join-Path $pdir 'nope.json')).Count -eq 0)
-
-    # triage dedup honours the profile: a signature this device already 'uploaded' is SUPPRESSED (stop collecting),
-    # even with an empty local registry; 'granted'/absent keep the first-sample-per-machine decision.
     $sig = New-Sig @{ Kind = 'hang'; Frames = @('A.B', 'C.D') }
     $ido = Get-DumpStableId $sig
-    $dmp = Join-Path $pdir 't.dmp'; Set-Content -LiteralPath $dmp -Value 'X' -Encoding ascii
-    $up  = Register-DumpOccurrence -IdObj $ido -Sig $sig -DumpPath $dmp -Dir (Join-Path $pdir 'ki_up') -DeviceUploaded $true
-    Check 'profile uploaded -> suppress'    ($up.Action -eq 'suppress')
-    $keep = Register-DumpOccurrence -IdObj $ido -Sig $sig -DumpPath $dmp -Dir (Join-Path $pdir 'ki_keep') -DeviceUploaded $false
-    Check 'not uploaded -> keep first'      ($keep.Action -eq 'keep')
+
+    # Helper: a fresh ledger dir + a dump file for each scenario (so nothing leaks across cases).
+    function New-Case([string]$name) {
+        $d = Join-Path $pdir $name; New-Item -ItemType Directory -Force $d | Out-Null
+        $dmp = Join-Path $d 't.dmp'; Set-Content -LiteralPath $dmp -Value 'X' -Encoding ascii
+        @{ Dir = $d; Dump = $dmp }
+    }
+
+    # new, nothing known -> COLLECT the first sample; the ledger records it as 'held'
+    $c = New-Case 'new'
+    $r1 = Update-DeviceLedger -IdObj $ido -DumpPath $c.Dump -Dir $c.Dir
+    Check 'new signature -> collect'        ($r1.Collect -eq 'collect')
+    Check 'first collect -> state held'     ($r1.State -eq 'held')
+    $led = Read-DeviceLedger $c.Dir
+    Check 'ledger records the sample'       ($led.entries[$ido.Id].sample -eq $c.Dump)
+    Check 'ledger counts the occurrence'    ($led.entries[$ido.Id].localCount -eq 1)
+
+    # a second capture of the SAME signature while the sample is still on disk -> DROP (local dedup), count++
+    $r2 = Update-DeviceLedger -IdObj $ido -DumpPath $c.Dump -Dir $c.Dir
+    Check 'recurrence (held) -> drop'       ($r2.Collect -eq 'drop')
+    Check 'recurrence bumps localCount'     ((Read-DeviceLedger $c.Dir).entries[$ido.Id].localCount -eq 2)
+
+    # backend already has it (ledger state uploaded) -> DROP
+    $cu = New-Case 'uploaded'
+    [void](Set-LedgerUploaded -Sig $ido.Id -Dir $cu.Dir)
+    $ru = Update-DeviceLedger -IdObj $ido -DumpPath $cu.Dump -Dir $cu.Dir
+    Check 'ledger uploaded -> drop'         ($ru.Collect -eq 'drop')
+
+    # known/analysed in the baseline: OFFLINE -> drop (no grant can come); ONLINE -> collect (grant decides)
+    $base = Join-Path $pdir 'baseline.json'; (@($ido.Id) | ConvertTo-Json) | Set-Content -LiteralPath $base -Encoding UTF8
+    $co = New-Case 'known_off'
+    $ko = Update-DeviceLedger -IdObj $ido -DumpPath $co.Dump -Dir $co.Dir -BaselinePath $base -IsOnline $false
+    Check 'known + offline -> drop'         ($ko.Collect -eq 'drop')
+    $cn = New-Case 'known_on'
+    $kn = Update-DeviceLedger -IdObj $ido -DumpPath $cn.Dump -Dir $cn.Dir -BaselinePath $base -IsOnline $true
+    Check 'known + online -> collect'       ($kn.Collect -eq 'collect')
+
+    # provisional id (walk pending) -> DEFER (keep), never dropped
+    $cp = New-Case 'prov'
+    $idp = [pscustomobject]@{ Id = 'provid1'; Kind = 'hang'; Scheme = 1; Canonical = 's1|t1prov'; WalkPending = $true }
+    $rp = Update-DeviceLedger -IdObj $idp -DumpPath $cp.Dump -Dir $cp.Dir
+    Check 'provisional -> defer'            ($rp.Collect -eq 'defer')
+
+    # a held sample that is GONE (evicted) -> re-acquire (collect)
+    $cg = New-Case 'lost'
+    [void](Update-DeviceLedger -IdObj $ido -DumpPath $cg.Dump -Dir $cg.Dir)   # held + sample recorded
+    Remove-Item -LiteralPath $cg.Dump -Force                                   # sample vanishes
+    $dmp2 = Join-Path $cg.Dir 't2.dmp'; Set-Content -LiteralPath $dmp2 -Value 'X' -Encoding ascii
+    $rg = Update-DeviceLedger -IdObj $ido -DumpPath $dmp2 -Dir $cg.Dir
+    Check 'held sample lost -> collect'     ($rg.Collect -eq 'collect')
+
+    # merge backend profile: uploaded wins over held (and frees the sample)
+    $cm = New-Case 'merge'
+    [void](Update-DeviceLedger -IdObj $ido -DumpPath $cm.Dump -Dir $cm.Dir)   # held, sample on disk
+    $mr = Merge-BackendProfile -BackendEntries @{ "$($ido.Id)" = 'uploaded' } -Dir $cm.Dir
+    Check 'merge: held -> uploaded'         ((Read-DeviceLedger $cm.Dir).entries[$ido.Id].state -eq 'uploaded')
+    Check 'merge: frees the local sample'   (@($mr.FreeSamples) -contains $cm.Dump)
 } finally { Remove-Item -Recurse -Force $pdir -ErrorAction SilentlyContinue }
 
 Write-Host ''

@@ -126,16 +126,65 @@ try {
     Check 'custom DestPath honored'        ((Compress-DumpFile -SourcePath $srcDump -DestPath (Join-Path $dir 'x.gz')).Path -eq (Join-Path $dir 'x.gz'))
     Check 'missing source -> not ok'       (-not (Compress-DumpFile -SourcePath (Join-Path $dir 'nope.dmp')).Ok)
 
-    # handled-dump deletion (#73): a dump the flush is done with (uploaded / not wanted) is removed with its sidecars.
-    Write-Host 'handled-dump deletion'
+    # dump-artifact deletion: one helper removes a dump (.dmp OR .dmp.gz) + its sidecars, used after a confirmed upload.
+    Write-Host 'dump-artifact deletion'
     $hd = Join-Path $dir 'handled.dmp'; Set-Content $hd -Value 'D' -Encoding ascii
     Set-Content ($hd -replace '\.dmp$', '.info.txt') -Value 'i' -Encoding ascii
     Set-Content ($hd -replace '\.dmp$', '.versions.txt') -Value 'v' -Encoding ascii
-    Remove-HandledDump -DumpPath $hd
+    Remove-DumpArtifacts -DumpPath $hd
     Check 'dump deleted'                   (-not (Test-Path -LiteralPath $hd))
     Check 'info sidecar deleted'           (-not (Test-Path -LiteralPath ($hd -replace '\.dmp$', '.info.txt')))
     Check 'versions sidecar deleted'       (-not (Test-Path -LiteralPath ($hd -replace '\.dmp$', '.versions.txt')))
-    Check 'blank path is a no-op'          ($null -eq (Remove-HandledDump -DumpPath ''))
+    Check 'blank path is a no-op'          ($null -eq (Remove-DumpArtifacts -DumpPath ''))
+
+    # delete-on-successful-upload must handle the kept-at-rest .dmp.gz form (stem = path minus .dmp/.dmp.gz).
+    Write-Host 'handled-dump deletion (.dmp.gz form)'
+    $hg = Join-Path $dir 'handled.dmp.gz'; Set-Content $hg -Value 'GZ' -Encoding ascii
+    Set-Content (Join-Path $dir 'handled.info.txt') -Value 'i' -Encoding ascii
+    Remove-DumpArtifacts -DumpPath $hg
+    Check 'gz dump deleted'                (-not (Test-Path -LiteralPath $hg))
+    Check 'gz dump info sidecar deleted'   (-not (Test-Path -LiteralPath (Join-Path $dir 'handled.info.txt')))
+
+    # dumps live gzipped at rest: the event records the RAW name, so resolution must find <name>.dmp.gz, and
+    # raw-first so a not-yet-gzipped dump still resolves.
+    Write-Host 'gzip-at-rest dump resolution'
+    $gzOnly = Join-Path $dumpDir 'app.exe_gzonly.dmp'
+    Set-Content -LiteralPath ($gzOnly + '.gz') -Value 'GZ' -Encoding ascii          # only the .gz exists on disk
+    $evGz = [pscustomobject]@{ dump = [pscustomobject]@{ file = 'app.exe_gzonly.dmp' } }   # event still names the raw .dmp
+    $rGz = Resolve-DumpPath -Evt $evGz -Config ([ordered]@{ DumpDir = $dumpDir })
+    Check 'resolves <name>.dmp.gz by raw name' ($rGz.Path -eq ($gzOnly + '.gz'))
+    Check 'flags the hit as gz'                 ($rGz.IsGz)
+
+    # offline, the device-ledger sync is a clean no-op (no http endpoint) - the ledger already drives dedup, so
+    # there is nothing to merge and nothing destructive to do.
+    Write-Host 'device-ledger sync is a no-op offline'
+    $n = Sync-DeviceLedger -Config ([ordered]@{ KnownSource = (Join-Path $dir 'known.json') }) -Dir $dir
+    Check 'offline ledger sync -> 0 (no-op)' ($n -eq 0)
+
+    # manual collect: pending reports + gzipped dumps are MOVED into <DumpDir>\manual-outbox for hand-carry.
+    Write-Host 'collect for manual handling'
+    $mc = Join-Path $dir 'mc'; New-Item -ItemType Directory -Force (Join-Path $mc 'outbox') | Out-Null
+    $mcDump = Join-Path $mc 'dumps'; New-Item -ItemType Directory -Force $mcDump | Out-Null
+    Set-Content (Join-Path $mc 'outbox\e1.json') -Value '{}' -Encoding UTF8
+    Set-Content (Join-Path $mcDump 'ProcDump_PC_app_hang_20261030_101010.dmp.gz') -Value 'GZ' -Encoding ascii
+    $res = Move-ToManualOutbox -Config ([ordered]@{ DumpDir = $mcDump }) -Dir $mc
+    Check 'collect moved 1 event'          ($res.Events -eq 1)
+    Check 'collect moved 1 dump'           ($res.Dumps -eq 1)
+    Check 'event now under manual-outbox'  (Test-Path (Join-Path $mcDump 'manual-outbox\e1.json'))
+    Check 'dump now under manual-outbox'   (Test-Path (Join-Path $mcDump 'manual-outbox\ProcDump_PC_app_hang_20261030_101010.dmp.gz'))
+    Check 'event removed from outbox'      (-not (Test-Path (Join-Path $mc 'outbox\e1.json')))
+
+    # retention (ingest-owned): keeps a dump + its sidecar, sweeps an orphaned sidecar. (Eviction itself needs
+    # >100 MB to cross the floor, so it is validated on the machine, not here.)
+    Write-Host 'retention: orphan sidecar sweep'
+    $rt = Join-Path $dir 'rt'; New-Item -ItemType Directory -Force $rt | Out-Null
+    $rtKi = Join-Path $dir 'rtki'; New-Item -ItemType Directory -Force $rtKi | Out-Null
+    Set-Content (Join-Path $rt 'ProcDump_PC_app_hang_20261030_101010.dmp.gz') -Value 'GZ' -Encoding ascii
+    Set-Content (Join-Path $rt 'ProcDump_PC_app_hang_20261030_101010.info.txt') -Value 'i' -Encoding ascii
+    Set-Content (Join-Path $rt 'orphan.info.txt') -Value 'x' -Encoding ascii
+    Invoke-DumpRetention -DumpDir $rt -LimitGB 30 -Dir $rtKi
+    Check 'retention keeps dump + sidecar'  ((Test-Path (Join-Path $rt 'ProcDump_PC_app_hang_20261030_101010.dmp.gz')) -and (Test-Path (Join-Path $rt 'ProcDump_PC_app_hang_20261030_101010.info.txt')))
+    Check 'retention sweeps orphan sidecar' (-not (Test-Path (Join-Path $rt 'orphan.info.txt')))
 }
 finally { Remove-Item -Recurse -Force $dir -ErrorAction SilentlyContinue }
 

@@ -11,7 +11,7 @@
 #   Dump\Walk.ps1        ClrMD managed walk + bitness dispatch + dep checks
 #   Dump\Diagnosis.ps1   kind-aware fact -> plain-language problem statement
 #   Dump\Facts.ps1       per-event procdump-facts JSON emitter
-#   Dump\KnownIssues.ps1 local registry / per-machine dedupe / occurrences / baseline
+#   Dump\Ledger.ps1      device ledger - single local dedup source (state/count/sample) + known store
 #   Dump\Triage.ps1      triage one dump end-to-end
 
 # This shim's own path, so a bitness-redirected child (Invoke-InMatchingHost) reloads the whole engine.
@@ -21,7 +21,7 @@ $__dumpDir = Join-Path (Split-Path -Parent $PSCommandPath) 'Dump'
 if (-not (Test-Path -LiteralPath $__dumpDir)) {
     throw "Dump engine folder not found: $__dumpDir. The deploy is incomplete (Common\Dump\ missing) - re-run Install on the Monitor tab."
 }
-foreach ($__m in 'Core', 'Minidump', 'Signature', 'Walk', 'Diagnosis', 'KnownIssues', 'Facts', 'Triage') {
+foreach ($__m in 'Core', 'Minidump', 'Signature', 'Walk', 'Diagnosis', 'Ledger', 'Facts', 'Triage') {
     $__f = Join-Path $__dumpDir "$__m.ps1"
     if (-not (Test-Path -LiteralPath $__f)) { throw "Dump engine file missing: $__f (incomplete deploy - re-run Install on the Monitor tab)." }
     . $__f

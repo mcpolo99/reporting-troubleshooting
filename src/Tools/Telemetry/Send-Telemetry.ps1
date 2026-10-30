@@ -39,20 +39,28 @@ $script:LogCount = 0
 New-LogFile
 try { Remove-OldLogs 10 } catch {}
 
+# Single instance. The monitor launches this forwarder on a timer; a slow flush (a big upload, or a long
+# offline retry sweep) must never let the next tick start a SECOND forwarder racing on the same outbox/dumps.
+# A machine-wide mutex makes the flush exclusive: if another forwarder already holds it, this one exits at once.
+$FlushMutex = New-Object System.Threading.Mutex($false, 'Global\RTTelemetryFlush')
+$FlushOwned = $false
+try { $FlushOwned = $FlushMutex.WaitOne(0) } catch [System.Threading.AbandonedMutexException] { $FlushOwned = $true }
+if (-not $FlushOwned) { Write-Log 'Another telemetry flush is already running - exiting (single instance).' 'WARN'; $FlushMutex.Dispose(); exit 0 }
+
 if (-not $Dir) { $Dir = Get-KnownIssuesDir }
 $cfg = Get-TelemetryConfig
 $mode = if (Test-IsHttp $cfg.EventSink) { 'http' } else { 'local' }
 Write-Log "flush start (mode=$mode, events -> $($cfg.EventSink))"
 
 try {
-    $k = Sync-KnownSignatures -Config $cfg
-    if ($k -ge 0) { Write-Log "known-signatures: baseline now lists $k signature(s)" }
-    else { Write-Log 'known-signatures: sync failed - keeping existing baseline' 'WARN' }
+    # SYNC (pull) and FLUSH (push) are separate activities. Sync is read-only reconcile (known store + ledger
+    # merge); it runs first so the flush acts on fresh state, but it is independent - a failed sync never stops
+    # the flush, and it does useful work even with an empty outbox.
+    $s = Invoke-TelemetrySync -Config $cfg -Dir $Dir
+    if ($s.Known -ge 0)  { Write-Log "known-signatures: baseline now lists $($s.Known) signature(s)" } else { Write-Log 'known-signatures: sync failed - keeping existing baseline' 'WARN' }
+    if ($s.Ledger -ge 0) { Write-Log "device-ledger: reconciled with backend ($($s.Ledger) entry(ies)); offline = no-op" } else { Write-Log 'device-ledger: backend sync failed - local ledger left untouched' 'WARN' }
 
-    $p = Sync-DeviceProfile -Config $cfg
-    if ($p -ge 0) { Write-Log "device-profile: $p signature(s) already collected for this device" }
-    else { Write-Log 'device-profile: sync failed - keeping cached profile' 'WARN' }
-
+    # FLUSH (push): drain the outbox, upload held dumps on a grant.
     $r = Send-OutboxEvents -Dir $Dir -Config $cfg
     $level = if ($r.FailedUploads -gt 0) { 'ERROR' } elseif ($r.Failed -gt 0) { 'WARN' } else { 'INFO' }
     Write-Log ('events: sent {0}, uploaded {1} dump(s) on grant, {2} pending retry (left in outbox), {3} moved to failed-uploads' -f $r.Sent, $r.Dumps, $r.Failed, $r.FailedUploads) $level

@@ -2,7 +2,9 @@
 <#
 .SYNOPSIS
   Run every *.Tests.ps1 in this folder and aggregate the result. Exit 0 iff all suites pass.
-  Each suite is deterministic (synthetic inputs, no real dumps / no network). CI entry point.
+  Suites use synthetic inputs and no network; the e2e suite GENERATES a real minidump at test time
+  (MiniDumpWriteDump on a throwaway process) and asserts the signature is STABLE rather than a fixed value,
+  so it stays deterministic. CI entry point.
 
   Run:  powershell -NoProfile -ExecutionPolicy Bypass -File tests\Run-Tests.ps1
 #>

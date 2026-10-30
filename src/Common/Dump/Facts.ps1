@@ -64,35 +64,30 @@ function Get-DumpFacts {
         [Parameter(Mandatory)]$Sig,
         [Parameter(Mandatory)]$IdObj,
         [Parameter(Mandatory)][string]$DumpPath,
-        $Decision,                 # from Register-DumpOccurrence: @{ Action; Count; ... }
+        $Decision,                 # from Update-DeviceLedger: @{ Collect='collect'|'drop'|'defer'; Count; ... }
         [string]$DumpTool,
         [string]$DumpType,
-        [string]$Sha256            # precomputed hash to reuse (re-analysis) - avoids re-hashing a multi-GB dump
+        [string]$Sha256,           # precomputed hash to reuse - avoids re-hashing a multi-GB dump
+        [long]$RawBytes = -1,      # raw (uncompressed) dump size, when $DumpPath is the gzipped resting file
+        [string]$RawCapturedUtc    # raw dump mtime (ISO), when the raw file is gone (gzipped / dropped)
     )
-    $action = if ($Decision) { "$($Decision.Action)" } else { 'keep' }
-    $escalate = ($action -ne 'suppress')                 # upload the dump only on first sample / provisional
+    $collect = if ($Decision) { "$($Decision.Collect)" } else { 'collect' }
+    $escalate = ($collect -ne 'drop')                    # the dump is escalatable only when we keep the bytes
     $occ = if ($Decision) { [int]$Decision.Count } else { 1 }   # this machine's occurrence count for the signature
     $confidence = if ($IdObj.WalkPending) { 'low' } else { 'high' }
     $diag = Get-DumpDiagnosis $Sig
 
     $fi = $null; try { $fi = Get-Item -LiteralPath $DumpPath -ErrorAction Stop } catch {}
 
-    # Computer: prefer what the DUMP records (ProcDump comment on newer dumps, else the ".info.txt" sidecar
-    # beside it) over this host - so an off-box re-scan reports the machine that captured, not the analyst box.
-    # The stable deviceId (MachineGuid) only exists for THIS host; if the dump is from another machine we do
-    # not know its guid, so leave it null rather than stamp the wrong one.
+    # Computer: prefer what the DUMP records (ProcDump comment on newer dumps), else the capturing machine
+    # stamped into the dump FILENAME - so an off-box re-scan reports the machine that captured, not the analyst
+    # box. There is no ".info.txt" sidecar any more (its machine fact is in the filename and the dump env block).
+    # The stable deviceId (MachineGuid) only exists for THIS host; if the dump is from another machine we do not
+    # know its guid, so leave it null rather than stamp the wrong one.
     $hostComputer = $env:COMPUTERNAME
     $dumpComputer = $null
     if ($Sig.ProcDumpComment -and $Sig.ProcDumpComment -match '(?im)^\s*computer\s*[:=]\s*(\S+)') { $dumpComputer = $matches[1] }
-    if (-not $dumpComputer) {
-        $info = $DumpPath -replace '\.dmp$', '.info.txt'
-        if (Test-Path -LiteralPath $info) {
-            try {
-                $m = Select-String -LiteralPath $info -Pattern '^\s*Computer\s*[:=]\s*(\S+)' -ErrorAction Stop | Select-Object -First 1
-                if ($m) { $dumpComputer = $m.Matches[0].Groups[1].Value }
-            } catch {}
-        }
-    }
+    if (-not $dumpComputer) { $dumpComputer = Get-DumpComputerFromName ([IO.Path]::GetFileName($DumpPath)) }
     $computer = if ($dumpComputer) { $dumpComputer } else { $hostComputer }
     $computerSource = if ($dumpComputer) { 'dump' } else { 'host' }
     $offBox = $dumpComputer -and ($dumpComputer -ne $hostComputer)
@@ -102,10 +97,13 @@ function Get-DumpFacts {
     $deviceId = $computer
     $machineGuid = if (-not $offBox) { Get-MachineKey } else { $null }
     $sha = $null
-    if ($escalate -and $fi) {
-        if ($Sha256) { $sha = $Sha256.ToLowerInvariant() }
-        else { try { $sha = (Get-FileHash -LiteralPath $DumpPath -Algorithm SHA256).Hash.ToLowerInvariant() } catch {} }
-    }
+    if ($Sha256) { $sha = $Sha256.ToLowerInvariant() }
+    elseif ($escalate -and $fi -and $RawBytes -lt 0) { try { $sha = (Get-FileHash -LiteralPath $DumpPath -Algorithm SHA256).Hash.ToLowerInvariant() } catch {} }
+    # Raw size/mtime: use the passed raw values when the on-disk file is the gzipped resting form (or gone);
+    # otherwise read them from the file. So dump.bytes always describes the ORIGINAL dump, not the .gz.
+    $dumpBytes = if ($RawBytes -ge 0) { $RawBytes } elseif ($fi) { $fi.Length } else { $null }
+    $capturedUtc = if ($RawCapturedUtc) { $RawCapturedUtc } elseif ($fi) { $fi.LastWriteTimeUtc.ToString('o') } else { $null }
+    $writtenLocal = if ($RawCapturedUtc) { ([datetime]$RawCapturedUtc).ToLocalTime().ToString('yyyy-MM-dd HH:mm:ss') } elseif ($fi) { $fi.LastWriteTime.ToString('yyyy-MM-dd HH:mm:ss') } else { $null }
 
     # Build arrays with STATEMENT-FORM assignments. Windows PowerShell 5.1 unwraps a single-element array
     # returned from an `if`-expression (or a $() subexpression) to a scalar, which would emit `"x"` instead
@@ -146,7 +144,7 @@ function Get-DumpFacts {
         signatureId    = $IdObj.Id
         deviceId       = $deviceId
         productVersion = $Sig.ImageVer
-        capturedAtUtc  = $(if ($fi) { $fi.LastWriteTimeUtc.ToString('o') } else { $null })
+        capturedAtUtc  = $capturedUtc
         ids          = [ordered]@{
             eventId            = (New-DumpEventId)
             deviceId           = $deviceId
@@ -166,17 +164,17 @@ function Get-DumpFacts {
         captureComment = $Sig.ProcDumpComment
         confidence     = $confidence
         severity       = (Get-DumpSeverity $Sig)
-        isNewSignature = ($action -ne 'suppress')
+        isNewSignature = ($occ -le 1)
         escalateDump   = $escalate
         occurrenceCount = $(if ($Decision) { $occ } else { $null })
         product      = [ordered]@{ image = $Sig.ImageName; imageVersion = $Sig.ImageVer }
         environment  = $environment
         dump         = [ordered]@{
-            file         = [IO.Path]::GetFileName($DumpPath)
-            path         = $(if ($fi) { $fi.FullName } else { $DumpPath })   # absolute source path, so the flusher finds the dump even when its DumpDir differs from where the capture landed (#42)
-            bytes        = $(if ($fi) { $fi.Length } else { $null })
-            sha256       = $sha
-            writtenLocal = $(if ($fi) { $fi.LastWriteTime.ToString('yyyy-MM-dd HH:mm:ss') } else { $null })
+            file         = [IO.Path]::GetFileName($DumpPath)                  # the resting file (.dmp or .dmp.gz); the flusher resolves either
+            path         = $(if ($fi) { $fi.FullName } else { $DumpPath })    # absolute resting path, so the flusher finds it regardless of DumpDir (#42)
+            bytes        = $dumpBytes                                         # RAW (uncompressed) size - describes the original dump
+            sha256       = $sha                                              # RAW sha256
+            writtenLocal = $writtenLocal
         }
         process      = [ordered]@{ pid = $Sig.ProcessId; faultThreadId = $Sig.ThreadId }
         exception    = [ordered]@{
@@ -193,6 +191,23 @@ function Get-DumpFacts {
         modules      = $modules
         notes        = $notes
     }
+}
+
+# Context-free dump -> event. Given a dump, return its procdump-facts/v1 event object (or compact JSON with
+# -AsJson). Pure: no monitor config, no ledger, no outbox, no decision - it reuses the single parse+id path
+# (Resolve-DumpIdentity) and Get-DumpFacts with no Decision (so the event is a plain 'collect', occurrence 1).
+# For the on-demand "identify this dump", tests, and any off-monitor analysis. ClrMD is resolved from the shared
+# store when not passed (guarded); when unavailable, a hang/managed id degrades to provisional - never throws
+# except on a missing/non-minidump file.
+function Get-DumpEvent {
+    param([Parameter(Mandatory)][string]$DumpPath, [string]$ClrMdDll, [string]$Sha256, [switch]$AsJson)
+    if (-not (Test-Path -LiteralPath $DumpPath)) { throw "dump not found: $DumpPath" }
+    if (-not $ClrMdDll -and (Get-Command Resolve-PackageTool -ErrorAction SilentlyContinue)) { try { $ClrMdDll = Resolve-PackageTool 'clrmd' } catch {} }
+    $ident = Resolve-DumpIdentity -DumpPath $DumpPath -ClrMdDll $ClrMdDll
+    if (-not $ident) { throw "not a minidump: $DumpPath" }
+    $facts = Get-DumpFacts -Sig $ident.Sig -IdObj $ident.IdObj -DumpPath $DumpPath -Sha256 $Sha256
+    if ($AsJson) { return ($facts | ConvertTo-Json -Depth 8 -Compress) }
+    return $facts
 }
 
 # Atomically write one event to the outbox (temp file + move, so a drainer never reads a partial file).

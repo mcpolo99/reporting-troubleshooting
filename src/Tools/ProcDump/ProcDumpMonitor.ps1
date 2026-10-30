@@ -94,6 +94,7 @@ if (-not $CommonDir) { throw "Shared components (Common\) not found from $MonScr
 . (Join-Path $CommonDir 'Logging.ps1')
 . (Join-Path $CommonDir 'Common.ps1')
 . (Join-Path $CommonDir 'Packages.ps1')
+. (Join-Path $CommonDir 'Telemetry.ps1')  # telemetry config/endpoints + Test-Telemetry (GUI "Test Telemetry" button)
 . (Join-Path $CommonDir 'DumpId.ps1')     # stable fault-signature + known-issues dedupe engine
 
 # ProcDump lives in the shared package store - single source of truth: Common\Packages.ps1.
@@ -106,7 +107,7 @@ function Get-DefaultConfig {
     [pscustomobject]@{
         Apps             = @('AppA.exe')
         DumpDir          = 'C:\dumps'
-        KeepDumps        = 15
+        DumpDiskLimitGB  = 30           # size budget for kept (gzipped) dumps; oldest ALREADY-HANDLED dumps are evicted over this. Dumps are never pruned by count, and a dump whose event is still pending is never evicted.
         CheckSeconds     = 5
         CleanupSeconds   = 300
         ProcDumpArgs     = '-accepteula -ma -e -h -n 1 -w'   # -n = dumps per ProcDump session (default 1 if omitted)
@@ -180,14 +181,23 @@ function Resolve-WorkerPriority($cfg) {
     }
 }
 
+$script:TelemetryProc = $null
 function Enqueue-Telemetry($Config) {
     $worker = $InstalledTelemetry
     if (-not (Test-Path $worker)) { Write-Log "Telemetry flush skipped: forwarder not found at $worker" 'WARN'; return }
+    # Single instance: never start a second forwarder while the previous one is still running (a slow upload or a
+    # long offline retry sweep can outlast the flush interval). The forwarder ALSO self-guards with a machine-wide
+    # mutex, so this is belt-and-suspenders; here we simply skip the relaunch and keep the loop cheap.
+    if ($script:TelemetryProc -and -not $script:TelemetryProc.HasExited) {
+        Write-Log "Telemetry flush skipped: previous forwarder (PID $($script:TelemetryProc.Id)) still running."
+        return
+    }
     try {
         Write-Log 'Telemetry flush: launching forwarder (sync known-sigs, forward events, upload granted dumps)'
         $p = Start-Process powershell.exe -WindowStyle Hidden -PassThru -ArgumentList @(
             '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', "`"$worker`"", '-Quiet')
         try { $p.PriorityClass = Resolve-WorkerPriority $Config } catch {}
+        $script:TelemetryProc = $p
         Write-Log "Telemetry forwarder launched (PID $($p.Id)); outcome in Logs\Telemetry_*.log"
     } catch { Write-Log "Could not launch telemetry forwarder: $($_.Exception.Message)" 'WARN' }
 }
@@ -382,71 +392,9 @@ function Update-AppVersions($cfg, $seen, $lastInfo) {
 }
 
 # =============================== DUMP ANALYSIS ===========================
-# keys are hex strings (PowerShell parses 0xC0000005 as a negative Int32, so literals won't match)
-$ExceptionNames = @{
-    'C0000005' = 'ACCESS_VIOLATION';        'C0000374' = 'HEAP_CORRUPTION'
-    'C0000409' = 'STACK_BUFFER_OVERRUN / FAIL_FAST'; 'C00000FD' = 'STACK_OVERFLOW'
-    'E0434352' = '.NET (CLR) EXCEPTION';    'E06D7363' = 'C++ EXCEPTION'
-    '80000003' = 'BREAKPOINT';              '80000004' = 'SINGLE_STEP'
-    'C0000094' = 'INTEGER_DIVIDE_BY_ZERO';  'C000001D' = 'ILLEGAL_INSTRUCTION'
-    'C0000096' = 'PRIVILEGED_INSTRUCTION';  'C0000006' = 'IN_PAGE_ERROR'
-    'C0000008' = 'INVALID_HANDLE';          'C0000420' = 'ASSERTION_FAILURE'
-    'C0000602' = 'FAIL_FAST_EXCEPTION';     'C000041D' = 'FATAL_USER_CALLBACK_EXCEPTION'
-}
+# Reading dump headers / fault signatures is the dump engine's job (Common\Dump\*). The monitor is the
+# ingest detector only - it does NOT parse dumps; triage (detached) does, exactly once.
 
-# Reads header, exception record, process id and ProcDump's comment straight from the .dmp
-# (only a few KB are read, even for multi-GB dumps).
-function Get-DumpInfo([string]$Path) {
-    $r = [pscustomobject]@{ ProcessId = $null; ThreadId = $null; Code = $null; Address = $null
-                            Params = @(); Comment = ''; Trigger = ''; Exception = '' }
-    $fs = [IO.File]::Open($Path, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::ReadWrite)
-    try {
-        $br = New-Object IO.BinaryReader($fs)
-        if ($br.ReadUInt32() -ne 0x504D444D) { return $null }        # 'MDMP'
-        [void]$br.ReadUInt32()
-        $count = $br.ReadUInt32(); $dirRva = $br.ReadUInt32()
-        $fs.Position = $dirRva
-        $dir = @(for ($i = 0; $i -lt $count; $i++) { ,@($br.ReadUInt32(), $br.ReadUInt32(), $br.ReadUInt32()) })
-        foreach ($s in $dir) {
-            $type = $s[0]; $size = $s[1]; $rva = $s[2]
-            if ($type -eq 6 -and $size -ge 40) {                      # ExceptionStream
-                $fs.Position = $rva
-                $r.ThreadId = $br.ReadUInt32(); [void]$br.ReadUInt32()
-                $r.Code = $br.ReadUInt32(); [void]$br.ReadUInt32(); [void]$br.ReadUInt64()
-                $r.Address = $br.ReadUInt64()
-                $np = [Math]::Min($br.ReadUInt32(), 15); [void]$br.ReadUInt32()
-                $r.Params = @(for ($j = 0; $j -lt $np; $j++) { $br.ReadUInt64() })
-            }
-            elseif ($type -eq 15 -and $size -ge 12) {                 # MiscInfoStream
-                $fs.Position = $rva
-                [void]$br.ReadUInt32(); $flags = $br.ReadUInt32(); $p = $br.ReadUInt32()
-                if ($flags -band 1) { $r.ProcessId = $p }
-            }
-            elseif (($type -eq 10 -or $type -eq 11) -and $size -gt 0 -and $size -lt 65536 -and -not $r.Comment) {
-                $fs.Position = $rva                                   # CommentStreamA / W
-                $enc = if ($type -eq 11) { [Text.Encoding]::Unicode } else { [Text.Encoding]::ASCII }
-                $r.Comment = $enc.GetString($br.ReadBytes([int]$size)).Trim([char]0, ' ', "`r", "`n")
-            }
-        }
-    } finally { $fs.Dispose() }
-
-    if ($null -ne $r.Code) {
-        $hex  = '{0:X8}' -f $r.Code
-        $name = $ExceptionNames[$hex]
-        $r.Exception = '0x{0}{1} at 0x{2:X} on thread {3}' -f $hex, $(if ($name) { " $name" } else { '' }), $r.Address, $r.ThreadId
-        if ($hex -eq 'C0000005' -and $r.Params.Count -ge 2) {
-            $op = switch ($r.Params[0]) { 0 { 'read from' } 1 { 'write to' } 8 { 'execute (DEP) at' } default { 'access to' } }
-            $r.Exception += ' ({0} 0x{1:X})' -f $op, $r.Params[1]
-        }
-    }
-    # ProcDump's comment: "*** procdump <args>" + "*** <reason>" lines
-    $reason = @($r.Comment -split "`r?`n" | ForEach-Object { ($_ -replace '^\*+\s*', '').Trim() } |
-                Where-Object { $_ -and $_ -notmatch '^procdump(64|64a)?(\.exe)?\s' })
-    $r.Trigger = if ($reason) { $reason -join '; ' }
-                 elseif ($r.Exception) { 'Exception (no ProcDump comment in dump)' }
-                 else { 'Unknown (no exception record and no ProcDump comment - likely hang/manual trigger)' }
-    $r
-}
 
 function Get-DumpApp($cfg, [string]$FileName) {
     # New scheme: match the <process> token exactly (ignoring a trailing .exe, since ProcDump's PROCESSNAME may
@@ -459,123 +407,24 @@ function Get-DumpApp($cfg, [string]$FileName) {
     $cfg.Apps | Where-Object { $FileName -like "$([IO.Path]::GetFileNameWithoutExtension($_))*" } | Select-Object -First 1
 }
 
-# Launch the fault-identification + dedupe worker for one freshly written dump, DETACHED and at
-# below-normal priority, so the slow managed stack walk never blocks the monitor loop. The worker
-# (DumpTriage.ps1, run in place from src next to this script) computes the stable id, counts the
-# occurrence, and soft-suppresses recurrences of an already-kept/known id.
-function Enqueue-DumpTriage([string]$DumpPath, $Config) {
+# Launch the INGEST worker (DumpTriage.ps1 -DumpDir), DETACHED and below-normal. This is the ONLY dump handling
+# the monitor triggers - and it never touches a dump itself: the worker scans the dump dir, triages every
+# complete dump (parse once, id once, fold rename into gzip, report), and runs retention. Single-instance: the
+# worker self-guards with a mutex, and we also skip the launch while the previous one is still running, so a busy
+# arm loop never spawns a pile of ingest processes. No-op if the worker is missing.
+$script:IngestProc = $null
+function Enqueue-Ingest($Config) {
+    if ($script:IngestProc -and -not $script:IngestProc.HasExited) { return }   # previous ingest still running
     $worker = $InstalledTriage
-    if (-not (Test-Path $worker)) { Write-Log 'DumpTriage.ps1 not found - fault-id skipped for this dump.' 'WARN'; return }
+    if (-not (Test-Path $worker)) { Write-Log 'DumpTriage.ps1 not found - ingest skipped.' 'WARN'; return }
+    $dir = if ($Config -and $Config.DumpDir) { $Config.DumpDir } else { (Read-Config).DumpDir }
     try {
         $p = Start-Process powershell.exe -WindowStyle Hidden -PassThru -ArgumentList @(
-            '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', "`"$worker`"", '-DumpPath', "`"$DumpPath`"", '-Quiet')
+            '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', "`"$worker`"", '-DumpDir', "`"$dir`"", '-Quiet')
         try { $p.PriorityClass = Resolve-WorkerPriority $Config } catch {}
-        Write-Log "Fault-id worker queued for $([IO.Path]::GetFileName($DumpPath)) (PID $($p.Id))."
-    } catch { Write-Log "Could not launch fault-id worker: $($_.Exception.Message)" 'WARN' }
-}
-
-# Handles new dumps once fully written: reads the reason, detects repeat captures of the same
-# event, writes <dump>.info.txt, and logs a one-line summary.
-#   $known   : set of dump paths already handled
-#   $pending : path -> last seen size (dump still being written)
-#   $recent  : app -> last primary dump info (for duplicate detection)
-function Invoke-NewDumps($cfg, $known, $pending, $recent, $lastInfo) {
-    $dumps = @(Get-ChildItem -Path $cfg.DumpDir -Filter *.dmp -File -ErrorAction SilentlyContinue | Sort-Object CreationTime)
-    foreach ($d in $dumps) {
-        if ($known.Contains($d.FullName)) { continue }
-
-        # complete = size unchanged since last check, and no writer holds the file
-        if (-not $pending.ContainsKey($d.FullName) -or $pending[$d.FullName] -ne $d.Length) {
-            if (-not $pending.ContainsKey($d.FullName)) { Write-Log "Dump being written: $($d.Name)" }
-            $pending[$d.FullName] = $d.Length; continue
-        }
-        try { ([IO.File]::Open($d.FullName, 'Open', 'Read', 'Read')).Dispose() } catch { continue }
-        $pending.Remove($d.FullName); [void]$known.Add($d.FullName)
-
-        $app  = Get-DumpApp $cfg $d.Name
-        $info = try { Get-DumpInfo $d.FullName } catch { $null }
-
-        # Rename the placeholder ProcDump wrote to the final convention now that the reason is known:
-        # ProcDump_<pc>_<process>_<tag>_<yyyyMMdd>_<HHmmss>.dmp. The monitor is the single owner of the name, so
-        # this happens before the .info.txt sidecar is written and before the deep triage worker is enqueued.
-        $proc = if ($app) { [IO.Path]::GetFileNameWithoutExtension($app) } else { Get-DumpProcessFromName $d.Name }
-        $tag  = Get-DumpTag -Code $(if ($info) { $info.Code } else { $null }) -Trigger $(if ($info) { $info.Trigger } else { '' })
-        $finalName = New-DumpFileName -Computer $env:COMPUTERNAME -Process $proc -Tag $tag -When $d.CreationTime
-        if ($finalName -ne $d.Name) {
-            $finalPath = Join-Path $cfg.DumpDir $finalName
-            if (Test-Path -LiteralPath $finalPath) {   # same pc/process/tag/second -> disambiguate
-                $stem = $finalName -replace '\.dmp$', ''; $n = 2
-                do { $finalName = '{0}_{1}.dmp' -f $stem, $n; $finalPath = Join-Path $cfg.DumpDir $finalName; $n++ } while (Test-Path -LiteralPath $finalPath)
-            }
-            try {
-                Move-Item -LiteralPath $d.FullName -Destination $finalPath -Force -ErrorAction Stop
-                [void]$known.Remove($d.FullName); [void]$known.Add($finalPath)
-                Write-Log "Renamed dump $($d.Name) -> $finalName"
-                $d = Get-Item -LiteralPath $finalPath
-            } catch { Write-Log "Could not rename $($d.Name) to $finalName (in use?): $($_.Exception.Message)" 'WARN' }
-        }
-
-        $ver  = if ($app -and $lastInfo[$app]) { $lastInfo[$app] } else { @('(no version info recorded for this app)') }
-
-        # ---- duplicate detection (same process frozen at the same event) ----
-        $dupOf = $null; $why = ''
-        $prev  = if ($app) { $recent[$app] } else { $null }
-        if ($info -and $prev -and $info.ProcessId -and $info.ProcessId -eq $prev.Info.ProcessId) {
-            if ($null -ne $info.Code -and $info.Code -eq $prev.Info.Code -and
-                $info.Address -eq $prev.Info.Address -and $info.ThreadId -eq $prev.Info.ThreadId) {
-                $dupOf = $prev.Name; $why = 'same process, thread, exception code and address'
-            }
-            elseif ($null -eq $info.Code -and $null -ne $prev.Info.Code -and
-                    ($d.CreationTime - $prev.Time).TotalSeconds -lt $cfg.DuplicateWindowSeconds) {
-                $dupOf = $prev.Name; $why = 'hang trigger while the process was still stopped at the exception'
-            }
-        }
-        if (-not $dupOf -and $app -and $info) { $recent[$app] = @{ Name = $d.Name; Info = $info; Time = $d.CreationTime } }
-
-        $summary = if ($info) { "$($info.Trigger)$(if ($info.Exception) { ' | ' + $info.Exception })$(if ($info.ProcessId) { ' | PID ' + $info.ProcessId })" }
-                   else { 'could not read dump header' }
-
-        # When known-issues dedupe is on, the triage worker owns all dedup/delete decisions (by stable fault
-        # id, across sessions), so the monitor's own same-session duplicate delete stands down here.
-        if ($dupOf -and $cfg.DuplicateAction -eq 'Delete' -and -not $cfg.KnownIssuesEnabled) {
-            try {
-                Remove-Item -LiteralPath $d.FullName -Force -ErrorAction Stop
-                Write-Log "Duplicate capture deleted: $($d.Name) = repeat of $dupOf ($why)." 'WARN'
-            } catch { Write-Log "Duplicate $($d.Name) could not be deleted: $($_.Exception.Message)" 'WARN' }
-            continue
-        }
-
-        $text = @(
-            "Dump        : $($d.Name)"
-            "Created     : {0:yyyy-MM-dd HH:mm:ss}" -f $d.CreationTime
-            "Size        : {0:N0} MB" -f ($d.Length / 1MB)
-            "App         : $app"
-            "Reason      : $(if ($info) { $info.Trigger } else { 'unknown' })"
-            "Exception   : $(if ($info -and $info.Exception) { $info.Exception } else { '(none - not an exception dump)' })"
-            "Process ID  : $(if ($info) { $info.ProcessId })"
-            "Duplicate   : $(if ($dupOf) { "YES - repeat of $dupOf ($why)" } else { 'no (primary)' })"
-            "Computer    : $env:COMPUTERNAME"
-            "OS          : $([Environment]::OSVersion.VersionString)"
-            "Executable(s) at time of dump:"
-        ) + ($ver | ForEach-Object { "  $_" })
-        if ($info -and $info.Comment) { $text += @('', 'ProcDump comment in dump:') + ($info.Comment -split "`r?`n" | ForEach-Object { "  $_" }) }
-
-        try { Set-Content -LiteralPath ([IO.Path]::ChangeExtension($d.FullName, '.info.txt')) -Value $text -Encoding UTF8 -ErrorAction Stop }
-        catch { Write-Log "Could not write info file for $($d.Name): $($_.Exception.Message)" 'WARN' }
-
-        $lvl = if ($dupOf) { 'WARN' } else { 'INFO' }
-        Write-Log ("Dump complete: {0} ({1:N0} MB) - {2}{3}" -f $d.Name, ($d.Length / 1MB), $summary,
-                   $(if ($dupOf) { " - DUPLICATE of $dupOf (kept)" } else { '' })) $lvl
-
-        # Fault-identify this dump and dedupe already-seen problems (runs detached - never blocks the loop).
-        if ($cfg.KnownIssuesEnabled) { Enqueue-DumpTriage $d.FullName $cfg }
-    }
-    # forget dumps that no longer exist. Re-scan the directory NOW (not the $dumps list captured at entry): a dump
-    # renamed to its final name during this pass is only on disk under the new name, so a stale list would drop the
-    # renamed file from $known and the next pass would re-process it (#70).
-    $existing = @(Get-ChildItem -Path $cfg.DumpDir -Filter *.dmp -File -ErrorAction SilentlyContinue | ForEach-Object { $_.FullName })
-    @($known)        | Where-Object { $_ -notin $existing } | ForEach-Object { [void]$known.Remove($_) }
-    @($pending.Keys) | Where-Object { $_ -notin $existing } | ForEach-Object { $pending.Remove($_) }
+        $script:IngestProc = $p
+        Write-Log "Ingest worker launched (PID $($p.Id)); triages new dumps + runs retention."
+    } catch { Write-Log "Could not launch ingest worker: $($_.Exception.Message)" 'WARN' }
 }
 
 # Effective ProcDump arguments. -n comes from the config; if ProcDumpArgs has no -n, -n 1 is used.
@@ -963,7 +812,7 @@ function Edit-Config($cfg) {
     $cfg.Apps = @($apps -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ } |
                   ForEach-Object { if ($_ -notlike '*.exe') { "$_.exe" } else { $_ } })
     $cfg.DumpDir        = Read-Value 'Dump folder' $cfg.DumpDir
-    $cfg.KeepDumps      = Read-Int   'Number of newest dumps to keep' $cfg.KeepDumps
+    $cfg.DumpDiskLimitGB = Read-Int  'Dump disk budget in GB (oldest already-sent dumps evicted over this; unsent dumps kept)' $cfg.DumpDiskLimitGB 1
     $cfg.ProcDumpArgs   = Read-Value 'ProcDump arguments (-e 1 = also first-chance exceptions; -n = dumps per session, 1 recommended)' $cfg.ProcDumpArgs
     $cfg.CooldownSeconds = Read-Int  'Cooldown before re-arming on the same process (seconds; 60 minimum, enforced)' $cfg.CooldownSeconds 60
     while ($true) {
@@ -1017,9 +866,9 @@ function Show-Status {
     Write-Host ("Monitors   : {0} running" -f $pd.Count)
     $pd | ForEach-Object { Write-Host ("             PID {0}: {1}" -f $_.ProcessId, ($_.CommandLine -replace '^.*?\.exe"?\s*', '')) }
 
-    $dumps = @(Get-ChildItem $cfg.DumpDir -Filter *.dmp -File -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending)
+    $dumps = @(Get-ChildItem $cfg.DumpDir -File -ErrorAction SilentlyContinue | Where-Object { $_.Name -match '\.dmp(\.gz)?$' } | Sort-Object LastWriteTime -Descending)
     $size  = ($dumps | Measure-Object Length -Sum).Sum / 1GB
-    Write-Host ("Dumps      : {0} of max {1} in {2} ({3:N2} GB)" -f $dumps.Count, $cfg.KeepDumps, $cfg.DumpDir, $size)
+    Write-Host ("Dumps      : {0} ({1:N2} GB of {2} GB budget) in {3}" -f $dumps.Count, $size, $cfg.DumpDiskLimitGB, $cfg.DumpDir)
     if ($dumps) { Write-Host ("Newest     : {0}  {1}" -f $dumps[0].LastWriteTime, $dumps[0].Name) }
 
     $log = Get-ChildItem $LogDir -Filter "${AppName}_*.log" -File -ErrorAction SilentlyContinue |
@@ -1092,7 +941,7 @@ function Invoke-Monitor {
     try {
         Write-Log ('=' * 70)
         Write-Log "Monitor v$ScriptVersion starting. User: $env:USERDOMAIN\$env:USERNAME  Session: $((Get-Process -Id $PID).SessionId)  PS: $($PSVersionTable.PSVersion)"
-        Write-Log "Apps: $($cfg.Apps -join ', ') | Args: $(Get-EffectiveArgs $cfg) | Keep $($cfg.KeepDumps) dumps | Check $($cfg.CheckSeconds)s | Cleanup $($cfg.CleanupSeconds)s | Cooldown $($cfg.CooldownSeconds)s | Duplicates: $($cfg.DuplicateAction)"
+        Write-Log "Apps: $($cfg.Apps -join ', ') | Args: $(Get-EffectiveArgs $cfg) | Dump budget $($cfg.DumpDiskLimitGB) GB | Check $($cfg.CheckSeconds)s | Cleanup $($cfg.CleanupSeconds)s | Cooldown $($cfg.CooldownSeconds)s | Duplicates: $($cfg.DuplicateAction)"
 
         if (-not (Test-Path $ProcDumpExe) -and -not (Install-Sysinternals)) {
             Write-Log 'ProcDump missing and could not be installed - exiting.' 'ERROR'
@@ -1122,9 +971,10 @@ function Invoke-Monitor {
                 break
             }
 
-            # 0) Track exe versions of running apps; analyse finished dumps (reason, duplicates)
+            # 0) Track exe versions of running apps. (Dump detection/triage/retention is NOT the armer's job -
+            #    the detached ingest worker owns the dump dir; it is launched below on a timer and when a dump
+            #    was just written.)
             Update-AppVersions $cfg $seenProcs $lastInfo
-            Invoke-NewDumps $cfg $known $pending $recent $lastInfo
 
             $pdArgs = Get-EffectiveArgs $cfg
 
@@ -1150,6 +1000,10 @@ function Invoke-Monitor {
                     # nothing, or a saved config with a low/zero CooldownSeconds) cannot spin the monitor in a tight
                     # re-arm loop. A changed/absent PID set clears the cooldown immediately (see below), so a genuinely
                     # new process is still picked up promptly.
+                    # A dump was just written -> trigger the ingest worker promptly (don't wait for the cleanup
+                    # timer), so a fresh capture is triaged within seconds. The armer reacts to ProcDump's exit,
+                    # it still does not touch the dump itself.
+                    if ($made) { Enqueue-Ingest $cfg }
                     $coolSecs = [Math]::Max([int]$cfg.CooldownSeconds, 60)
                     if ($pidsNow) {
                         $cooldown[$app] = @{ Until = (Get-Date).AddSeconds($coolSecs); Pids = $pidsNow }
@@ -1169,9 +1023,9 @@ function Invoke-Monitor {
                 }
 
                 # Dump filename template. ProcDump can only substitute PROCESSNAME/YYMMDD/HHMMSS and has no token
-                # for which trigger (exception vs hang) fired, so we capture with a placeholder tag ('pending')
-                # and Invoke-NewDumps renames to the final ProcDump_<pc>_<process>_<tag>_<yyyyMMdd>_<HHmmss>.dmp
-                # once it has read the dump's reason. The computer name makes a dump's origin obvious.
+                # for which trigger (exception vs hang) fired, so we capture with a placeholder tag ('pending');
+                # the ingest worker's triage folds the real tag into the final ProcDump_<pc>_<process>_<tag>_<date>_<time>.dmp.gz.
+                # The computer name makes a dump's origin obvious.
                 $dumpTemplate = Join-Path $cfg.DumpDir ('ProcDump_{0}_PROCESSNAME_pending_YYMMDD_HHMMSS.dmp' -f $env:COMPUTERNAME)
                 $argLine = "$pdArgs $app `"$dumpTemplate`""
                 try {
@@ -1190,36 +1044,9 @@ function Invoke-Monitor {
             if (((Get-Date) - $lastCleanup).TotalSeconds -ge $cfg.CleanupSeconds) {
                 $lastCleanup = Get-Date
 
-                # Dumps still referenced by a PENDING outbox event (not yet uploaded) must never be pruned, or a
-                # burst / long offline period would delete them before the flush sends them (#75). Build the set of
-                # dump names any pending event points at, and exclude them from the ring-buffer prune.
-                $pendingDumps = @{}
-                $obx = Join-Path (Get-KnownIssuesDir) 'outbox'
-                if (Test-Path -LiteralPath $obx) {
-                    foreach ($ev in @(Get-ChildItem -LiteralPath $obx -Filter *.json -File -ErrorAction SilentlyContinue)) {
-                        try {
-                            $j = Get-Content -LiteralPath $ev.FullName -Raw | ConvertFrom-Json
-                            foreach ($p in @($j.dump.path, $j.dump.file)) { if ($p) { $pendingDumps[[IO.Path]::GetFileName("$p")] = $true } }
-                        } catch {}
-                    }
-                }
-
-                Get-ChildItem -Path $cfg.DumpDir -Filter *.dmp -File -ErrorAction SilentlyContinue |
-                    Where-Object { -not $pendingDumps[$_.Name] } |
-                    Sort-Object LastWriteTime -Descending | Select-Object -Skip $cfg.KeepDumps |
-                    ForEach-Object {
-                        try {
-                            Remove-Item $_.FullName -Force -ErrorAction Stop
-                            Remove-Item ([IO.Path]::ChangeExtension($_.FullName, '.info.txt')) -Force -ErrorAction SilentlyContinue
-                            Write-Log "Deleted old dump $($_.Name)"
-                        }
-                        catch { Write-Log "Could not delete $($_.Name) (in use?), will retry." 'WARN' }
-                    }
-                # info/version files whose dump is gone (.versions.txt = older script version)
-                Get-ChildItem -Path $cfg.DumpDir -Filter *.txt -File -ErrorAction SilentlyContinue |
-                    Where-Object { $_.Name -match '\.(info|versions)\.txt$' -and
-                                   -not (Test-Path -LiteralPath ($_.FullName -replace '\.(info|versions)\.txt$', '.dmp')) } |
-                    Remove-Item -Force -ErrorAction SilentlyContinue
+                # Dump handling (detect/triage/retention) is the ingest worker's job, not the armer's. Launch it
+                # here as a periodic safety net (it self-guards single-instance and no-ops if already running).
+                Enqueue-Ingest $cfg
 
                 # Legacy cleanup: recurrences are deleted at triage now, so the old KnownIssues\Suppressed store is
                 # retired - remove it wholesale if a previous version left one behind.
@@ -1227,21 +1054,6 @@ function Invoke-Monitor {
                 if (Test-Path -LiteralPath $supDir) {
                     try { Remove-Item -LiteralPath $supDir -Recurse -Force -ErrorAction Stop; Write-Log "Removed legacy Suppressed store ($supDir)" }
                     catch { Write-Log "Could not remove legacy Suppressed store (in use?), will retry." 'WARN' }
-                }
-
-                # Bound the ONLY retained dump store: DumpDir\failed-uploads (dumps that exhausted upload retries).
-                # Keep the newest KeepDumps + drop their sidecars so it can never grow unbounded.
-                $fuDir = Join-Path $cfg.DumpDir 'failed-uploads'
-                if (Test-Path -LiteralPath $fuDir) {
-                    Get-ChildItem -LiteralPath $fuDir -Filter *.dmp -File -ErrorAction SilentlyContinue |
-                        Sort-Object LastWriteTime -Descending | Select-Object -Skip $cfg.KeepDumps |
-                        ForEach-Object {
-                            try {
-                                Remove-Item -LiteralPath $_.FullName -Force -ErrorAction Stop
-                                foreach ($sx in '.info.txt', '.versions.txt') { Remove-Item -LiteralPath ($_.FullName -replace '\.dmp$', $sx) -Force -ErrorAction SilentlyContinue }
-                                Write-Log "Pruned failed-upload dump $($_.Name)"
-                            } catch { Write-Log "Could not prune failed-upload $($_.Name) (in use?), will retry." 'WARN' }
-                        }
                 }
 
                 Update-LogRoll
@@ -1306,7 +1118,7 @@ function Invoke-Monitor {
 # =============================== ENTRY POINT =============================
 # Loaded as a library (RT_LIBRARY=1, e.g. the GUI runspace dot-sources this for its functions): expose
 # functions only, no auto-run. BUT an explicit action switch must still run: a monitor/worker the GUI
-# launches as its own process (Start-MonitorRun, Enqueue-DumpTriage) inherits RT_LIBRARY=1 from the GUI's
+# launches as its own process (Start-MonitorRun, Enqueue-Ingest) inherits RT_LIBRARY=1 from the GUI's
 # process environment, and must not be silenced by it - that would "start" a process that does nothing.
 if ($env:RT_LIBRARY -eq '1' -and -not ($Monitor -or $Install -or $Update -or $Uninstall -or $Triage)) { return }
 

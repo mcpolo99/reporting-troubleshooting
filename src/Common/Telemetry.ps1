@@ -74,6 +74,18 @@ function Get-AuthHeaders($Config, [hashtable]$Extra) {
     return $h
 }
 
+# One-line reason from a web error record - the HTTP status when there is a response (e.g. 401 Unauthorized = the
+# device has no/invalid fleet key), else the exception message (DNS/TLS/proxy). Lets a swallowed sync failure say
+# WHY instead of a bare "sync failed".
+function Resolve-HttpError($err, $Config) {
+    try {
+        $r = $err.Exception.Response
+        if ($r -and $r.StatusCode) { return ('HTTP {0} {1}' -f [int]$r.StatusCode, "$($r.StatusCode)") }
+    } catch {}
+    $noKey = if ($Config -and -not $Config.DeviceKey) { ' (no fleet key configured on this device)' } else { '' }
+    return "$($err.Exception.Message)$noKey"
+}
+
 # How many flushes we re-attempt a wanted dump before giving up and parking it in failed-uploads (#42). The
 # event itself (if accepted) is never re-sent beyond this; only the dump upload is capped.
 $script:MaxDumpUploadAttempts = 3
@@ -97,23 +109,28 @@ function Get-UploadAttempts { param([string]$EventPath)
 function Set-UploadAttempts { param([string]$EventPath, [int]$Count) try { Set-Content -LiteralPath "$EventPath.try" -Value $Count -Encoding ascii } catch {} }
 function Clear-UploadAttempts { param([string]$EventPath) $p = "$EventPath.try"; if (Test-Path -LiteralPath $p) { Remove-Item -LiteralPath $p -Force -ErrorAction SilentlyContinue } }
 
-# Resolve where the granted dump actually is. Prefers an absolute path the producer stamped (dump.path), then a
-# rooted dump.file, then DumpDir + the bare filename. Returns @{ Path = <first existing | $null>; Tried = @() }.
+# Resolve where the dump for an event actually is. Prefers an absolute path the producer stamped (dump.path),
+# then a rooted dump.file, then DumpDir + the bare filename. The event records the RAW .dmp name/path, but the
+# triage worker gzips every kept dump at rest (<dump>.dmp -> <dump>.dmp.gz), so for each candidate we also try
+# the ".gz" form - raw-first so a not-yet-gzipped dump still resolves. Returns @{ Path; Tried; IsGz }.
 # (#42 defect 3: a bare filename + a DumpDir that differs from where the capture landed skipped upload silently.)
 function Resolve-DumpPath { param($Evt, $Config)
     $d = if ($Evt) { $Evt.dump } else { $null }
-    $tried = @()
+    $bases = @()
     if ($d) {
-        if ($d.path) { $tried += "$($d.path)" }
+        if ($d.path) { $bases += "$($d.path)" }
         $file = "$($d.file)"
         if ($file) {
-            if ([IO.Path]::IsPathRooted($file)) { $tried += $file }
-            if ($Config.DumpDir) { $tried += (Join-Path $Config.DumpDir ([IO.Path]::GetFileName($file))) }
+            if ([IO.Path]::IsPathRooted($file)) { $bases += $file }
+            if ($Config.DumpDir) { $bases += (Join-Path $Config.DumpDir ([IO.Path]::GetFileName($file))) }
         }
     }
+    # Each base expands to [raw, raw.gz]; a base already ending in .gz is tried as-is.
+    $tried = @()
+    foreach ($b in $bases) { if ($b) { if ($b -match '\.gz$') { $tried += $b } else { $tried += $b; $tried += ($b + '.gz') } } }
     $hit = $null
     foreach ($c in $tried) { if ($c -and (Test-Path -LiteralPath $c)) { $hit = $c; break } }
-    return @{ Path = $hit; Tried = @($tried) }
+    return @{ Path = $hit; Tried = @($tried); IsGz = [bool]($hit -and $hit -match '\.gz$') }
 }
 
 # Archive an event that is fully handled (sent, and its dump obligation met or n/a): move it to outbox\sent and
@@ -123,12 +140,13 @@ function Move-SentEvent { param([string]$EventPath, [string]$SentDir)
     Clear-UploadAttempts -EventPath $EventPath
 }
 
-# Delete a dump the flush is done with (uploaded OK, or the backend did not want it) + its sidecars. DumpDir is
-# staging: the only dumps we retain are the ones that FAILED to upload (in failed-uploads). No-op if $DumpPath is
-# blank/missing (e.g. the dump was already deleted, or a recurrence deleted at triage).
-function Remove-HandledDump { param([string]$DumpPath)
+# Delete a dump and its sidecars, handling BOTH the raw (.dmp) and the kept-at-rest (.dmp.gz) form - the stem
+# for sidecars is the path with a trailing .dmp or .dmp.gz stripped. Used after a successful upload (the only
+# delete-on-send; the backend now holds the dump). No-op on a blank/missing path.
+function Remove-DumpArtifacts { param([string]$DumpPath)
     if (-not $DumpPath) { return }
-    foreach ($f in @($DumpPath) + @('.info.txt', '.versions.txt' | ForEach-Object { $DumpPath -replace '\.dmp$', $_ })) {
+    $stem = $DumpPath -replace '\.dmp(\.gz)?$', ''
+    foreach ($f in @($DumpPath) + @('.info.txt', '.versions.txt' | ForEach-Object { $stem + $_ })) {
         if (Test-Path -LiteralPath $f) { Remove-Item -LiteralPath $f -Force -ErrorAction SilentlyContinue }
     }
 }
@@ -167,7 +185,7 @@ function Send-OutboxEvents {
     $http = Test-IsHttp $Config.EventSink
     if (-not $http -and -not (Test-Path -LiteralPath $Config.EventSink)) { New-Item -ItemType Directory -Path $Config.EventSink -Force | Out-Null }
 
-    $profile = Get-DeviceProfile   # per-device collection profile (CONTRACT 4a), offline-aware cache
+    $ledger = Read-DeviceLedger $Dir   # the single local dedup ledger (state per signature)
     $sent = 0; $failed = 0; $dumps = 0; $failedUploads = 0
     foreach ($f in @(Get-ChildItem -LiteralPath $outbox -Filter *.json -File -ErrorAction SilentlyContinue)) {
         try {
@@ -180,26 +198,33 @@ function Send-OutboxEvents {
                 $evt = $null; try { $evt = $body | ConvertFrom-Json } catch {}
                 $idem = if ($evt -and $evt.ids -and $evt.ids.eventId) { "$($evt.ids.eventId)" } else { [IO.Path]::GetFileNameWithoutExtension($f.Name) }
                 # Profile shortcut (CONTRACT 4a): if THIS device already uploaded a dump for this signature, the
-                # held dump is redundant - discard it now (offline-aware, before any grant round-trip). The grant
-                # still decides any actual upload; this only avoids holding/retrying a dump the backend already has.
+                # backend already has a sample - we will NOT be granted another, so don't bother holding a grant
+                # round-trip's worth of work on it. We do NOT delete the local dump (kept dumps are never deleted
+                # on the send path; size-based retention evicts handled dumps later). The grant still decides any
+                # actual upload; this only skips churn for a signature the backend already has.
                 $sigId = if ($evt) { if ($evt.signatureId) { "$($evt.signatureId)" } elseif ($evt.ids) { "$($evt.ids.signatureId)" } else { '' } } else { '' }
-                if ($sigId -and $profile[$sigId] -eq 'uploaded') {
-                    $locP = Resolve-DumpPath -Evt $evt -Config $Config
-                    if ($locP.Path) { Remove-HandledDump -DumpPath $locP.Path; Write-TelemetryLog ("device already uploaded a dump for {0} - discarded local {1}" -f $sigId, (Split-Path $locP.Path -Leaf)) }
+                if ($sigId -and (Get-LedgerState $ledger $sigId) -eq 'uploaded') {
+                    Write-TelemetryLog ("ledger says backend already holds a dump for {0} - held bytes kept locally, not re-collected" -f $sigId)
                 }
                 try {
                     $resp = Invoke-RestMethod -Method Post -Uri ($Config.EventSink.TrimEnd('/') + '/v1/events') -Body $body -ContentType 'application/json' -Headers (Get-AuthHeaders $Config @{ 'Idempotency-Key' = $idem }) -TimeoutSec 30
                 } catch {
                     # Event not accepted -> leave it in the outbox and retry next run (durable, unbounded).
+                    # On 429 (the backend's rate-limit backstop, CONTRACT.md 10) STOP this flush entirely and back
+                    # off - hammering the remaining events would just pile up more 429s; the next scheduled flush
+                    # retries. All un-posted events stay in the outbox.
+                    $code = $null; try { $code = [int]$_.Exception.Response.StatusCode } catch {}
+                    if ($code -eq 429) { Write-TelemetryLog ("rate-limited (429) on {0} - backing off; remaining events retry next flush" -f $f.Name) 'WARN'; $failed++; break }
                     Write-TelemetryLog ("event POST failed for {0}: {1}" -f $f.Name, $_.Exception.Message) 'WARN'
                     $failed++; continue
                 }
-                # 2) No grant token -> the backend did not want this capture's dump -> the event is done and the
-                #    local dump (if any) is not needed - delete it (DumpDir is staging, not a keep-store).
+                # 2) No grant token -> the backend did not want this capture's dump -> the EVENT is done. We KEEP
+                #    the local (gzipped) dump: dumps are never deleted on the send path (user rule). The dump stays
+                #    in the dump dir, available for manual collection, and size-based retention evicts it (oldest
+                #    handled first) only when the disk budget is exceeded.
                 $grantTok = if ($resp -and $resp.uploadGrant) { "$($resp.uploadGrant.token)" } else { '' }
                 if ([string]::IsNullOrWhiteSpace($grantTok)) {
-                    $locNG = Resolve-DumpPath -Evt $evt -Config $Config
-                    if ($locNG.Path) { Remove-HandledDump -DumpPath $locNG.Path; Write-TelemetryLog ("dump not requested for {0} - deleted {1}" -f $f.Name, (Split-Path $locNG.Path -Leaf)) }
+                    Write-TelemetryLog ("dump not requested for {0} - event archived, local dump kept" -f $f.Name)
                     Move-SentEvent -EventPath $f.FullName -SentDir $sentDir; $sent++
                     continue
                 }
@@ -212,40 +237,51 @@ function Send-OutboxEvents {
                     else { Set-UploadAttempts -EventPath $f.FullName -Count $n; $failed++ }
                     continue
                 }
-                # 4) A grant was issued and the dump is on disk, so it WILL be uploaded - only now do we compress it
-                #    (#64: a dump that is not being uploaded is never compressed; the no-grant case already returned
-                #    at step 2). Process-memory dumps compress ~5x, so gzipping just before the POST is a large
-                #    transfer win and makes the body far more likely to fit the grant cap. The backend stores the
-                #    body opaquely (CONTRACT 5b), so we upload the .gz as-is and signal it with a .gz name; the silo
-                #    consumer decompresses. The event already carries the RAW bytes/sha256 (emitted at capture), so
-                #    those still describe the original dump. Size-gate the COMPRESSED bytes, stream up, clean the .gz.
-                $rawName = Split-Path $loc.Path -Leaf
-                $gzPath = $null
-                $comp = Compress-DumpFile -SourcePath $loc.Path -DestPath ($loc.Path + '.gz') -Label $rawName
-                if ($comp.Ok) { $gzPath = $comp.Path; $uploadPath = $gzPath; $uploadName = $rawName + '.gz' }
-                else { Write-TelemetryLog ("compress failed for {0}: {1} - uploading raw" -f $rawName, $comp.Error) 'WARN'; $uploadPath = $loc.Path; $uploadName = $rawName }
+                # 4) A grant was issued and the dump is on disk, so it WILL be uploaded. The triage worker already
+                #    gzipped every kept dump at rest (process memory compresses ~5x), so normally the resolved file
+                #    IS the .gz and we upload it as-is - a large transfer win that also makes the body far more
+                #    likely to fit the grant cap. Only a dump that somehow stayed raw is compressed here to a
+                #    TEMPORARY .gz (deleted after). The backend stores the body opaquely (CONTRACT 5b); the event
+                #    already carries the RAW bytes/sha256, which still describe the original dump. We NEVER delete
+                #    the kept .gz after upload - size-based retention owns disk; the send path only archives the event.
+                $diskName = Split-Path $loc.Path -Leaf                 # e.g. ProcDump_..._.dmp.gz (already compressed)
+                $rawName  = $diskName -replace '\.gz$', ''             # the original .dmp name the silo reconstructs
+                $tempGz = $null
+                if ($loc.IsGz) {
+                    $uploadPath = $loc.Path; $uploadName = $rawName + '.gz'
+                } else {
+                    $comp = Compress-DumpFile -SourcePath $loc.Path -DestPath ($loc.Path + '.upload.gz') -Label $rawName
+                    if ($comp.Ok) { $tempGz = $comp.Path; $uploadPath = $tempGz; $uploadName = $rawName + '.gz' }
+                    else { Write-TelemetryLog ("compress failed for {0}: {1} - uploading raw" -f $rawName, $comp.Error) 'WARN'; $uploadPath = $loc.Path; $uploadName = $rawName }
+                }
                 try {
                     $bytes = (Get-Item -LiteralPath $uploadPath).Length
                     $grant = Resolve-UploadGrant -Response $resp -DumpBytes $bytes
                     if ($grant.Reason -eq 'too-large') {
-                        Write-TelemetryLog ("granted dump {0} is {1} bytes compressed, over the grant cap - moving to failed-uploads" -f $rawName, $bytes) 'ERROR'
-                        Move-FailedUpload -EventPath $f.FullName -DumpPath $loc.Path -Config $Config -Reason 'too-large'; $failedUploads++
+                        # Over the grant cap: park the EVENT (so it is not retried forever), but KEEP the dump in
+                        # place (never deleted). Record the reason beside the parked event.
+                        Write-TelemetryLog ("granted dump {0} is {1} bytes compressed, over the grant cap - parking event, dump kept" -f $rawName, $bytes) 'ERROR'
+                        Move-FailedUpload -EventPath $f.FullName -DumpPath $null -Config $Config -Reason 'too-large'; $failedUploads++
                         continue
                     }
                     $up = Send-EscalatedDump -DumpPath $uploadPath -UploadName $uploadName -Config $Config -Grant $grant.Token
                     if ($up.Ok) {
-                        Write-TelemetryLog ("uploaded dump {0} as {1} ({2} bytes compressed) -> {3}" -f $rawName, $uploadName, $bytes, $up.Key) 'INFO'
-                        Remove-HandledDump -DumpPath $loc.Path   # uploaded OK -> the local raw dump is no longer needed
+                        # Uploaded OK -> the backend now holds this dump, so the local copy is redundant and MAY be
+                        # deleted (frees disk). This is the ONLY delete-on-send: a dump that was NOT uploaded
+                        # (no grant, failed, over cap) is always kept. Removes the on-disk dump (.dmp.gz or raw) + sidecars.
+                        Write-TelemetryLog ("uploaded dump {0} as {1} ({2} bytes compressed) -> {3}; local copy removed (backend holds it)" -f $rawName, $uploadName, $bytes, $up.Key) 'INFO'
+                        if ($sigId) { [void](Set-LedgerUploaded -Sig $sigId -Dir $Dir) }   # ledger: held -> uploaded (frees the sample)
+                        Remove-DumpArtifacts -DumpPath $loc.Path
                         Move-SentEvent -EventPath $f.FullName -SentDir $sentDir; $sent++; $dumps++
                     } else {
                         $n = (Get-UploadAttempts -EventPath $f.FullName) + 1
                         Write-TelemetryLog ("dump upload failed for {0}: {1}; attempt {2}/{3}" -f $rawName, $up.Detail, $n, $script:MaxDumpUploadAttempts) 'ERROR'
-                        if ($n -ge $script:MaxDumpUploadAttempts) { Move-FailedUpload -EventPath $f.FullName -DumpPath $loc.Path -Config $Config -Reason ("upload-failed: " + $up.Detail); $failedUploads++ }
+                        if ($n -ge $script:MaxDumpUploadAttempts) { Move-FailedUpload -EventPath $f.FullName -DumpPath $null -Config $Config -Reason ("upload-failed: " + $up.Detail); $failedUploads++ }
                         else { Set-UploadAttempts -EventPath $f.FullName -Count $n; $failed++ }
                         continue
                     }
                 } finally {
-                    if ($gzPath -and (Test-Path -LiteralPath $gzPath)) { Remove-Item -LiteralPath $gzPath -Force -ErrorAction SilentlyContinue }
+                    if ($tempGz -and (Test-Path -LiteralPath $tempGz)) { Remove-Item -LiteralPath $tempGz -Force -ErrorAction SilentlyContinue }
                 }
             } else {
                 # Local/offline stand-in: no server to grant, so a NEW signature (escalateDump) drops its dump
@@ -295,45 +331,146 @@ function Sync-KnownSignatures {
         $baseDir = Split-Path -Parent $Config.BaselinePath
         if ($baseDir -and -not (Test-Path -LiteralPath $baseDir)) { New-Item -ItemType Directory -Path $baseDir -Force -ErrorAction Stop | Out-Null }
         if (Test-IsHttp $Config.KnownSource) {
+            # ETag/304 (CONTRACT.md 4): send the cached ETag; an unchanged registry answers 304 and we keep the
+            # baseline as-is (cheap). The ETag is cached in a sidecar next to the baseline.
+            $etagFile = "$($Config.BaselinePath).etag"
             $headers = Get-AuthHeaders $Config
-            $data = Invoke-RestMethod -Method Get -Uri ($Config.KnownSource.TrimEnd('/') + '/v1/known-signatures') -Headers $headers -TimeoutSec 30
-            # The registry returns { signatures: [ { signature, status, ... } ], nextCursor }. The triage
-            # baseline only needs the id set, so store the ids as a flat array (the shape Test-BaselineKnown reads).
+            if (Test-Path -LiteralPath $etagFile) { try { $et = (Get-Content -LiteralPath $etagFile -Raw).Trim(); if ($et) { $headers['If-None-Match'] = $et } } catch {} }
+            try {
+                $resp = Invoke-WebRequest -Method Get -Uri ($Config.KnownSource.TrimEnd('/') + '/v1/known-signatures') -Headers $headers -TimeoutSec 30 -UseBasicParsing
+            } catch {
+                # PS 5.1 raises on a 304; treat that as "unchanged" and keep the current baseline.
+                $sc = $null; try { $sc = [int]$_.Exception.Response.StatusCode } catch {}
+                if ($sc -eq 304) { Write-TelemetryLog 'known-signatures: 304 not-modified - baseline unchanged'; return @(Get-KnownIds $Config.BaselinePath).Count }
+                throw
+            }
+            # The registry returns { signatures: [ { signature, status, ... } ], nextCursor }. The triage baseline
+            # only needs the id set, so store the ids as a flat array (the shape Get-KnownIds reads).
+            $data = $resp.Content | ConvertFrom-Json
             $ids = @($data.signatures | ForEach-Object { $_.signature } | Where-Object { $_ })
             (ConvertTo-Json -InputObject $ids) | Set-Content -LiteralPath $Config.BaselinePath -Encoding UTF8 -ErrorAction Stop
+            $newEtag = $null; try { $newEtag = "$($resp.Headers.ETag)" } catch {}
+            if ($newEtag) { try { Set-Content -LiteralPath $etagFile -Value $newEtag -Encoding ascii } catch {} }
         } elseif (Test-Path -LiteralPath $Config.KnownSource) {
             if ($Config.KnownSource -ne $Config.BaselinePath) { Copy-Item -LiteralPath $Config.KnownSource -Destination $Config.BaselinePath -Force -ErrorAction Stop }
         } else { return 0 }
-        $b = Get-Content -LiteralPath $Config.BaselinePath -Raw -ErrorAction Stop | ConvertFrom-Json
-        $ids = if ($null -eq $b) { @() } elseif ($b.issues) { $b.issues.PSObject.Properties.Name } elseif ($b -is [array]) { $b } else { @($b) }
-        return @($ids).Count
-    } catch { return -1 }       # -1 = sync failed (keep the existing baseline)
+        return @(Get-KnownIds $Config.BaselinePath).Count   # single baseline-id reader (Ledger.ps1)
+    } catch { Write-TelemetryLog ("known-signatures: sync error - {0}" -f (Resolve-HttpError $_ $Config)) 'WARN'; return -1 }   # -1 = keep the existing baseline
 }
 
-# Pull THIS device's collection profile (CONTRACT 4a: GET /v1/profile?deviceId) and cache it locally, so the
-# flush knows - even offline - which signatures this device has already uploaded (discard the held dump) vs still
-# owes (keep + retry). Advisory only: the grant (5a) remains the sole upload authority. Returns the entry count,
-# or -1 on failure (keep the cached profile). No-op (0) in local/offline mode.
-function Sync-DeviceProfile {
-    param($Config, [string]$DeviceId)
+# Sync THIS device's collection state from the backend (GET /v1/profile?deviceId) and MERGE it into the local
+# ledger - never a blind overwrite. Backend 'uploaded' wins over local 'held' (and the freed sample is deleted);
+# backend 'granted' sets granted while we still hold the dump; a signature the backend does not mention keeps
+# its local state. Offline (no http) is a clean no-op: the ledger already drives dedup, so nothing to do and
+# nothing destructive. Returns the merged entry count, or -1 on a failed http sync (ledger left untouched).
+function Sync-DeviceLedger {
+    param($Config, [string]$DeviceId, [string]$Dir)
     if (-not $Config) { $Config = Get-TelemetryConfig }
     if (-not $DeviceId) { $DeviceId = $env:COMPUTERNAME }
-    if (-not (Test-IsHttp $Config.KnownSource)) { return 0 }
+    if (-not $Dir) { $Dir = Get-KnownIssuesDir }
+    if (-not (Test-IsHttp $Config.KnownSource)) { return 0 }   # offline/local: ledger is already the truth
     try {
         $uri = $Config.KnownSource.TrimEnd('/') + '/v1/profile?deviceId=' + [uri]::EscapeDataString($DeviceId)
         $data = Invoke-RestMethod -Method Get -Uri $uri -Headers (Get-AuthHeaders $Config) -TimeoutSec 30
-        $map = @{}
-        foreach ($e in @($data.entries)) { if ($e.signatureId) { $map["$($e.signatureId)"] = "$($e.state)" } }
-        $path = Get-DeviceProfilePath
-        $dir = Split-Path -Parent $path
-        if ($dir -and -not (Test-Path -LiteralPath $dir)) { New-Item -ItemType Directory -Path $dir -Force -ErrorAction Stop | Out-Null }
-        ($map | ConvertTo-Json) | Set-Content -LiteralPath $path -Encoding UTF8 -ErrorAction Stop
-        return $map.Count
-    } catch { return -1 }
+        $backend = @{}
+        foreach ($e in @($data.entries)) { if ($e.signatureId) { $backend["$($e.signatureId)"] = "$($e.state)" } }
+        $r = Merge-BackendProfile -BackendEntries $backend -Dir $Dir
+        foreach ($p in @($r.FreeSamples)) { Remove-DumpArtifacts -DumpPath $p }   # backend has these - free the local copies
+        return $r.Count
+    } catch { Write-TelemetryLog ("device-ledger: sync error - {0}" -f (Resolve-HttpError $_ $Config)) 'WARN'; return -1 }
 }
 
-# Get-DeviceProfile / Get-DeviceProfilePath live in Common\Dump\Core.ps1 (dump engine) so the detached triage
-# worker can read the cached profile too; this transport module only writes it (Sync-DeviceProfile above).
+# SYNC (pull) - a distinct activity from FLUSH (push). Read-only reconcile: refresh the known store and merge the
+# backend's device view into the ledger. Independent of flushing - a failed sync never affects a flush, and this
+# runs usefully even with an empty outbox (it keeps the collect decision current). Returns @{ Known; Ledger }.
+function Invoke-TelemetrySync {
+    param($Config, [string]$Dir)
+    if (-not $Config) { $Config = Get-TelemetryConfig }
+    if (-not $Dir) { $Dir = Get-KnownIssuesDir }
+    $k = Sync-KnownSignatures -Config $Config
+    $l = Sync-DeviceLedger -Config $Config -Dir $Dir
+    @{ Known = $k; Ledger = $l }
+}
+
+# "Collect for manual handling" (UI button): for a box that cannot reach the backend, gather everything a human
+# needs to carry to an online PC into ONE folder, <DumpDir>\manual-outbox. That is the pending event JSONs (the
+# reports) and the gzipped dumps - two separate kinds of file, NOT packaged together. The events are MOVED out of
+# the outbox (so the forwarder stops trying to send them - manual takeover) and the dumps are MOVED out of the
+# dump dir. Replaying them later is an online-PC / operator step. Returns @{ Events; Dumps; Dest }.
+function Move-ToManualOutbox {
+    param($Config, [string]$Dir)
+    if (-not $Config) { $Config = Get-TelemetryConfig }
+    if (-not $Dir) { $Dir = Get-KnownIssuesDir }
+    $dest = Join-Path $Config.DumpDir 'manual-outbox'
+    if (-not (Test-Path -LiteralPath $dest)) { New-Item -ItemType Directory -Path $dest -Force | Out-Null }
+    $events = 0; $dumps = 0
+    # 1) pending events (+ their .try sidecars) from the outbox top level (never the already-archived 'sent')
+    $outbox = Join-Path $Dir 'outbox'
+    if (Test-Path -LiteralPath $outbox) {
+        foreach ($e in @(Get-ChildItem -LiteralPath $outbox -Filter *.json -File -ErrorAction SilentlyContinue)) {
+            try {
+                Move-Item -LiteralPath $e.FullName -Destination (Join-Path $dest $e.Name) -Force
+                $try = "$($e.FullName).try"; if (Test-Path -LiteralPath $try) { Move-Item -LiteralPath $try -Destination (Join-Path $dest ($e.Name + '.try')) -Force }
+                $events++
+            } catch { Write-TelemetryLog ("manual-collect: could not move event {0}: {1}" -f $e.Name, $_.Exception.Message) 'WARN' }
+        }
+    }
+    # 2) gzipped dumps (+ their .info/.versions sidecars) from the dump dir top level and failed-uploads
+    foreach ($root in @($Config.DumpDir, (Join-Path $Config.DumpDir 'failed-uploads'))) {
+        if (-not (Test-Path -LiteralPath $root)) { continue }
+        foreach ($g in @(Get-ChildItem -LiteralPath $root -Filter *.dmp.gz -File -ErrorAction SilentlyContinue)) {
+            try {
+                Move-Item -LiteralPath $g.FullName -Destination (Join-Path $dest $g.Name) -Force
+                foreach ($sx in '.info.txt', '.versions.txt') {
+                    $sc = ($g.FullName -replace '\.dmp\.gz$', $sx)
+                    if (Test-Path -LiteralPath $sc) { Move-Item -LiteralPath $sc -Destination (Join-Path $dest ([IO.Path]::GetFileName($sc))) -Force }
+                }
+                $dumps++
+            } catch { Write-TelemetryLog ("manual-collect: could not move dump {0}: {1}" -f $g.Name, $_.Exception.Message) 'WARN' }
+        }
+    }
+    # A manifest so an operator (and a re-ingest) knows what this set is: which machine, how much, and when.
+    # Resume is safe: dropping these event files back into an online box's outbox re-sends them, and the
+    # Idempotency-Key on each event dedupes any that already reached the backend (CONTRACT.md 3/8).
+    try {
+        $manifest = [ordered]@{
+            deviceId    = $env:COMPUTERNAME
+            collectedUtc = (Get-Date).ToUniversalTime().ToString('o')
+            events      = $events
+            dumps       = $dumps
+            note        = 'Re-ingest: copy the *.json reports into an online outbox (idempotent); upload the *.dmp.gz via the operator dump workflow.'
+        }
+        ($manifest | ConvertTo-Json) | Set-Content -LiteralPath (Join-Path $dest 'manifest.json') -Encoding UTF8
+    } catch {}
+    Write-TelemetryLog ("manual-collect: moved {0} event(s) and {1} dump(s) to {2}" -f $events, $dumps, $dest)
+    @{ Events = $events; Dumps = $dumps; Dest = $dest }
+}
+
+# Reachability + auth probe for the configured telemetry service, for the "Test telemetry" button. Checks each
+# distinct https endpoint (EventSink / KnownSource / DumpTarget) with the SAME authenticated call the device
+# makes (GET /v1/known-signatures), so a green result means this machine can actually talk to the backend with
+# its fleet key. Returns a human-readable multi-line summary; never throws.
+function Test-Telemetry {
+    param($Config)
+    if (-not $Config) { $Config = Get-TelemetryConfig }
+    $lines = @('fleet key: ' + $(if ($Config.DeviceKey) { 'configured' } else { 'NOT configured on this device' }))
+    $bases = @($Config.EventSink, $Config.KnownSource, $Config.DumpTarget) | Where-Object { Test-IsHttp $_ } | Select-Object -Unique
+    if (@($bases).Count -eq 0) { return 'Telemetry is in local/offline mode (no https endpoint configured) - nothing to reach.' }
+    foreach ($base in $bases) {
+        try {
+            $sw = [Diagnostics.Stopwatch]::StartNew()
+            $null = Invoke-RestMethod -Method Get -Uri ($base.TrimEnd('/') + '/v1/known-signatures') -Headers (Get-AuthHeaders $Config) -TimeoutSec 15
+            $lines += ('OK    {0}  - reached + authenticated ({1} ms)' -f $base, $sw.ElapsedMilliseconds)
+        } catch {
+            $lines += ('FAIL  {0}  - {1}' -f $base, (Resolve-HttpError $_ $Config))
+        }
+    }
+    return ($lines -join "`n")
+}
+
+# The device ledger (read/write + the collect decision) lives in Common\Dump\Ledger.ps1, and its path in
+# Core.ps1, so the detached triage worker and this transport both reach it. Sync-DeviceLedger (above) merges
+# the backend's view into it; it never keeps a competing copy.
 
 # Stream a file to an http endpoint with HttpClient. Windows PowerShell 5.1's Invoke-RestMethod -InFile buffers
 # the WHOLE file into memory before sending, so a ~1.6 GB dump spikes/fails on a constrained machine (#42 defect

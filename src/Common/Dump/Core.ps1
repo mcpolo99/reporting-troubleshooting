@@ -71,23 +71,37 @@ function Get-DumpProcessFromName([string]$FileName) {
     return $null
 }
 
+# The computer token from a dump filename. Handles the current scheme (ProcDump_<pc>_<proc>_<tag>_<date>_<time>,
+# field 1) and the legacy <proc>.exe_<machine>_<date>_<time> (field 1 of 4). The capturing box stamps its own
+# name into the filename, so this is the authoritative machine id off-box (where the capturing host's
+# $env:COMPUTERNAME would be wrong). $null if the name matches no known scheme.
+function Get-DumpComputerFromName([string]$FileName) {
+    $stem = [IO.Path]::GetFileNameWithoutExtension("$FileName") -replace '\.dmp$', ''   # tolerate a .dmp.gz double ext
+    $p = $stem -split '_'
+    if ($p.Count -ge 6 -and $p[0] -eq $script:DumpNamePrefix) { return $p[1] }           # ProcDump_<pc>_...
+    if ($p.Count -eq 4 -and $p[0] -match '(?i)\.exe$') { return $p[1] }                   # legacy <proc>.exe_<machine>_<date>_<time>
+    return $null
+}
 
-# --- Per-device collection profile (CONTRACT 4a) --------------------------------------------------------------
-# The backend's per-device ledger, cached locally by the telemetry forwarder (Sync-DeviceProfile) so triage and
-# the flush know - durably, even offline - which signatures THIS device has already uploaded. Lives here (dump
-# engine) so the detached triage worker can read it; the http pull stays in Telemetry.ps1.
-function Get-DeviceProfilePath { Join-Path (Get-KnownIssuesDir) 'device-profile.json' }
 
-# Load the cached profile as @{ signatureId -> state } (state = 'uploaded' | 'granted'). Empty if none/unreadable.
-function Get-DeviceProfile([string]$Path) {
-    if (-not $Path) { $Path = Get-DeviceProfilePath }
-    $map = @{}
-    if (Test-Path -LiteralPath $Path) {
-        try {
-            $o = Get-Content -LiteralPath $Path -Raw | ConvertFrom-Json
-            if ($o) { foreach ($p in $o.PSObject.Properties) { $map[$p.Name] = "$($p.Value)" } }
-        } catch {}
-    }
-    $map
+# The FINAL dump name for a placeholder, once triage knows the real tag. ProcDump writes a placeholder with the
+# tag field set to 'pending' (it cannot know exception-vs-hang at capture); triage replaces just that field.
+# Returns the final '<...>.dmp' name, or $null if the placeholder does not match the scheme (caller rebuilds via
+# New-DumpFileName). Pure/testable.
+function Get-RestingDumpName([string]$PlaceholderName, [string]$Tag) {
+    $tag = ConvertTo-DumpToken $Tag 'manual'
+    $stem = [IO.Path]::GetFileNameWithoutExtension("$PlaceholderName")
+    $p = $stem -split '_'
+    if ($p.Count -ge 6 -and $p[0] -eq $script:DumpNamePrefix) { $p[3] = $tag; return (($p -join '_') + '.dmp') }
+    return $null
+}
+
+
+# --- Device ledger location -----------------------------------------------------------------------------------
+# The single local dedup store (state/count/sample per signature). Read/write + the collect decision live in
+# Ledger.ps1; the PATH lives here (dump engine) so the detached triage worker and the flush can both reach it.
+function Get-DeviceLedgerPath([string]$Dir) {
+    if (-not $Dir) { $Dir = Get-KnownIssuesDir }
+    Join-Path $Dir 'device-ledger.json'
 }
 
