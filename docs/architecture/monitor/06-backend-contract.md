@@ -14,10 +14,15 @@ agent runs with no server (the offline / local mode).
 
 Contract notes:
 
-- **Idempotency key is the dump content hash** (`dump-sha256:<64-hex>`) - keyed on the dump's RAW bytes, not a
-  per-event id, so the same physical dump is deduped server-side however many times or by whomever it is re-sent
-  (a re-generated blob or a re-ingested copy never double-counts). A sample-less recurrence with no content
-  identity falls back to the event's unique id. Delivery is always safe to retry.
+- **Idempotency key is the dump content hash** (CONTRACT §3): the canonical literal `dump-sha256:<64 lowercase
+  hex>` (76 chars = `dump-sha256:` + 64), keyed on the dump's RAW bytes, not a per-event id - so the same
+  physical dump is deduped server-side however many times or by whomever it is re-sent (a re-generated blob or a
+  re-ingested copy never double-counts). A sample-less recurrence with no content identity falls back to the
+  event's unique id. Delivery is always safe to retry.
+- **Statistics dedup is durable** (CONTRACT §7/§8): counts are deduped permanently on the tuple
+  `(signatureId, deviceId, dump.sha256)` in durable storage, so a re-submitted or backfilled identical dump
+  raises a count by at most one - independent of the Idempotency-Key and its 7-day TTL. The content key is the
+  fast near-term short-circuit; this tuple is the long-term guarantee. Both the live and backfill paths honour it.
 - **The grant is the sole upload authority** - issued per (signature, device), capped, operator
   kill-switch; the agent can never force an upload.
 - **The payload is opaque to the backend** - the report's own schema is the producer's; the backend stores
