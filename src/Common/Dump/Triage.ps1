@@ -108,7 +108,7 @@ function Invoke-DumpTriage {
     # keep the bytes - never hash a multi-GB dump we are about to drop).
     $rawBytes = -1; $rawMtime = $null; $rawSha = $null
     try { $pi = Get-Item -LiteralPath $DumpPath -ErrorAction Stop; $rawBytes = [long]$pi.Length; $rawMtime = $pi.LastWriteTimeUtc.ToString('o') } catch {}
-    if ($res.Collect -ne 'drop') { try { $rawSha = (Get-FileHash -LiteralPath $DumpPath -Algorithm SHA256).Hash.ToLowerInvariant() } catch {} }
+    if ($res.Collect -ne 'drop') { $rawSha = Get-FileSha256 $DumpPath }
 
     $emitPath = (Join-Path $dumpDir $restingName)   # logical final raw name; the flush resolves the .dmp.gz
     if ($res.Collect -eq 'drop') {

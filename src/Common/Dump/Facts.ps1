@@ -98,7 +98,7 @@ function Get-DumpFacts {
     $machineGuid = if (-not $offBox) { Get-MachineKey } else { $null }
     $sha = $null
     if ($Sha256) { $sha = $Sha256.ToLowerInvariant() }
-    elseif ($escalate -and $fi -and $RawBytes -lt 0) { try { $sha = (Get-FileHash -LiteralPath $DumpPath -Algorithm SHA256).Hash.ToLowerInvariant() } catch {} }
+    elseif ($escalate -and $fi -and $RawBytes -lt 0) { $sha = Get-FileSha256 $DumpPath }
     # Raw size/mtime: use the passed raw values when the on-disk file is the gzipped resting form (or gone);
     # otherwise read them from the file. So dump.bytes always describes the ORIGINAL dump, not the .gz.
     $dumpBytes = if ($RawBytes -ge 0) { $RawBytes } elseif ($fi) { $fi.Length } else { $null }

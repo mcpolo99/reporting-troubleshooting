@@ -185,6 +185,31 @@ try {
     Invoke-DumpRetention -DumpDir $rt -LimitGB 30 -Dir $rtKi
     Check 'retention keeps dump + sidecar'  ((Test-Path (Join-Path $rt 'ProcDump_PC_app_hang_20261030_101010.dmp.gz')) -and (Test-Path (Join-Path $rt 'ProcDump_PC_app_hang_20261030_101010.info.txt')))
     Check 'retention sweeps orphan sidecar' (-not (Test-Path (Join-Path $rt 'orphan.info.txt')))
+
+    # Idempotency-Key = dump content hash (CONTRACT 3): same raw bytes -> same key everywhere, independent of
+    # the random per-event eventId, so a re-sent/re-generated dump is deduped by identity, not just a file retry.
+    Write-Host 'idempotency key = dump content hash'
+    $sha = '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef'
+    $evHashed = [pscustomobject]@{ ids = [pscustomobject]@{ eventId = '20261101000000000-dead' }; dump = [pscustomobject]@{ file = 'x.dmp'; sha256 = $sha } }
+    Check 'key is dump-sha256:<hex>'        ((Get-EventIdempotencyKey -Evt $evHashed -Config ([ordered]@{}) -FallbackId 'fid') -eq "dump-sha256:$sha")
+    Check 'key under backend 200-char cap'  ((Get-EventIdempotencyKey -Evt $evHashed -Config ([ordered]@{}) -FallbackId 'fid').Length -le 200)
+    Check 'key is NOT the eventId'          ((Get-EventIdempotencyKey -Evt $evHashed -Config ([ordered]@{}) -FallbackId 'fid') -notmatch 'dead')
+    # carried hash is lowercased + validated (an UPPER-case 64-hex is still canonicalised to lowercase)
+    $evUpper = [pscustomobject]@{ dump = [pscustomobject]@{ sha256 = $sha.ToUpperInvariant() } }
+    Check 'carried hash lowercased'         ((Get-EventIdempotencyKey -Evt $evUpper -Config ([ordered]@{}) -FallbackId 'fid') -eq "dump-sha256:$sha")
+    # no carried hash but a RAW sample on disk -> hash the bytes (canonical content key, never the eventId)
+    $ik = Join-Path $dir 'ik'; New-Item -ItemType Directory -Force $ik | Out-Null
+    $rawDump = Join-Path $ik 'raw.dmp'; Set-Content -LiteralPath $rawDump -Value 'CONTENT' -Encoding ascii -NoNewline
+    $fileSha = Get-FileSha256 $rawDump
+    $evRaw = [pscustomobject]@{ ids = [pscustomobject]@{ eventId = 'evid' }; dump = [pscustomobject]@{ file = 'raw.dmp' } }   # no sha256 field
+    Check 'no hash, raw on disk -> hash bytes' ((Get-EventIdempotencyKey -Evt $evRaw -Config ([ordered]@{ DumpDir = $ik }) -FallbackId 'evid') -eq "dump-sha256:$fileSha")
+    # a .gz-only sample is NOT re-hashed (would not be the raw hash); with no hash + no raw bytes -> fallback id
+    Set-Content -LiteralPath (Join-Path $ik 'gzonly.dmp.gz') -Value 'GZ' -Encoding ascii
+    $evGzOnly = [pscustomobject]@{ dump = [pscustomobject]@{ file = 'gzonly.dmp' } }
+    Check 'gz-only, no hash -> fallback id'  ((Get-EventIdempotencyKey -Evt $evGzOnly -Config ([ordered]@{ DumpDir = $ik }) -FallbackId 'fallbackid') -eq 'fallbackid')
+    # sample-less recurrence (no hash, no dump at all) -> the event's unique fallback id, never random/empty
+    $evNone = [pscustomobject]@{ dump = [pscustomobject]@{ file = 'gone.dmp' } }
+    Check 'no hash, no dump -> fallback id'  ((Get-EventIdempotencyKey -Evt $evNone -Config ([ordered]@{ DumpDir = $ik }) -FallbackId 'onlyid') -eq 'onlyid')
 }
 finally { Remove-Item -Recurse -Force $dir -ErrorAction SilentlyContinue }
 

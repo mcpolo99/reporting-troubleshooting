@@ -28,6 +28,20 @@ function Get-ShortHash([string]$Text) {
 }
 
 
+# Full lowercase SHA-256 hex of a file's bytes, STREAMED (constant memory - a multi-GB dump never loads whole).
+# Dependency-free (.NET, like Get-ShortHash) so it is identical everywhere and works on hosts where the
+# Get-FileHash cmdlet is unavailable (stripped/constrained PowerShell). Same bytes -> same hex as Get-FileHash.
+# Returns $null on any open/read error, so callers degrade instead of throwing.
+function Get-FileSha256([string]$Path) {
+    try {
+        $sha = [System.Security.Cryptography.SHA256]::Create()
+        $fs  = [IO.File]::OpenRead($Path)
+        try { -join ($sha.ComputeHash($fs) | ForEach-Object { '{0:x2}' -f $_ }) }
+        finally { $fs.Dispose(); $sha.Dispose() }
+    } catch { $null }
+}
+
+
 # --- Dump file naming ---------------------------------------------------------------------------------------
 # One scheme, one place: ProcDump_<pc>_<process>_<tag>_<yyyyMMdd>_<HHmmss>.dmp (6 '_'-delimited fields, the
 # last two being the date and time). ProcDump cannot write the reason tag (one armed instance catches both
