@@ -133,6 +133,33 @@ function Resolve-DumpPath { param($Evt, $Config)
     return @{ Path = $hit; Tried = @($tried); IsGz = [bool]($hit -and $hit -match '\.gz$') }
 }
 
+# The canonical, origin-independent Idempotency-Key for an event (CONTRACT 3): `dump-sha256:<64 lowercase hex>`
+# keyed on the dump's RAW content, so the SAME physical dump dedupes everywhere - whoever sends it, however many
+# times the event blob was re-generated. This replaces keying on ids.eventId, which is minted fresh per event
+# (UTC-ms + random) and so only deduped a retry of the exact same file on disk; keying by content stops the same
+# dump inflating statistics when re-sent under a different eventId.
+# Resolution order:
+#   1. the precomputed raw hash the event carries (dump.sha256; Facts.ps1 writes it for every escalated dump),
+#   2. else, if a RAW (uncompressed) sample is still on disk, hash its bytes - the canonical content key
+#      (a .gz is NOT re-hashed: that is not the raw hash the contract defines, and decompressing a multi-GB
+#       sample just for a key is pointless),
+#   3. else the event's own unique id ($FallbackId: eventId / outbox filename) - a last-resort key ONLY for a
+#      sample-less event (a suppressed recurrence whose dump was dropped and never hashed) that has no content
+#      identity at all; NEVER a random value standing in for a content hash.
+# The 76-char key (`dump-sha256:` = 12 + 64 hex) is well under the backend's 200-char cap.
+function Get-EventIdempotencyKey { param($Evt, $Config, [string]$FallbackId)
+    $hash = $null
+    $carried = if ($Evt -and $Evt.dump) { "$($Evt.dump.sha256)" } else { '' }
+    if ($carried -match '^[0-9a-fA-F]{64}$') { $hash = $carried.ToLowerInvariant() }
+    if (-not $hash) {
+        $loc = Resolve-DumpPath -Evt $Evt -Config $Config
+        if ($loc.Path -and -not $loc.IsGz) { $hash = Get-FileSha256 $loc.Path }
+    }
+    if ($hash) { return "dump-sha256:$hash" }
+    if ($FallbackId) { return "$FallbackId" }
+    return $null
+}
+
 # Archive an event that is fully handled (sent, and its dump obligation met or n/a): move it to outbox\sent and
 # drop the attempt sidecar.
 function Move-SentEvent { param([string]$EventPath, [string]$SentDir)
@@ -192,11 +219,14 @@ function Send-OutboxEvents {
             if ($http) {
                 # 1) Post the event. The backend decides on its 202 whether this capture's dump is wanted and,
                 #    if so, returns a one-time uploadGrant { token, maxBytes, expiresAt } in the response body.
-                #    The event's own eventId is the Idempotency-Key (contract 3) so a retry of the same file is
-                #    deduped server-side rather than double-stored.
+                #    The Idempotency-Key is the dump's CONTENT hash (`dump-sha256:<hex>`, contract 3), so the same
+                #    physical dump is deduped server-side no matter who re-sends it or under which eventId - not
+                #    just a retry of the identical file. eventId stays the unique outbox/log id (last-resort key
+                #    only for a sample-less recurrence). See Get-EventIdempotencyKey.
                 $body = Get-Content -LiteralPath $f.FullName -Raw
                 $evt = $null; try { $evt = $body | ConvertFrom-Json } catch {}
-                $idem = if ($evt -and $evt.ids -and $evt.ids.eventId) { "$($evt.ids.eventId)" } else { [IO.Path]::GetFileNameWithoutExtension($f.Name) }
+                $fallbackId = if ($evt -and $evt.ids -and $evt.ids.eventId) { "$($evt.ids.eventId)" } else { [IO.Path]::GetFileNameWithoutExtension($f.Name) }
+                $idem = Get-EventIdempotencyKey -Evt $evt -Config $Config -FallbackId $fallbackId
                 # Profile shortcut (CONTRACT 4a): if THIS device already uploaded a dump for this signature, the
                 # backend already has a sample - we will NOT be granted another, so don't bother holding a grant
                 # round-trip's worth of work on it. We do NOT delete the local dump (kept dumps are never deleted
