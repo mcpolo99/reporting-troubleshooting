@@ -39,7 +39,8 @@ param(
     [switch]$Update,
     [switch]$Force,
     [switch]$Uninstall,
-    [switch]$Triage          # on-demand: fault-identify + dedupe every dump in the configured DumpDir (no admin)
+    [switch]$Triage,         # on-demand: fault-identify + dedupe every dump in the configured DumpDir (no admin)
+    [switch]$ForceFlush      # on-demand: ingest every dump in the DumpDir NOW, then push telemetry (sync + drain outbox + upload granted dumps). No admin.
 )
 
 # =============================== VERSION =================================
@@ -425,6 +426,56 @@ function Enqueue-Ingest($Config) {
         $script:IngestProc = $p
         Write-Log "Ingest worker launched (PID $($p.Id)); triages new dumps + runs retention."
     } catch { Write-Log "Could not launch ingest worker: $($_.Exception.Message)" 'WARN' }
+}
+
+# On-demand "process everything NOW" (the GUI "Force flush" button / -ForceFlush switch). The monitor normally
+# arms ProcDump and lets the ingest + telemetry workers run on their timers; this runs that same pipeline once,
+# SYNCHRONOUSLY and in order, so a dump sitting in the dump dir is triaged (gzipped at rest + event emitted) and
+# then pushed in a single click - instead of waiting for the next loop tick (or when the service is stopped).
+# It reuses the exact production workers (DumpTriage.ps1 then Send-Telemetry.ps1), so their single-instance
+# mutexes, retention and logging all apply; nothing is duplicated here. NOTE: this does NOT force dumps to leave
+# the dump dir - a kept dump is deleted only when the backend grants an upload and it succeeds; a dump the
+# backend does not want stays by design (size-based retention evicts handled ones later). Returns a one-line
+# summary (the push detail - sent / uploaded / pending - is pulled from the flush log). No admin needed.
+function Invoke-ForceFlush {
+    $cfg = Read-Config
+    $dir = $cfg.DumpDir
+    $parts = @()
+
+    if (Test-Path $InstalledTriage) {
+        Write-Log "Force flush: ingest pass - triaging every complete dump in $dir (gzip at rest + emit events + retention)..."
+        try {
+            $ip = Start-Process powershell.exe -WindowStyle Hidden -PassThru -Wait -ArgumentList @(
+                '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', "`"$InstalledTriage`"", '-DumpDir', "`"$dir`"", '-Quiet')
+            Write-Log "Force flush: ingest pass finished (exit $($ip.ExitCode))."
+            $parts += "ingest exit $($ip.ExitCode)"
+        } catch { Write-Log "Force flush: ingest pass failed to run: $($_.Exception.Message)" 'ERROR'; $parts += 'ingest FAILED to launch' }
+    } else { Write-Log 'Force flush: DumpTriage.ps1 not found - ingest skipped.' 'WARN'; $parts += 'ingest skipped (worker missing)' }
+
+    if (Test-Path $InstalledTelemetry) {
+        Write-Log 'Force flush: telemetry push - sync known/ledger, drain the outbox, upload granted dumps...'
+        try {
+            $tp = Start-Process powershell.exe -WindowStyle Hidden -PassThru -Wait -ArgumentList @(
+                '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', "`"$InstalledTelemetry`"", '-Quiet')
+            Write-Log "Force flush: telemetry push finished (exit $($tp.ExitCode))."
+            $parts += "flush exit $($tp.ExitCode)"
+        } catch { Write-Log "Force flush: telemetry push failed to run: $($_.Exception.Message)" 'ERROR'; $parts += 'flush FAILED to launch' }
+    } else { Write-Log "Force flush: Send-Telemetry.ps1 not found at $InstalledTelemetry - flush skipped." 'WARN'; $parts += 'flush skipped (worker missing)' }
+
+    # Surface the push outcome line from the newest telemetry log so the Output panel shows sent / uploaded / pending.
+    $pushLine = $null
+    try {
+        $tl = Get-ChildItem -Path $LogDir -Filter 'Telemetry_*.log' -File -ErrorAction SilentlyContinue |
+              Sort-Object LastWriteTime -Descending | Select-Object -First 1
+        if ($tl) { $pushLine = (@(Get-Content -LiteralPath $tl.FullName -Tail 60 -ErrorAction SilentlyContinue) |
+                               Where-Object { $_ -match 'events: sent' } | Select-Object -Last 1) }
+    } catch {}
+
+    $msg = 'Force flush complete (' + ($parts -join '; ') + ')' +
+           $(if ($pushLine) { ' - ' + ($pushLine -replace '^.*?events: ', 'events: ').Trim() } else { '' }) +
+           '. Kept dumps stay until the backend grants an upload; details in the live log.'
+    Write-Log $msg
+    $msg
 }
 
 # Effective ProcDump arguments. -n comes from the config; if ProcDumpArgs has no -n, -n 1 is used.
@@ -1120,7 +1171,7 @@ function Invoke-Monitor {
 # functions only, no auto-run. BUT an explicit action switch must still run: a monitor/worker the GUI
 # launches as its own process (Start-MonitorRun, Enqueue-Ingest) inherits RT_LIBRARY=1 from the GUI's
 # process environment, and must not be silenced by it - that would "start" a process that does nothing.
-if ($env:RT_LIBRARY -eq '1' -and -not ($Monitor -or $Install -or $Update -or $Uninstall -or $Triage)) { return }
+if ($env:RT_LIBRARY -eq '1' -and -not ($Monitor -or $Install -or $Update -or $Uninstall -or $Triage -or $ForceFlush)) { return }
 
 if ($Monitor) {
     Invoke-Monitor
@@ -1133,6 +1184,14 @@ if ($Triage) {
     if (-not (Test-Path $InstalledTriage)) { Write-Host 'DumpTriage.ps1 not found.' -ForegroundColor Red; exit 1 }
     & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $InstalledTriage -DumpDir $cfg.DumpDir
     exit $LASTEXITCODE
+}
+
+# On-demand "process everything NOW": ingest the dump dir, then push telemetry (no admin needed). Same pipeline
+# the monitor runs on its timers, run once synchronously - the GUI "Force flush" button calls Invoke-ForceFlush.
+if ($ForceFlush) {
+    $script:LogPrefix = $AppName; New-LogFile; $script:EchoLog = $true
+    Write-Host (Invoke-ForceFlush)
+    exit 0
 }
 
 if (-not (Test-Admin)) {
