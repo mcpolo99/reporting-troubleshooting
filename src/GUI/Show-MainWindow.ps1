@@ -43,7 +43,7 @@ function Show-MainWindow {
                    'CmbPvProfile','TxtPvLabel','BtnPvStart','BtnPvStop','BtnPvAbort','TxtPvSeconds','BtnPvOpen','BtnPvStatus','LblPvStatus',
                    'TxtPvProfName','PnlPvKernel','CmbPvClr','PnlPvProviders','TxtPvProvOther','TxtPvExtra','TxtPvCircular','TxtPvBuffer','BtnPvProfSave','BtnPvProfDelete','BtnPvProfDefault',
                    'TxtPvOutput','TxtPvSym','ChkPvMerge','ChkPvZip','BtnPvSettingsSave',
-                   'BtnMonEnable','BtnMonStart','BtnMonStop','BtnMonStatus','BtnMonTestTelemetry','BtnMonCollect','BtnMonDisable','LblMonStatus','BtnMonVerify','LblMonVerify','PnlCfgProcess','PnlCfgMonitor','PnlCfgGeneral','BtnMonSave','BtnMonReload','ChkMonTail','TxtMonLog','LblMonCompress','PbMonCompress',
+                   'BtnMonEnable','BtnMonStart','BtnMonStop','BtnMonStatus','BtnMonTestTelemetry','BtnMonForceFlush','BtnMonCollect','BtnMonDisable','LblMonStatus','BtnMonVerify','LblMonVerify','PnlCfgProcess','PnlCfgMonitor','PnlCfgGeneral','BtnMonSave','BtnMonReload','ChkMonTail','TxtMonLog','LblMonCompress','PbMonCompress',
                    'BtnPkgInstallAll','BtnPkgRefresh','BtnPkgOpen','BtnPkgUpdate','LblPkgUpdate','PnlPackages','LblPkgStatus',
                    'BtnShortcut') {
         $el = $null
@@ -502,6 +502,7 @@ function Show-MainWindow {
     $script:BtnMonStop.Add_Click({ & $script:Append 'Monitor: stopping...'; script:Invoke-Action 'Mon' $script:RsMon { Stop-Monitor (Read-Config) } @() $script:RefreshMon })
     $script:BtnMonStatus.Add_Click({ & $script:RefreshMon })
     $script:BtnMonTestTelemetry.Add_Click({ & $script:Append 'Telemetry: testing reachability + auth...'; script:Invoke-Action 'Mon' $script:RsMon { Test-Telemetry } @() $null })
+    $script:BtnMonForceFlush.Add_Click({ & $script:Append 'Force flush: processing every dump in the dump dir now, then pushing telemetry (sync + drain outbox + upload granted dumps)...'; script:Invoke-Action 'Mon' $script:RsMon { Invoke-ForceFlush } @() $script:RefreshMon })
     $script:BtnMonCollect.Add_Click({ & $script:Append 'Telemetry: collecting pending reports + gzipped dumps into <dump dir>\manual-outbox...'; script:Invoke-Action 'Mon' $script:RsMon { $r = Move-ToManualOutbox; "Collected $($r.Events) report(s) and $($r.Dumps) dump(s) to $($r.Dest)" } @() $script:RefreshMon })
     $script:BtnMonDisable.Add_Click({ & $script:Append 'Monitor: disabling service...'; script:Invoke-Action 'Mon' $script:RsMon { Disable-Service } @() $script:RefreshMon })
     $script:BtnMonVerify.Add_Click({
