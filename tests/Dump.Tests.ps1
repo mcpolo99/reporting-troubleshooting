@@ -116,9 +116,15 @@ $when = Get-Date '2026-10-28 14:30:05'
 $fn = New-DumpFileName -Computer 'PC01' -Process 'bSuite' -Tag 'hang' -When $when
 Check 'builds the full scheme'          ($fn -eq 'ProcDump_PC01_bSuite_hang_20261028_143005.dmp')
 Check 'six underscore-delimited fields' ((([IO.Path]::GetFileNameWithoutExtension($fn)) -split '_').Count -eq 6)
-Check 'tag: exception when code set'     ((Get-DumpTag -Code ([uint32]3221225477) -Trigger '') -eq 'exception')   # 0xC0000005
-Check 'tag: hang from trigger text'      ((Get-DumpTag -Code $null -Trigger 'Hung window detected') -eq 'hang')
-Check 'tag: manual otherwise'            ((Get-DumpTag -Code $null -Trigger 'Timed: process ran') -eq 'manual')
+# Code arrives from Get-DumpSignature as an 8-char HEX STRING ('{0:X8}'), NOT a number - so the tag must be
+# derived from that exact form. A hex code with letters (E0434352 = CLR exception, C0000005 = AV) must not be
+# coerced to a numeric (it is not a valid decimal); that coercion aborted triage for every real crash dump.
+Check 'tag: exception, CLR hex E0434352'  ((Get-DumpTag -Code 'E0434352' -Trigger '') -eq 'exception')
+Check 'tag: exception, AV hex C0000005'   ((Get-DumpTag -Code 'C0000005' -Trigger 'Hung window detected') -eq 'exception')  # a present code wins over hang text
+Check 'tag: exception, numeric code too'  ((Get-DumpTag -Code ([uint32]3221225477) -Trigger '') -eq 'exception')   # 0xC0000005 as a number still works
+Check 'tag: hang from trigger text'       ((Get-DumpTag -Code $null -Trigger 'Hung window detected') -eq 'hang')
+Check 'tag: hang, empty code string'      ((Get-DumpTag -Code '' -Trigger 'app not responding') -eq 'hang')
+Check 'tag: manual otherwise'             ((Get-DumpTag -Code $null -Trigger 'Timed: process ran') -eq 'manual')
 Check 'computer token from scheme name'  ((Get-DumpComputerFromName $fn) -eq 'PC01')
 Check 'computer token: legacy name'       ((Get-DumpComputerFromName 'bSuite.exe_BS1000079947_261027_171640.dmp') -eq 'BS1000079947')
 Check 'computer token: gz double-ext'     ((Get-DumpComputerFromName 'ProcDump_PC01_bSuite_hang_20261028_143005.dmp.gz') -eq 'PC01')

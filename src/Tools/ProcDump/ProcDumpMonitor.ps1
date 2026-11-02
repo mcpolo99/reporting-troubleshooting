@@ -449,6 +449,15 @@ function Invoke-ForceFlush {
                 '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', "`"$InstalledTriage`"", '-DumpDir', "`"$dir`"", '-Quiet')
             Write-Log "Force flush: ingest pass finished (exit $($ip.ExitCode))."
             $parts += "ingest exit $($ip.ExitCode)"
+            # A per-dump triage failure is now non-fatal (the pass continues), so it shows as a line in
+            # DumpTriage-error.log rather than a non-zero exit. Surface the newest one so the operator sees it.
+            try {
+                $el = Join-Path $LogDir 'DumpTriage-error.log'
+                if (Test-Path -LiteralPath $el) {
+                    $last = @(Get-Content -LiteralPath $el -ErrorAction SilentlyContinue | Where-Object { $_ -match 'triage FAILED' } | Select-Object -Last 1)
+                    if ($last) { Write-Log "Force flush: most recent ingest failure - $($last.Trim())" 'WARN' }
+                }
+            } catch {}
         } catch { Write-Log "Force flush: ingest pass failed to run: $($_.Exception.Message)" 'ERROR'; $parts += 'ingest FAILED to launch' }
     } else { Write-Log 'Force flush: DumpTriage.ps1 not found - ingest skipped.' 'WARN'; $parts += 'ingest skipped (worker missing)' }
 

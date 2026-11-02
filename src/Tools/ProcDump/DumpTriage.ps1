@@ -120,13 +120,32 @@ if ($DumpPath) {
     try {
         $dumps = @(Get-ChildItem -Path $DumpDir -Filter *.dmp -File -ErrorAction SilentlyContinue | Sort-Object CreationTime)
         Say ("Triaging {0} dump(s) in {1} (walk tool: {2})`n" -f $dumps.Count, $DumpDir, $(if ($clrmd) { 'ClrMD' } else { 'NONE - hangs stay provisional' }))
-        $kept = 0; $dropped = 0; $defer = 0; $skipped = 0
+        $kept = 0; $dropped = 0; $defer = 0; $skipped = 0; $errors = 0
         foreach ($d in $dumps) {
             if (-not (Test-DumpComplete $d.FullName)) { $skipped++; continue }   # still being written - next pass
-            $r = Triage-One $d.FullName
-            switch ($r.Collect) { 'collect' { $kept++ } 'drop' { $dropped++ } 'defer' { $defer++ } }
+            # One dump must NEVER abort the whole pass: a throw here (e.g. a pathological / oversized dump the
+            # walker chokes on) used to hit the script trap and exit 1, leaving every OTHER dump unprocessed.
+            # Catch per dump, record the exact error (console + DumpTriage-error.log + telemetry log), move on.
+            try {
+                $r = Triage-One $d.FullName
+                switch ($r.Collect) { 'collect' { $kept++ } 'drop' { $dropped++ } 'defer' { $defer++ } }
+            } catch {
+                $errors++
+                Say ("{0,-40} ERROR     {1}" -f $d.Name, $_.Exception.Message)
+                try {
+                    $__ld = Join-Path $env:ProgramData 'ReportingTroubleshooting\Monitor\Logs'
+                    if (-not (Test-Path $__ld)) { New-Item -ItemType Directory -Path $__ld -Force | Out-Null }
+                    Add-Content -LiteralPath (Join-Path $__ld 'DumpTriage-error.log') -Encoding UTF8 `
+                        -Value ('{0}  triage FAILED for {1} ({2:N0} bytes): {3}`n{4}' -f (Get-Date -Format o), $d.Name, $d.Length, $_.Exception.Message, $_.ScriptStackTrace)
+                } catch {}
+                try { if (Get-Command Write-TelemetryLog -ErrorAction SilentlyContinue) { Write-TelemetryLog ("ingest: triage failed for {0}: {1}" -f $d.Name, $_.Exception.Message) 'WARN' } } catch {}
+            }
         }
-        Say ("`nDone: {0} collected, {1} dropped, {2} deferred, {3} still-writing.{4}" -f $kept, $dropped, $defer, $skipped, $(if ($DryRun) { ' (DRY RUN - nothing changed)' } else { '' }))
+        $doneMsg = ("Done: {0} collected, {1} dropped, {2} deferred, {3} still-writing, {4} error(s).{5}" -f $kept, $dropped, $defer, $skipped, $errors, $(if ($DryRun) { ' (DRY RUN - nothing changed)' } else { '' }))
+        Say ("`n" + $doneMsg)
+        # Surface the pass result to the telemetry log too, so the "Force flush" button / monitor can report it
+        # without the worker's (suppressed) console.
+        try { if (Get-Command Write-TelemetryLog -ErrorAction SilentlyContinue) { Write-TelemetryLog ("ingest: $doneMsg") } } catch {}
         # The ingest worker owns the dump dir, so it runs size-based retention too (never the armer). Not in a dry run.
         if (-not $DryRun -and (Get-Command Invoke-DumpRetention -ErrorAction SilentlyContinue)) {
             try { Invoke-DumpRetention -DumpDir $DumpDir -LimitGB ([double](Cfg 'DumpDiskLimitGB' 30)) -Dir $script:StateDir } catch {}
