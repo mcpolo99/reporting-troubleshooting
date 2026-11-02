@@ -72,9 +72,14 @@ function Get-DumpReason([string]$Comment) {
 
 # Capture reason tag from a parsed dump header: an exception record -> 'exception'; a hang trigger with no
 # exception record -> 'hang'; otherwise 'manual'. Takes primitives (not the $info object) so it is unit-testable.
+# $Code is the exception code as an 8-char HEX STRING (Get-DumpSignature formats it '{0:X8}', e.g. 'E0434352'
+# for a CLR exception, 'C0000005' for an AV) or $null. It must NEVER be typed/coerced to a numeric: a hex code
+# with letters (E0434352, C0000005, ...) is not a valid decimal, so [uint32] coercion threw an argument-
+# transformation error and aborted triage for EVERY real exception/crash dump (the synthetic test dumps carry
+# no exception code, so this stayed invisible). Only presence matters here.
 function Get-DumpTag {
-    param([Nullable[uint32]]$Code, [string]$Trigger)
-    if ($null -ne $Code) { return 'exception' }
+    param($Code, [string]$Trigger)
+    if (-not [string]::IsNullOrEmpty("$Code")) { return 'exception' }
     if ($Trigger -match '(?i)hang|hung|respond') { return 'hang' }
     return 'manual'
 }
