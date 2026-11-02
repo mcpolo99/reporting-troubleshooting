@@ -5,6 +5,14 @@ truth; each release is tagged `vX.Y.Z` and published as a GitHub release by `scr
 
 <!-- NEW RELEASES INSERTED BELOW -->
 
+## [v1.0.58] - 2026-11-02
+Changes since v1.0.57:
+
+### Fixes
+- Get-DumpTag must accept the hex-string exception code (not uint32) (491637b)
+- one dump failing no longer aborts the whole ingest pass (8f0f092)
+
+
 ## [v1.0.57] - 2026-11-02
 Changes since v1.0.56:
 
@@ -484,6 +492,7 @@ Changes since v1.0.0:
 - WPF/XAML launcher (GUI default, `-CLI` text menu) with shared light/dark theme.
 - Shared components (logging, admin/signature/prompt/version helpers) under `src/Common`.
 - Bootstrap installer (`src/Get.ps1` + `src/run.bat`) with version check against GitHub.
+
 
 
 
