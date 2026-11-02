@@ -9,6 +9,8 @@
       <Button x:Name="BtnMonStop"    Content="Stop Monitor"    Height="30" MinWidth="100" Margin="0,0,8,0"/>
       <Button x:Name="BtnMonStatus"  Content="Status"          Height="30" MinWidth="80"  Margin="0,0,8,0"/>
       <Button x:Name="BtnMonTestTelemetry" Content="Test Telemetry" Height="30" MinWidth="110" Margin="0,0,8,0"/>
+      <Button x:Name="BtnMonForceFlush" Content="Force flush" Height="30" MinWidth="100" Margin="0,0,8,0"
+              ToolTip="Process every dump in the dump dir NOW (triage + gzip + emit events), then push telemetry (sync, drain the outbox, upload dumps the backend grants) - instead of waiting for the monitor's timer. Dumps the backend does not want stay by design."/>
       <Button x:Name="BtnMonCollect" Content="Collect for manual handling" Height="30" MinWidth="170" Margin="0,0,8,0"
               ToolTip="Move all pending reports (outbox) and gzipped dumps into &lt;dump dir&gt;\manual-outbox, to copy to an online PC when this machine cannot reach the telemetry service."/>
       <Button x:Name="BtnMonDisable" Content="Disable Service" Height="30" MinWidth="110"/>
