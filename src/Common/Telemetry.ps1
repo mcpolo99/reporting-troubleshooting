@@ -424,9 +424,11 @@ function Invoke-TelemetrySync {
 
 # "Collect for manual handling" (UI button): for a box that cannot reach the backend, gather everything a human
 # needs to carry to an online PC into ONE folder, <DumpDir>\manual-outbox. That is the pending event JSONs (the
-# reports) and the gzipped dumps - two separate kinds of file, NOT packaged together. The events are MOVED out of
-# the outbox (so the forwarder stops trying to send them - manual takeover) and the dumps are MOVED out of the
-# dump dir. Replaying them later is an online-PC / operator step. Returns @{ Events; Dumps; Dest }.
+# reports) and the dumps, ALWAYS gzipped - two separate kinds of file, NOT packaged together. Dumps already at
+# rest (.dmp.gz) are moved; any raw .dmp that triage had not yet compressed is gzipped on the way out, so the
+# carried bundle is never bloated with raw multi-GB dumps. The events are MOVED out of the outbox (so the
+# forwarder stops trying to send them - manual takeover) and the dumps are MOVED out of the dump dir. Replaying
+# them later is an online-PC / operator step. Returns @{ Events; Dumps; Dest }.
 function Move-ToManualOutbox {
     param($Config, [string]$Dir)
     if (-not $Config) { $Config = Get-TelemetryConfig }
@@ -457,6 +459,24 @@ function Move-ToManualOutbox {
                 }
                 $dumps++
             } catch { Write-TelemetryLog ("manual-collect: could not move dump {0}: {1}" -f $g.Name, $_.Exception.Message) 'WARN' }
+        }
+        # 2b) RAW .dmp still on disk (triage never gzipped them - e.g. the ingest pass had not run, or failed).
+        # Collect must still produce a COMPRESSED bundle (a raw dump is many times larger to carry), so gzip each
+        # raw dump straight into the dest and drop the raw source (MOVE semantics, same as the .gz above). A dump
+        # ProcDump is still writing is locked: Compress-DumpFile's OpenRead throws, Ok=$false, the raw file is left
+        # in place for the next pass. '*.dmp' never matches '*.dmp.gz', but guard the double-ext name anyway.
+        foreach ($d in @(Get-ChildItem -LiteralPath $root -Filter *.dmp -File -ErrorAction SilentlyContinue | Where-Object { $_.Name -notmatch '(?i)\.dmp\.gz$' })) {
+            $gzDest = Join-Path $dest ($d.Name + '.gz')
+            $c = Compress-DumpFile -SourcePath $d.FullName -DestPath $gzDest -Label $d.Name
+            if (-not $c.Ok) { Write-TelemetryLog ("manual-collect: could not compress dump {0}: {1}" -f $d.Name, $c.Error) 'WARN'; continue }
+            try {
+                Remove-Item -LiteralPath $d.FullName -Force -ErrorAction Stop
+                foreach ($sx in '.info.txt', '.versions.txt') {
+                    $sc = ($d.FullName -replace '\.dmp$', $sx)
+                    if (Test-Path -LiteralPath $sc) { Move-Item -LiteralPath $sc -Destination (Join-Path $dest ([IO.Path]::GetFileName($sc))) -Force }
+                }
+                $dumps++
+            } catch { Write-TelemetryLog ("manual-collect: compressed {0} but could not remove the raw source: {1}" -f $d.Name, $_.Exception.Message) 'WARN'; $dumps++ }
         }
     }
     # A manifest so an operator (and a re-ingest) knows what this set is: which machine, how much, and when.
