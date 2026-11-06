@@ -11,7 +11,7 @@
   powershell -NoProfile -ExecutionPolicy Bypass -File Send-Telemetry.ps1 [-Dir <KnownIssues dir>] [-Quiet]
 #>
 [CmdletBinding()]
-param([string]$Dir, [switch]$Quiet)
+param([string]$Dir, [string]$CancelFile, [switch]$Quiet)
 
 $ScriptDir = if ($PSCommandPath) { Split-Path -Parent $PSCommandPath } else { (Get-Location).Path }
 $CommonDir = $null; $p = $ScriptDir
@@ -59,6 +59,11 @@ try {
     $s = Invoke-TelemetrySync -Config $cfg -Dir $Dir
     if ($s.Known -ge 0)  { Write-Log "known-signatures: baseline now lists $($s.Known) signature(s)" } else { Write-Log 'known-signatures: sync failed - keeping existing baseline' 'WARN' }
     if ($s.Ledger -ge 0) { Write-Log "device-ledger: reconciled with backend ($($s.Ledger) entry(ies)); offline = no-op" } else { Write-Log 'device-ledger: backend sync failed - local ledger left untouched' 'WARN' }
+
+    # Force-flush cancel: a push may queue large uploads, so honour the marker before draining the outbox
+    # (an in-flight upload is cut short by the parent killing this process; this keeps a cancel from starting
+    # the next batch). Terminating the process is the hard stop; this is the graceful checkpoint.
+    if ($CancelFile -and (Test-Path -LiteralPath $CancelFile)) { Write-Log 'flush cancelled before push (force-flush cancel).' 'WARN'; exit 0 }
 
     # FLUSH (push): drain the outbox, upload held dumps on a grant.
     $r = Send-OutboxEvents -Dir $Dir -Config $cfg

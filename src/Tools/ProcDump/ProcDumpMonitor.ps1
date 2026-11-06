@@ -59,6 +59,7 @@ $LogDir          = Join-Path $BaseDir 'Logs'
 # update refreshes the monitor automatically (no "installed copy" to go stale).
 $MutexName       = "Global\$AppName"
 $StopFile        = Join-Path $BaseDir 'stop.request'    # created to ask the running monitor to stop gracefully
+$FlushStopFile   = Join-Path $BaseDir 'forceflush.stop' # created to CANCEL a running Force flush (ingest + push)
 # $ToolsDir / $ProcDumpExeName / $ProcDumpExe come from the shared package store, set after Packages.ps1 below.
 
 $script:LogFile    = $null
@@ -437,39 +438,71 @@ function Enqueue-Ingest($Config) {
 # the dump dir - a kept dump is deleted only when the backend grants an upload and it succeeds; a dump the
 # backend does not want stays by design (size-based retention evicts handled ones later). Returns a one-line
 # summary (the push detail - sent / uploaded / pending - is pulled from the flush log). No admin needed.
+# Wait for a Force-flush worker to finish, but stay responsive to a cancel: poll the process AND the
+# forceflush.stop marker (dropped by the GUI Stop/Disable/Force-flush buttons, which run on the UI thread and so
+# can signal even while this runs in the busy monitor runspace). Returns $true if cancelled. On cancel the worker
+# is terminated so a long gzip/upload stops at once (the worker also checks the marker at its own checkpoints).
+function Wait-ForFlushWorker($Proc) {
+    while (-not $Proc.HasExited) {
+        if (Test-Path -LiteralPath $FlushStopFile) {
+            if (-not $Proc.HasExited) { try { Stop-Process -Id $Proc.Id -Force -ErrorAction SilentlyContinue } catch {} }
+            return $true
+        }
+        Start-Sleep -Milliseconds 300
+    }
+    return [bool](Test-Path -LiteralPath $FlushStopFile)
+}
+
 function Invoke-ForceFlush {
     $cfg = Read-Config
     $dir = $cfg.DumpDir
     $parts = @()
+    $cancelled = $false
+    # A fresh run must not inherit a previous cancel: clear a stale marker before starting. The workers are told
+    # the marker's path (-CancelFile) so only a force-flush-initiated pass honours it - the monitor's own timed
+    # ingest never gets it and so never aborts on a lingering marker.
+    Remove-Item -LiteralPath $FlushStopFile -Force -ErrorAction SilentlyContinue
 
-    if (Test-Path $InstalledTriage) {
-        Write-Log "Force flush: ingest pass - triaging every complete dump in $dir (gzip at rest + emit events + retention)..."
-        try {
-            $ip = Start-Process powershell.exe -WindowStyle Hidden -PassThru -Wait -ArgumentList @(
-                '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', "`"$InstalledTriage`"", '-DumpDir', "`"$dir`"", '-Quiet')
-            Write-Log "Force flush: ingest pass finished (exit $($ip.ExitCode))."
-            $parts += "ingest exit $($ip.ExitCode)"
-            # A per-dump triage failure is now non-fatal (the pass continues), so it shows as a line in
-            # DumpTriage-error.log rather than a non-zero exit. Surface the newest one so the operator sees it.
+    try {
+        if (Test-Path $InstalledTriage) {
+            Write-Log "Force flush: ingest pass - triaging every complete dump in $dir (gzip at rest + emit events + retention)..."
             try {
-                $el = Join-Path $LogDir 'DumpTriage-error.log'
-                if (Test-Path -LiteralPath $el) {
-                    $last = @(Get-Content -LiteralPath $el -ErrorAction SilentlyContinue | Where-Object { $_ -match 'triage FAILED' } | Select-Object -Last 1)
-                    if ($last) { Write-Log "Force flush: most recent ingest failure - $($last.Trim())" 'WARN' }
+                $ip = Start-Process powershell.exe -WindowStyle Hidden -PassThru -ArgumentList @(
+                    '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', "`"$InstalledTriage`"", '-DumpDir', "`"$dir`"", '-CancelFile', "`"$FlushStopFile`"", '-Quiet')
+                $cancelled = Wait-ForFlushWorker $ip
+                if ($cancelled) {
+                    Write-Log 'Force flush: cancelled during the ingest pass - stopping.' 'WARN'; $parts += 'ingest cancelled'
+                } else {
+                    Write-Log "Force flush: ingest pass finished (exit $($ip.ExitCode))."
+                    $parts += "ingest exit $($ip.ExitCode)"
+                    # A per-dump triage failure is now non-fatal (the pass continues), so it shows as a line in
+                    # DumpTriage-error.log rather than a non-zero exit. Surface the newest one so the operator sees it.
+                    try {
+                        $el = Join-Path $LogDir 'DumpTriage-error.log'
+                        if (Test-Path -LiteralPath $el) {
+                            $last = @(Get-Content -LiteralPath $el -ErrorAction SilentlyContinue | Where-Object { $_ -match 'triage FAILED' } | Select-Object -Last 1)
+                            if ($last) { Write-Log "Force flush: most recent ingest failure - $($last.Trim())" 'WARN' }
+                        }
+                    } catch {}
                 }
-            } catch {}
-        } catch { Write-Log "Force flush: ingest pass failed to run: $($_.Exception.Message)" 'ERROR'; $parts += 'ingest FAILED to launch' }
-    } else { Write-Log 'Force flush: DumpTriage.ps1 not found - ingest skipped.' 'WARN'; $parts += 'ingest skipped (worker missing)' }
+            } catch { Write-Log "Force flush: ingest pass failed to run: $($_.Exception.Message)" 'ERROR'; $parts += 'ingest FAILED to launch' }
+        } else { Write-Log 'Force flush: DumpTriage.ps1 not found - ingest skipped.' 'WARN'; $parts += 'ingest skipped (worker missing)' }
 
-    if (Test-Path $InstalledTelemetry) {
-        Write-Log 'Force flush: telemetry push - sync known/ledger, drain the outbox, upload granted dumps...'
-        try {
-            $tp = Start-Process powershell.exe -WindowStyle Hidden -PassThru -Wait -ArgumentList @(
-                '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', "`"$InstalledTelemetry`"", '-Quiet')
-            Write-Log "Force flush: telemetry push finished (exit $($tp.ExitCode))."
-            $parts += "flush exit $($tp.ExitCode)"
-        } catch { Write-Log "Force flush: telemetry push failed to run: $($_.Exception.Message)" 'ERROR'; $parts += 'flush FAILED to launch' }
-    } else { Write-Log "Force flush: Send-Telemetry.ps1 not found at $InstalledTelemetry - flush skipped." 'WARN'; $parts += 'flush skipped (worker missing)' }
+        if ($cancelled) {
+            $parts += 'flush skipped (cancelled)'
+        } elseif (Test-Path $InstalledTelemetry) {
+            Write-Log 'Force flush: telemetry push - sync known/ledger, drain the outbox, upload granted dumps...'
+            try {
+                $tp = Start-Process powershell.exe -WindowStyle Hidden -PassThru -ArgumentList @(
+                    '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', "`"$InstalledTelemetry`"", '-CancelFile', "`"$FlushStopFile`"", '-Quiet')
+                $cancelled = Wait-ForFlushWorker $tp
+                if ($cancelled) { Write-Log 'Force flush: cancelled during the telemetry push - stopping.' 'WARN'; $parts += 'flush cancelled' }
+                else { Write-Log "Force flush: telemetry push finished (exit $($tp.ExitCode))."; $parts += "flush exit $($tp.ExitCode)" }
+            } catch { Write-Log "Force flush: telemetry push failed to run: $($_.Exception.Message)" 'ERROR'; $parts += 'flush FAILED to launch' }
+        } else { Write-Log "Force flush: Send-Telemetry.ps1 not found at $InstalledTelemetry - flush skipped." 'WARN'; $parts += 'flush skipped (worker missing)' }
+    } finally {
+        Remove-Item -LiteralPath $FlushStopFile -Force -ErrorAction SilentlyContinue
+    }
 
     # Surface the push outcome line from the newest telemetry log so the Output panel shows sent / uploaded / pending.
     $pushLine = $null
@@ -480,8 +513,8 @@ function Invoke-ForceFlush {
                                Where-Object { $_ -match 'events: sent' } | Select-Object -Last 1) }
     } catch {}
 
-    $msg = 'Force flush complete (' + ($parts -join '; ') + ')' +
-           $(if ($pushLine) { ' - ' + ($pushLine -replace '^.*?events: ', 'events: ').Trim() } else { '' }) +
+    $msg = $(if ($cancelled) { 'Force flush CANCELLED (' } else { 'Force flush complete (' }) + ($parts -join '; ') + ')' +
+           $(if ($pushLine -and -not $cancelled) { ' - ' + ($pushLine -replace '^.*?events: ', 'events: ').Trim() } else { '' }) +
            '. Kept dumps stay until the backend grants an upload; details in the live log.'
     Write-Log $msg
     $msg
@@ -845,6 +878,43 @@ function Enable-Service {
 # (its definition may have changed between versions) and restarts to pick up the current src.
 function Invoke-Update { Enable-Service }
 
+# An app update refreshes the installed scripts IN PLACE, but a monitor that is already running keeps executing
+# the version it loaded at launch - so a freshly-updated machine keeps running the OLD code until the task is
+# restarted. Rather than make the operator Stop/Start by hand, the loop watches the installed script's on-disk
+# version (see Invoke-Monitor) and calls this the moment a newer one lands. We cannot restart from inside the
+# loop (that would kill our own process mid-call, and a CLEAN exit does not trip the task's restart-on-failure),
+# so spawn a detached relauncher that waits for THIS process to exit - releasing the single-instance mutex and
+# leaving ProcDump armed for adoption - and then starts the monitor again: via the scheduled task when one is
+# installed (restores persistence), else a hidden non-persistent run.
+function Request-MonitorSelfRestart([string]$Why) {
+    $task = Get-MonitorTask
+    $viaTask = $false
+    if ($task) { $viaTask = [bool](@($task.Actions | Where-Object { "$($_.Arguments)" -like "*$InstalledScript*" }).Count) }
+
+    $startCmd = if ($viaTask) {
+        "Start-ScheduledTask -TaskName '$TaskName'"
+    } else {
+        "Start-Process powershell.exe -WindowStyle Hidden -ArgumentList @('-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-WindowStyle','Hidden','-File','$InstalledScript','-Monitor')"
+    }
+    # Double-quoted here-string: $PID and $startCmd expand NOW (the relauncher must watch THIS monitor's PID);
+    # $ErrorActionPreference is backtick-escaped so it stays literal in the relauncher.
+    $relaunch = @"
+`$ErrorActionPreference = 'SilentlyContinue'
+try { Wait-Process -Id $PID -Timeout 120 } catch {}
+Start-Sleep -Seconds 2
+$startCmd
+"@
+    try {
+        $b64   = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($relaunch))
+        $psExe = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+        Start-Process $psExe -WindowStyle Hidden -ArgumentList @(
+            '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', $b64) | Out-Null
+        Write-Log "Self-restart queued ($Why): a detached relauncher will restart the monitor $(if ($viaTask) { 'via the scheduled task' } else { 'as a hidden run' }) once this instance exits."
+    } catch {
+        Write-Log "Could not queue the self-restart ($Why): $($_.Exception.Message). Restart the monitor by hand to load the update." 'WARN'
+    }
+}
+
 function Disable-Service {
     # Disable removes ONLY the scheduled task. Config, logs and the installed script are kept so a later
     # re-enable reuses the same configuration - disable must never clear config. Dumps live in C:\dumps
@@ -1127,6 +1197,20 @@ function Invoke-Monitor {
                     Get-ChildItem -LiteralPath $sentDir -Filter *.json -File -ErrorAction SilentlyContinue |
                         Sort-Object LastWriteTime -Descending | Select-Object -Skip 500 |
                         Remove-Item -Force -ErrorAction SilentlyContinue
+                }
+
+                # App updated under us: the scripts run IN PLACE, so an update refreshed the file on disk while
+                # this process keeps running the version it loaded at launch. Detect a newer version on disk and
+                # gracefully restart to load it (no operator Stop/Start). Only when we ARE the installed script
+                # (never a dev/foreground copy run from elsewhere). Break WITHOUT a stop request so ProcDump stays
+                # armed and is adopted by the restarted instance.
+                if ($PSCommandPath -eq $InstalledScript) {
+                    $onDisk = Get-ScriptVersionFromFile $InstalledScript
+                    if ($onDisk -and $onDisk -gt [version]$ScriptVersion) {
+                        Write-Log "Monitor updated on disk (running v$ScriptVersion, now v$(Format-Version $onDisk)) - gracefully restarting to load the new version."
+                        Request-MonitorSelfRestart "updated to v$(Format-Version $onDisk)"
+                        break
+                    }
                 }
 
                 # Pick up config changes without reinstalling

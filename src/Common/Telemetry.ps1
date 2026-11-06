@@ -555,20 +555,26 @@ function Invoke-DumpUpload {
 # and a final "compressed X -> Y (Z%)" line (#65), so a watcher on the telemetry log (and, later, the UI) sees a
 # large dump being worked. Returns @{ Ok; Path; RawBytes; GzBytes; Error }.
 function Compress-DumpFile {
-    param([Parameter(Mandatory)][string]$SourcePath, [string]$DestPath, [string]$Label)
+    param([Parameter(Mandatory)][string]$SourcePath, [string]$DestPath, [string]$Label, [string]$CancelFile)
     try { Add-Type -AssemblyName System.IO.Compression -ErrorAction SilentlyContinue } catch {}
     if (-not $DestPath) { $DestPath = "$SourcePath.gz" }
     if (-not $Label)    { $Label = [IO.Path]::GetFileName($SourcePath) }
     $in = $null; $out = $null; $gz = $null
     try {
+        # Force-flush cancel: a multi-GB gzip is the slowest step, so it must be abortable. Check the marker
+        # before starting and periodically mid-stream (every ~16 MB - too cheap to matter, frequent enough to
+        # stop within a fraction of a second). On cancel, throw so the catch disposes the streams and deletes the
+        # partial .gz; the raw source is left in place (triage keeps the raw dump when the gzip did not complete).
+        if ($CancelFile -and (Test-Path -LiteralPath $CancelFile)) { throw 'cancelled' }
         $in  = [IO.File]::OpenRead($SourcePath)
         $total = $in.Length
         $out = [IO.File]::Create($DestPath)
         $gz  = New-Object System.IO.Compression.GZipStream($out, [System.IO.Compression.CompressionLevel]::Optimal)
-        $buf = New-Object byte[] (1MB); $done = 0L; $lastPct = -1
+        $buf = New-Object byte[] (1MB); $done = 0L; $lastPct = -1; $chunks = 0
         Write-TelemetryLog ("compressing {0} ({1:N0} bytes) before upload..." -f $Label, $total)
         while (($read = $in.Read($buf, 0, $buf.Length)) -gt 0) {
             $gz.Write($buf, 0, $read); $done += $read
+            if ((++$chunks % 16) -eq 0 -and $CancelFile -and (Test-Path -LiteralPath $CancelFile)) { throw 'cancelled' }
             if ($total -gt 0) {
                 $pct = [int](($done * 100) / $total)
                 if ($pct -ge $lastPct + 10 -and $pct -lt 100) { Write-TelemetryLog ("compressing {0}: {1}%" -f $Label, $pct); $lastPct = $pct }

@@ -112,23 +112,46 @@ function Show-MainWindow {
         } catch {}
     }
 
-    # Live dump-compression indicator (#65). The detached telemetry flush logs "compressing <dump>: NN%" and a
-    # final "compressed <dump>: X -> Y (Z% of raw)" to Logs\Telemetry_*.log; mirror the latest of those into the
-    # Monitor tab's progress bar + label so a user with the app open sees a large dump being compressed / when done.
+    # Live dump-compression indicator (#65). Dumps are gzipped at rest by the INGEST worker (DumpTriage), and
+    # also any flush-time compression by Telemetry - both log "compressing <dump>: NN%" and a final
+    # "compressed <dump>: X -> Y (Z% of raw)". Read the newest of those logs that carries a compress line and
+    # mirror it into the Monitor tab's progress bar + label, so a user with the app open sees a large dump being
+    # compressed (including during a Force flush) and when it is done.
     $script:CompressLast = ''
     function script:Update-CompressionProgress {
         if (-not $script:LblMonCompress) { return }
         try {
-            $f = Get-ChildItem $script:MonLogDir -Filter 'Telemetry_*.log' -File -ErrorAction SilentlyContinue |
-                 Sort-Object LastWriteTime -Descending | Select-Object -First 1
-            if (-not $f) { return }
-            $line = Get-Content -LiteralPath $f.FullName -Tail 60 -ErrorAction SilentlyContinue |
-                    Where-Object { $_ -match 'compress(ing|ed) ' } | Select-Object -Last 1
+            $logs = @(Get-ChildItem $script:MonLogDir -File -ErrorAction SilentlyContinue |
+                      Where-Object { $_.Name -match '^(DumpTriage|Telemetry)_.*\.log$' } |
+                      Sort-Object LastWriteTime -Descending | Select-Object -First 4)
+            $line = $null
+            foreach ($f in $logs) {
+                $line = Get-Content -LiteralPath $f.FullName -Tail 60 -ErrorAction SilentlyContinue |
+                        Where-Object { $_ -match 'compress(ing|ed) ' } | Select-Object -Last 1
+                if ($line) { break }
+            }
             if (-not $line -or $line -eq $script:CompressLast) { return }
             $script:CompressLast = $line
             $p = Get-CompressionProgressLine $line
             if ($p) { $script:LblMonCompress.Text = $p.Text; if ($p.Percent -ge 0) { $script:PbMonCompress.Value = $p.Percent } }
         } catch {}
+    }
+
+    # Cancel a running Force flush. Runs on the UI thread, so it works even while the 'Mon' runspace is busy
+    # inside Invoke-ForceFlush (the per-tool Busy guard would otherwise just drop a Stop/Force-flush click). It
+    # drops the forceflush.stop marker the workers poll AND kills the worker processes outright, so a long
+    # gzip/upload ends at once. Force flush is the only user of this marker ($BaseDir\forceflush.stop).
+    $script:FlushRunning  = $false
+    $script:FlushStopFile = Join-Path (Split-Path $script:MonLogDir -Parent) 'forceflush.stop'
+    function script:Cancel-ForceFlush {
+        try { Set-Content -LiteralPath $script:FlushStopFile -Value (Get-Date -Format o) -Encoding ASCII -ErrorAction SilentlyContinue } catch {}
+        $killed = 0
+        try {
+            Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
+                Where-Object { "$($_.CommandLine)" -match '(DumpTriage|Send-Telemetry)\.ps1' } |
+                ForEach-Object { try { Stop-Process -Id $_.ProcessId -Force -ErrorAction Stop; $killed++ } catch {} }
+        } catch {}
+        & $script:Append ("Force flush: cancel requested{0}; it stops at the next checkpoint." -f $(if ($killed) { " - stopped $killed worker process(es)" } else { '' }))
     }
 
     function script:Build-PvToggles {
@@ -499,12 +522,18 @@ function Show-MainWindow {
     # "re-register same version?" / downgrade confirmations the non-interactive runspace cannot answer.
     $script:BtnMonEnable.Add_Click({ & $script:Append 'Monitor: enabling service...'; script:Invoke-Action 'Mon' $script:RsMon { $script:Force = $true; Enable-Service } @() $script:RefreshMon })
     $script:BtnMonStart.Add_Click({ & $script:Append 'Monitor: starting... (live attach/dump activity shows in the "Monitor log (live)" panel below)'; script:Invoke-Action 'Mon' $script:RsMon { Start-Monitor } @() $script:RefreshMon })
-    $script:BtnMonStop.Add_Click({ & $script:Append 'Monitor: stopping...'; script:Invoke-Action 'Mon' $script:RsMon { Stop-Monitor (Read-Config) } @() $script:RefreshMon })
+    $script:BtnMonStop.Add_Click({ & $script:Append 'Monitor: stopping...'; if ($script:FlushRunning) { script:Cancel-ForceFlush }; script:Invoke-Action 'Mon' $script:RsMon { Stop-Monitor (Read-Config) } @() $script:RefreshMon })
     $script:BtnMonStatus.Add_Click({ & $script:RefreshMon })
     $script:BtnMonTestTelemetry.Add_Click({ & $script:Append 'Telemetry: testing reachability + auth...'; script:Invoke-Action 'Mon' $script:RsMon { Test-Telemetry } @() $null })
-    $script:BtnMonForceFlush.Add_Click({ & $script:Append 'Force flush: processing every dump in the dump dir now, then pushing telemetry (sync + drain outbox + upload granted dumps)...'; script:Invoke-Action 'Mon' $script:RsMon { Invoke-ForceFlush } @() $script:RefreshMon })
+    $script:BtnMonForceFlush.Add_Click({
+        # Second click while a flush is running = cancel (the per-tool Busy guard would otherwise drop it).
+        if ($script:FlushRunning) { script:Cancel-ForceFlush; return }
+        & $script:Append 'Force flush: processing every dump in the dump dir now, then pushing telemetry (sync + drain outbox + upload granted dumps)... Click "Force flush" again, or Stop, to cancel.'
+        $script:FlushRunning = $true
+        script:Invoke-Action 'Mon' $script:RsMon { Invoke-ForceFlush } @() ([scriptblock]::Create('$script:FlushRunning = $false; & $script:RefreshMon'))
+    })
     $script:BtnMonCollect.Add_Click({ & $script:Append 'Telemetry: collecting pending reports + gzipped dumps into <dump dir>\manual-outbox...'; script:Invoke-Action 'Mon' $script:RsMon { $r = Move-ToManualOutbox; "Collected $($r.Events) report(s) and $($r.Dumps) dump(s) to $($r.Dest)" } @() $script:RefreshMon })
-    $script:BtnMonDisable.Add_Click({ & $script:Append 'Monitor: disabling service...'; script:Invoke-Action 'Mon' $script:RsMon { Disable-Service } @() $script:RefreshMon })
+    $script:BtnMonDisable.Add_Click({ & $script:Append 'Monitor: disabling service...'; if ($script:FlushRunning) { script:Cancel-ForceFlush }; script:Invoke-Action 'Mon' $script:RsMon { Disable-Service } @() $script:RefreshMon })
     $script:BtnMonVerify.Add_Click({
         if ($script:Busy['Mon']) { & $script:Append 'Monitor: busy - try again in a moment.'; return }
         $script:LblMonVerify.Text = 'Verifying dependencies for the monitored apps (attaching briefly to each running app)...'

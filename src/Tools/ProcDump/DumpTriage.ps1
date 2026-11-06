@@ -22,6 +22,7 @@ param(
     [string]$DumpPath,       # a single dump (on-demand)
     [string]$DumpDir,        # the INGEST pass: triage every complete .dmp here; defaults to the configured DumpDir
     [string]$KnownDir,       # state dir for the ledger/outbox (defaults to the machine KnownIssues); for isolation/tests
+    [string]$CancelFile,     # a Force-flush cancel marker: when it appears, abort the pass between dumps and mid-gzip
     [switch]$DryRun,         # identify only: compute + print each dump's signatureId, mutate NOTHING (no gzip/delete/report/ledger/retention)
     [switch]$Quiet
 )
@@ -57,6 +58,29 @@ if (-not $CommonDir) { throw "Shared components (Common\) not found from $Script
 . (Join-Path $CommonDir 'Packages.ps1')
 . (Join-Path $CommonDir 'DumpId.ps1')
 . (Join-Path $CommonDir 'Telemetry.ps1')   # Compress-DumpFile: triage gzips every kept dump at rest
+. (Join-Path $CommonDir 'Logging.ps1')     # Write-Log/New-LogFile: without a log file, every Write-TelemetryLog no-ops
+
+# Record each ingest pass in the monitor's Logs dir. Triage is where dumps are gzipped now, so the slow
+# compression of a large dump (and its "compressing NN%" progress) MUST land in a file: the GUI's live
+# compression indicator reads these lines, and an operator can audit what a detached/-Quiet pass did. -Quiet
+# (how both the monitor timer and Force flush launch this) only silences the console; the file log is always
+# written. Bounded like the telemetry log (keep the 10 newest DumpTriage_*.log).
+$LogDir = Join-Path $env:ProgramData 'ReportingTroubleshooting\Monitor\Logs'
+$AppName = 'DumpTriage'
+$script:LogPrefix = 'DumpTriage'
+$script:EchoLog = -not $Quiet
+$script:LogMaxMB = 5
+$script:LogCount = 0
+New-LogFile
+# Keep only the 10 newest per-run logs. Target 'DumpTriage_*.log' (the timestamped New-LogFile name)
+# specifically - NOT the shared Remove-OldLogs glob 'DumpTriage*.log', which would also sweep the separate,
+# persistent 'DumpTriage-error.log' (the failure record the monitor/Force flush surface).
+try {
+    Get-ChildItem -Path $LogDir -Filter 'DumpTriage_*.log' -File -ErrorAction SilentlyContinue |
+        Where-Object { $_.FullName -ne $script:LogFile } |
+        Sort-Object LastWriteTime -Descending | Select-Object -Skip 9 |
+        ForEach-Object { try { Remove-Item $_.FullName -Force -ErrorAction Stop } catch {} }
+} catch {}
 
 # read the monitor config for the dedupe settings (this is a separate process from the monitor)
 $MonConfig = Join-Path $env:ProgramData 'ReportingTroubleshooting\Monitor\config.json'
@@ -97,7 +121,7 @@ function Triage-One([string]$Path) {
         else     { Say ("{0,-40} dry       (not a minidump / unreadable)" -f $name) }
         return @{ Collect = 'dry'; Id = $(if ($ev) { "$($ev.signatureId)" } else { $null }); Leaf = ''; Count = 0 }
     }
-    $r = Invoke-DumpTriage -DumpPath $Path -ClrMdDll $clrmd -Dir $script:StateDir -BaselinePath $baseline -SuppressKnown $suppressKnown -IsOnline $script:IsOnline
+    $r = Invoke-DumpTriage -DumpPath $Path -ClrMdDll $clrmd -Dir $script:StateDir -BaselinePath $baseline -SuppressKnown $suppressKnown -IsOnline $script:IsOnline -CancelFile $CancelFile
     Say ("{0,-40} {1,-9} id={2} x{3,-4} {4}{5}" -f $name, $r.Collect, $r.Id, $r.Count, $r.Leaf, $(if ($r.Disposition -and $r.Disposition -ne 'kept') { " ($($r.Disposition))" } else { '' }))
     return $r
 }
@@ -122,6 +146,9 @@ if ($DumpPath) {
         Say ("Triaging {0} dump(s) in {1} (walk tool: {2})`n" -f $dumps.Count, $DumpDir, $(if ($clrmd) { 'ClrMD' } else { 'NONE - hangs stay provisional' }))
         $kept = 0; $dropped = 0; $defer = 0; $skipped = 0; $errors = 0
         foreach ($d in $dumps) {
+            # Force-flush cancel: abort BETWEEN dumps the moment the marker appears (a mid-gzip abort is handled
+            # inside Compress-DumpFile, which also gets the marker). Dumps not yet reached stay for the next pass.
+            if ($CancelFile -and (Test-Path -LiteralPath $CancelFile)) { Say 'Force flush cancelled - stopping the ingest pass.'; break }
             if (-not (Test-DumpComplete $d.FullName)) { $skipped++; continue }   # still being written - next pass
             # One dump must NEVER abort the whole pass: a throw here (e.g. a pathological / oversized dump the
             # walker chokes on) used to hit the script trap and exit 1, leaving every OTHER dump unprocessed.
