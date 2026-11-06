@@ -125,6 +125,16 @@ try {
     Check 'gz round-trips to original'     ((Get-Item -LiteralPath $rt).Length -eq (Get-Item -LiteralPath $srcDump).Length)
     Check 'custom DestPath honored'        ((Compress-DumpFile -SourcePath $srcDump -DestPath (Join-Path $dir 'x.gz')).Path -eq (Join-Path $dir 'x.gz'))
     Check 'missing source -> not ok'       (-not (Compress-DumpFile -SourcePath (Join-Path $dir 'nope.dmp')).Ok)
+    # Force-flush cancel: a present cancel marker aborts the gzip (Ok=$false, Error='cancelled') and leaves NO
+    # partial .gz behind (the catch deletes it); the raw source is untouched so triage keeps it for a later pass.
+    $cancel = Join-Path $dir 'forceflush.stop'; Set-Content $cancel -Value 'x' -Encoding ascii
+    $cgz = Join-Path $dir 'cancelled.gz'
+    $cc  = Compress-DumpFile -SourcePath $srcDump -DestPath $cgz -CancelFile $cancel
+    Check 'cancel marker -> not ok'        (-not $cc.Ok)
+    Check 'cancel error says cancelled'    ($cc.Error -eq 'cancelled')
+    Check 'no partial .gz left on cancel'  (-not (Test-Path -LiteralPath $cgz))
+    Check 'raw source untouched on cancel' (Test-Path -LiteralPath $srcDump)
+    Remove-Item -LiteralPath $cancel -Force -ErrorAction SilentlyContinue
 
     # dump-artifact deletion: one helper removes a dump (.dmp OR .dmp.gz) + its sidecars, used after a confirmed upload.
     Write-Host 'dump-artifact deletion'
