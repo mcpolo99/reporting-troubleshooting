@@ -73,7 +73,8 @@ function Invoke-DumpTriage {
         [string]$Dir,
         [string]$BaselinePath,
         [bool]$SuppressKnown = $true,
-        [bool]$IsOnline = $false        # a backend endpoint is configured (a grant could come) - drives the known-but-offline drop
+        [bool]$IsOnline = $false,       # a backend endpoint is configured (a grant could come) - drives the known-but-offline drop
+        [string]$CancelFile             # Force-flush cancel marker: aborts a long gzip mid-stream (passed to Compress-DumpFile)
     )
     if (-not (Test-Path -LiteralPath $DumpPath)) { return @{ Collect = 'skip'; Reason = 'dump not found' } }
     if (-not $Dir) { $Dir = Get-KnownIssuesDir }
@@ -125,7 +126,7 @@ function Invoke-DumpTriage {
         # is somehow unavailable or fails, keep the RAW placeholder in place (no rename -> no monitor re-triage).
         $res.Disposition = 'kept'; $res.KeptPath = $DumpPath
         if ((Get-Command Compress-DumpFile -ErrorAction SilentlyContinue) -and (Test-Path -LiteralPath $DumpPath)) {
-            $gz = Compress-DumpFile -SourcePath $DumpPath -DestPath $restingGz -Label $restingName
+            $gz = Compress-DumpFile -SourcePath $DumpPath -DestPath $restingGz -Label $restingName -CancelFile $CancelFile
             if ($gz.Ok) {
                 Remove-Item -LiteralPath $DumpPath -Force -ErrorAction SilentlyContinue
                 $res.Disposition = 'kept-gz'; $res.KeptPath = $restingGz; $emitPath = $restingGz
