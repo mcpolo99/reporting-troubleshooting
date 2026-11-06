@@ -174,6 +174,19 @@ try {
     Check 'dump now under manual-outbox'   (Test-Path (Join-Path $mcDump 'manual-outbox\ProcDump_PC_app_hang_20261030_101010.dmp.gz'))
     Check 'event removed from outbox'      (-not (Test-Path (Join-Path $mc 'outbox\e1.json')))
 
+    # manual collect must COMPRESS a raw .dmp (triage had not gzipped it yet) on the way out, not leave it raw -
+    # a raw dump is many times larger to hand-carry. The raw source is removed (MOVE), only the .dmp.gz remains.
+    Write-Host 'collect for manual handling: raw .dmp is gzipped'
+    $mc2 = Join-Path $dir 'mc2'; New-Item -ItemType Directory -Force (Join-Path $mc2 'outbox') | Out-Null
+    $mc2Dump = Join-Path $mc2 'dumps'; New-Item -ItemType Directory -Force $mc2Dump | Out-Null
+    $rawName = 'ProcDump_PC_app_pending_20261102_110546.dmp'
+    Set-Content (Join-Path $mc2Dump $rawName) -Value ('RAWDUMP' * 500) -Encoding ascii
+    $res2 = Move-ToManualOutbox -Config ([ordered]@{ DumpDir = $mc2Dump }) -Dir $mc2
+    Check 'collect compressed 1 raw dump'  ($res2.Dumps -eq 1)
+    Check 'raw dump now gzipped in outbox' (Test-Path (Join-Path $mc2Dump ("manual-outbox\$rawName.gz")))
+    Check 'raw .dmp removed from dump dir' (-not (Test-Path (Join-Path $mc2Dump $rawName)))
+    Check 'no raw .dmp left in outbox'     (-not (Test-Path (Join-Path $mc2Dump ("manual-outbox\$rawName"))))
+
     # retention (ingest-owned): keeps a dump + its sidecar, sweeps an orphaned sidecar. (Eviction itself needs
     # >100 MB to cross the floor, so it is validated on the machine, not here.)
     Write-Host 'retention: orphan sidecar sweep'
