@@ -109,9 +109,10 @@ function Get-DefaultConfig {
     [pscustomobject]@{
         Apps             = @('AppA.exe')
         DumpDir          = 'C:\dumps'
-        DumpDiskLimitGB  = 30           # size budget for kept (gzipped) dumps; oldest ALREADY-HANDLED dumps are evicted over this. Dumps are never pruned by count, and a dump whose event is still pending is never evicted.
+        DumpDiskLimitGB  = 30           # HARD disk ceiling for kept dumps; over it, oldest ALREADY-PROCESSED dumps are evicted early (even within grace). Never evicts a NEEDED dump (one whose event/upload is still pending), and never prunes by count.
+        DumpGraceSeconds = 7200         # how long a PROCESSED dump (uploaded / not-wanted / dropped) is held before the single delete path removes it (default 2h). Needed + un-triaged dumps are never auto-deleted. Deletion is decoupled from sending and is identical online/offline.
         CheckSeconds     = 5
-        CleanupSeconds   = 300
+        CleanupSeconds   = 300          # how often the ingest/delete sweep runs (cheap); the HOLD time is DumpGraceSeconds, so a tight sweep still keeps a processed dump for the full grace
         ProcDumpArgs     = '-accepteula -ma -e -h -n 1 -w'   # -n = dumps per ProcDump session (default 1 if omitted)
         CooldownSeconds  = 60           # after a dump: wait this long before re-arming ProcDump on the SAME process
         DuplicateAction  = 'Delete'     # Delete | Keep  - what to do with repeat captures of the same event
@@ -950,8 +951,9 @@ function Edit-Config($cfg) {
         if ($a -in 'Delete','Keep') { $cfg.DuplicateAction = (Get-Culture).TextInfo.ToTitleCase($a.ToLower()); break }
         Write-Host 'Type Delete or Keep.' -ForegroundColor Yellow
     }
-    $cfg.CheckSeconds   = Read-Int   'Process check interval (seconds)' $cfg.CheckSeconds
-    $cfg.CleanupSeconds = Read-Int   'Dump cleanup interval (seconds)' $cfg.CleanupSeconds
+    $cfg.CheckSeconds     = Read-Int 'Process check interval (seconds)' $cfg.CheckSeconds
+    $cfg.CleanupSeconds   = Read-Int 'Ingest/delete sweep interval (seconds)' $cfg.CleanupSeconds
+    $cfg.DumpGraceSeconds = Read-Int 'Hold a processed dump before deleting (seconds, e.g. 7200 = 2h)' $cfg.DumpGraceSeconds
     $cfg.LogKeep        = Read-Int   'Log files to keep' $cfg.LogKeep
     $cfg.LogMaxMB       = Read-Int   'Max size per log file (MB)' $cfg.LogMaxMB
 
@@ -1071,7 +1073,7 @@ function Invoke-Monitor {
     try {
         Write-Log ('=' * 70)
         Write-Log "Monitor v$ScriptVersion starting. User: $env:USERDOMAIN\$env:USERNAME  Session: $((Get-Process -Id $PID).SessionId)  PS: $($PSVersionTable.PSVersion)"
-        Write-Log "Apps: $($cfg.Apps -join ', ') | Args: $(Get-EffectiveArgs $cfg) | Dump budget $($cfg.DumpDiskLimitGB) GB | Check $($cfg.CheckSeconds)s | Cleanup $($cfg.CleanupSeconds)s | Cooldown $($cfg.CooldownSeconds)s | Duplicates: $($cfg.DuplicateAction)"
+        Write-Log "Apps: $($cfg.Apps -join ', ') | Args: $(Get-EffectiveArgs $cfg) | Dump budget $($cfg.DumpDiskLimitGB) GB | Check $($cfg.CheckSeconds)s | Sweep $($cfg.CleanupSeconds)s | Grace $($cfg.DumpGraceSeconds)s | Cooldown $($cfg.CooldownSeconds)s | Duplicates: $($cfg.DuplicateAction)"
 
         if (-not (Test-Path $ProcDumpExe) -and -not (Install-Sysinternals)) {
             Write-Log 'ProcDump missing and could not be installed - exiting.' 'ERROR'

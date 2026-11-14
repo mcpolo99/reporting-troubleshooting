@@ -142,7 +142,12 @@ if ($DumpPath) {
     try { $owned = $mtx.WaitOne(0) } catch [System.Threading.AbandonedMutexException] { $owned = $true }
     if (-not $owned) { Say 'Another ingest pass is already running - exiting.'; $mtx.Dispose(); return }
     try {
-        $dumps = @(Get-ChildItem -Path $DumpDir -Filter *.dmp -File -ErrorAction SilentlyContinue | Sort-Object CreationTime)
+        # Skip any dump already marked PROCESSED (a '<dump>.handled' marker) - it was triaged in an earlier pass and
+        # is only awaiting the delete grace, so never re-triage it (and a dropped dump stays raw, so this is what
+        # keeps it out of the scan).
+        $dumps = @(Get-ChildItem -Path $DumpDir -Filter *.dmp -File -ErrorAction SilentlyContinue |
+                   Where-Object { -not (Test-Path -LiteralPath ($_.FullName + '.handled')) } |
+                   Sort-Object CreationTime)
         Say ("Triaging {0} dump(s) in {1} (walk tool: {2})`n" -f $dumps.Count, $DumpDir, $(if ($clrmd) { 'ClrMD' } else { 'NONE - hangs stay provisional' }))
         $kept = 0; $dropped = 0; $defer = 0; $skipped = 0; $errors = 0
         foreach ($d in $dumps) {
@@ -173,9 +178,10 @@ if ($DumpPath) {
         # Surface the pass result to the telemetry log too, so the "Force flush" button / monitor can report it
         # without the worker's (suppressed) console.
         try { if (Get-Command Write-TelemetryLog -ErrorAction SilentlyContinue) { Write-TelemetryLog ("ingest: $doneMsg") } } catch {}
-        # The ingest worker owns the dump dir, so it runs size-based retention too (never the armer). Not in a dry run.
+        # The ingest worker owns the dump dir, so it runs the single delete path too (never the armer). The grace
+        # period holds a processed dump before deletion; the disk budget is the hard ceiling. Not in a dry run.
         if (-not $DryRun -and (Get-Command Invoke-DumpRetention -ErrorAction SilentlyContinue)) {
-            try { Invoke-DumpRetention -DumpDir $DumpDir -LimitGB ([double](Cfg 'DumpDiskLimitGB' 30)) -Dir $script:StateDir } catch {}
+            try { Invoke-DumpRetention -DumpDir $DumpDir -LimitGB ([double](Cfg 'DumpDiskLimitGB' 30)) -Dir $script:StateDir -GraceSeconds ([int](Cfg 'DumpGraceSeconds' 7200)) } catch {}
         }
     } finally { if ($owned) { try { $mtx.ReleaseMutex() } catch {} }; $mtx.Dispose() }
 }
