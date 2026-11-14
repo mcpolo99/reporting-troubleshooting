@@ -209,6 +209,30 @@ try {
     Check 'retention keeps dump + sidecar'  ((Test-Path (Join-Path $rt 'ProcDump_PC_app_hang_20261030_101010.dmp.gz')) -and (Test-Path (Join-Path $rt 'ProcDump_PC_app_hang_20261030_101010.info.txt')))
     Check 'retention sweeps orphan sidecar' (-not (Test-Path (Join-Path $rt 'orphan.info.txt')))
 
+    # The single delete path is time + grace based on the '<dump>.handled' processed-marker. A NEEDED (unmarked)
+    # dump is never auto-deleted; a PROCESSED dump is deleted only once older than the grace period.
+    Write-Host 'delete path: processed-marker + grace'
+    $rg = Join-Path $dir 'rg'; New-Item -ItemType Directory -Force $rg | Out-Null
+    $rgKi = Join-Path $dir 'rgki'; New-Item -ItemType Directory -Force $rgKi | Out-Null
+    $needed    = Join-Path $rg 'ProcDump_PC_app_crash_20261101_010101.dmp.gz'
+    $processed = Join-Path $rg 'ProcDump_PC_app_crash_20261101_020202.dmp.gz'
+    Set-Content $needed    -Value 'GZ' -Encoding ascii
+    Set-Content $processed -Value 'GZ' -Encoding ascii
+    # marker round-trip
+    Set-DumpHandled -DumpPath $processed -Reason 'uploaded'
+    Check 'Set/Get-DumpHandled round-trips'  ((Get-DumpHandledUtc $processed) -ne $null -and (Get-DumpHandledUtc $needed) -eq $null)
+
+    # within grace: both kept (processed one is marked but not old enough)
+    Invoke-DumpRetention -DumpDir $rg -LimitGB 30 -Dir $rgKi -GraceSeconds 99999
+    Check 'within grace: processed dump kept' (Test-Path $processed)
+    Check 'needed (unmarked) dump kept'       (Test-Path $needed)
+
+    # grace elapsed (GraceSeconds 0): the processed dump + its marker go; the needed dump stays.
+    Invoke-DumpRetention -DumpDir $rg -LimitGB 30 -Dir $rgKi -GraceSeconds 0
+    Check 'past grace: processed dump deleted' (-not (Test-Path $processed))
+    Check 'past grace: marker deleted'         (-not (Test-Path ($processed + '.handled')))
+    Check 'needed dump never auto-deleted'     (Test-Path $needed)
+
     # Idempotency-Key = dump content hash (CONTRACT 3): same raw bytes -> same key everywhere, independent of
     # the random per-event eventId, so a re-sent/re-generated dump is deduped by identity, not just a file retry.
     Write-Host 'idempotency key = dump content hash'
