@@ -167,15 +167,44 @@ function Move-SentEvent { param([string]$EventPath, [string]$SentDir)
     Clear-UploadAttempts -EventPath $EventPath
 }
 
-# Delete a dump and its sidecars, handling BOTH the raw (.dmp) and the kept-at-rest (.dmp.gz) form - the stem
-# for sidecars is the path with a trailing .dmp or .dmp.gz stripped. Used after a successful upload (the only
-# delete-on-send; the backend now holds the dump). No-op on a blank/missing path.
+# Delete a dump and ALL its sidecars, handling BOTH the raw (.dmp) and the kept-at-rest (.dmp.gz) form - the stem
+# for .info/.versions is the path with a trailing .dmp or .dmp.gz stripped; the processed-marker is '<dump>.handled'
+# (appended to the full name). Called ONLY by the single delete path (Invoke-DumpRetention); nothing deletes a dump
+# on the send/triage path anymore. No-op on a blank/missing path.
 function Remove-DumpArtifacts { param([string]$DumpPath)
     if (-not $DumpPath) { return }
     $stem = $DumpPath -replace '\.dmp(\.gz)?$', ''
-    foreach ($f in @($DumpPath) + @('.info.txt', '.versions.txt' | ForEach-Object { $stem + $_ })) {
+    foreach ($f in @($DumpPath, ($DumpPath + '.handled')) + @('.info.txt', '.versions.txt' | ForEach-Object { $stem + $_ })) {
         if (Test-Path -LiteralPath $f) { Remove-Item -LiteralPath $f -Force -ErrorAction SilentlyContinue }
     }
+}
+
+# ---- processed-dump marker: the SINGLE source of truth for "this dump is done" ------------------------------
+# A dump becomes PROCESSED when triage/flush reaches a TERMINAL outcome for its bytes - dropped (recurrence /
+# already-uploaded / known), uploaded OK, not-wanted (no grant), or permanently parked. Marking NEVER deletes the
+# dump: it writes a '<dump>.handled' marker holding the UTC. The one delete path (Invoke-DumpRetention) removes a
+# processed dump once it is older than the grace period (or, only when over the disk budget, sooner). A dump with
+# NO marker is "needed" (awaiting a grant/upload) or not yet triaged, and is NEVER auto-deleted. This decouples
+# deletion from sending entirely and behaves identically online or offline.
+function Set-DumpHandled { param([string]$DumpPath, [string]$Reason)
+    if (-not $DumpPath) { return }
+    try {
+        $payload = [ordered]@{ handledAtUtc = (Get-Date).ToUniversalTime().ToString('o'); reason = "$Reason" } | ConvertTo-Json -Compress
+        Set-Content -LiteralPath ($DumpPath + '.handled') -Value $payload -Encoding UTF8 -ErrorAction Stop
+    } catch {}
+}
+
+# The UTC a dump was marked processed, or $null when it carries no marker (= needed / un-triaged). Falls back to
+# the marker file's own mtime if its content is unreadable (legacy/partial write).
+function Get-DumpHandledUtc { param([string]$DumpPath)
+    if (-not $DumpPath) { return $null }
+    $marker = $DumpPath + '.handled'
+    if (-not (Test-Path -LiteralPath $marker)) { return $null }
+    try {
+        $j = Get-Content -LiteralPath $marker -Raw | ConvertFrom-Json
+        if ($j.handledAtUtc) { return ([datetimeoffset]$j.handledAtUtc).UtcDateTime }
+    } catch {}
+    try { return (Get-Item -LiteralPath $marker).LastWriteTimeUtc } catch { return $null }
 }
 
 # Terminal state for a wanted dump we could not upload (retries exhausted, or it can never fit the grant). We
@@ -248,13 +277,15 @@ function Send-OutboxEvents {
                     Write-TelemetryLog ("event POST failed for {0}: {1}" -f $f.Name, $_.Exception.Message) 'WARN'
                     $failed++; continue
                 }
-                # 2) No grant token -> the backend did not want this capture's dump -> the EVENT is done. We KEEP
-                #    the local (gzipped) dump: dumps are never deleted on the send path (user rule). The dump stays
-                #    in the dump dir, available for manual collection, and size-based retention evicts it (oldest
-                #    handled first) only when the disk budget is exceeded.
+                # 2) No grant token -> the backend did not want this capture's dump -> the EVENT is done and the
+                #    bytes are not needed. Sending NEVER deletes: we MARK the local dump processed (a '<dump>.handled'
+                #    marker) and leave it in place. The single delete path removes it once it is older than the grace
+                #    period (or sooner only if the disk budget is exceeded). Identical online or offline.
                 $grantTok = if ($resp -and $resp.uploadGrant) { "$($resp.uploadGrant.token)" } else { '' }
                 if ([string]::IsNullOrWhiteSpace($grantTok)) {
-                    Write-TelemetryLog ("dump not requested for {0} - event archived, local dump kept" -f $f.Name)
+                    $notWanted = Resolve-DumpPath -Evt $evt -Config $Config
+                    if ($notWanted.Path -and (Test-Path -LiteralPath $notWanted.Path)) { Set-DumpHandled -DumpPath $notWanted.Path -Reason 'not-wanted' }
+                    Write-TelemetryLog ("dump not requested for {0} - event archived, local dump marked processed (held for grace)" -f $f.Name)
                     Move-SentEvent -EventPath $f.FullName -SentDir $sentDir; $sent++
                     continue
                 }
@@ -288,20 +319,23 @@ function Send-OutboxEvents {
                     $bytes = (Get-Item -LiteralPath $uploadPath).Length
                     $grant = Resolve-UploadGrant -Response $resp -DumpBytes $bytes
                     if ($grant.Reason -eq 'too-large') {
-                        # Over the grant cap: park the EVENT (so it is not retried forever), but KEEP the dump in
-                        # place (never deleted). Record the reason beside the parked event.
-                        Write-TelemetryLog ("granted dump {0} is {1} bytes compressed, over the grant cap - parking event, dump kept" -f $rawName, $bytes) 'ERROR'
+                        # Over the grant cap and it can never fit -> terminal: park the EVENT (so it is not retried
+                        # forever) and MARK the dump processed (it will never upload). Sending never deletes; the
+                        # single delete path reaps it after the grace period.
+                        Write-TelemetryLog ("granted dump {0} is {1} bytes compressed, over the grant cap - parking event, dump marked processed" -f $rawName, $bytes) 'ERROR'
+                        Set-DumpHandled -DumpPath $loc.Path -Reason 'too-large'
                         Move-FailedUpload -EventPath $f.FullName -DumpPath $null -Config $Config -Reason 'too-large'; $failedUploads++
                         continue
                     }
                     $up = Send-EscalatedDump -DumpPath $uploadPath -UploadName $uploadName -Config $Config -Grant $grant.Token
                     if ($up.Ok) {
-                        # Uploaded OK -> the backend now holds this dump, so the local copy is redundant and MAY be
-                        # deleted (frees disk). This is the ONLY delete-on-send: a dump that was NOT uploaded
-                        # (no grant, failed, over cap) is always kept. Removes the on-disk dump (.dmp.gz or raw) + sidecars.
-                        Write-TelemetryLog ("uploaded dump {0} as {1} ({2} bytes compressed) -> {3}; local copy removed (backend holds it)" -f $rawName, $uploadName, $bytes, $up.Key) 'INFO'
+                        # Uploaded OK -> the backend now holds this dump -> terminal for the bytes. Sending NEVER
+                        # deletes (user rule): we MARK the local copy processed and leave it in place. The single
+                        # delete path removes it once it is older than the grace period (or sooner only if over the
+                        # disk budget). Identical to every other terminal outcome - one delete path, one grace.
+                        Write-TelemetryLog ("uploaded dump {0} as {1} ({2} bytes compressed) -> {3}; local copy marked processed (held for grace)" -f $rawName, $uploadName, $bytes, $up.Key) 'INFO'
                         if ($sigId) { [void](Set-LedgerUploaded -Sig $sigId -Dir $Dir) }   # ledger: held -> uploaded (frees the sample)
-                        Remove-DumpArtifacts -DumpPath $loc.Path
+                        Set-DumpHandled -DumpPath $loc.Path -Reason 'uploaded'
                         Move-SentEvent -EventPath $f.FullName -SentDir $sentDir; $sent++; $dumps++
                     } else {
                         $n = (Get-UploadAttempts -EventPath $f.FullName) + 1
@@ -321,7 +355,9 @@ function Send-OutboxEvents {
                     $loc = Resolve-DumpPath -Evt $evt -Config $Config
                     if ($loc.Path) {
                         $up = Send-EscalatedDump -DumpPath $loc.Path -Config $Config
-                        if ($up.Ok) { $evt.ids.dumpObjectKey = $up.Key; $dumps++ }
+                        # The silo now holds the copy -> terminal for the bytes. Mark it processed (never delete on
+                        # send); the single delete path reaps it after the grace period. Same rule as the online path.
+                        if ($up.Ok) { $evt.ids.dumpObjectKey = $up.Key; $dumps++; Set-DumpHandled -DumpPath $loc.Path -Reason 'silo-copied' }
                         else { Write-TelemetryLog ("local dump copy failed for {0}: {1}" -f $f.Name, $up.Detail) 'WARN' }
                     }
                     $evt | ConvertTo-Json -Depth 12 | Set-Content -LiteralPath $f.FullName -Encoding UTF8

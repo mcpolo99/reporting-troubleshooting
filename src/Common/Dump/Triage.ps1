@@ -1,30 +1,26 @@
 # Dump engine: triage one dump end-to-end (signature -> walk -> id -> ledger decision -> report -> collect/drop),
-# plus size-based retention over the dump dir. Owned by the INGEST concern (triage worker), never the armer.
+# plus THE single dump-delete path. Owned by the INGEST concern (triage worker), never the armer.
 
 
-# Size-based dump retention, keyed off the LEDGER (never by count). A dump is PROTECTED and never evicted when
-# it is a current ledger sample (held/granted) or is referenced by any unsent report (outbox or outbox\failed).
-# Everything else is a stale/orphaned artifact and is evictable oldest-first when over the disk budget (uploaded
-# dumps are already deleted at upload, so in practice this only reaps orphans). Over budget with only protected
-# dumps -> warn, never silent data loss. Also sweeps orphaned .info/.versions sidecars.
+# THE ONE place a dump is deleted. Time + grace based, with a disk-budget emergency ceiling. Nothing on the
+# triage or send path deletes a dump; those paths only MARK a dump processed (a '<dump>.handled' marker, written
+# by Set-DumpHandled) when its bytes reach a terminal outcome - dropped (recurrence / already-uploaded / known),
+# uploaded OK, not-wanted, or permanently parked. This function is the single source of truth for removal:
+#   - a PROCESSED dump (has a .handled marker) is deleted once it is older than GraceSeconds;
+#   - a NEEDED dump (no marker - awaiting a grant/upload) or an un-triaged dump is NEVER auto-deleted;
+#   - if the dump dir is still over LimitGB after the grace sweep, processed dumps are evicted oldest-handled
+#     first EVEN within grace (the hard disk ceiling), but a needed/unmarked dump is still never touched - over
+#     budget with only needed dumps -> warn, never silent data loss.
+# Deletion is identical online or offline (it never consults the endpoint or the ledger). Also sweeps orphaned
+# .info/.versions/.handled sidecars whose dump is gone. GraceSeconds default 2h.
 function Invoke-DumpRetention {
-    param([Parameter(Mandatory)][string]$DumpDir, [double]$LimitGB = 30, [string]$Dir)
+    param([Parameter(Mandatory)][string]$DumpDir, [double]$LimitGB = 30, [string]$Dir, [int]$GraceSeconds = 7200)
     if (-not $Dir) { $Dir = Get-KnownIssuesDir }
     $limitBytes = [Math]::Max($LimitGB, 0.1) * 1GB
     $roots = @($DumpDir, (Join-Path $DumpDir 'failed-uploads'))
+    $nowUtc = (Get-Date).ToUniversalTime()
 
-    $protected = @{}
-    $add = { param($p) if ($p) { $n = [IO.Path]::GetFileName("$p"); $protected[$n] = $true; $protected[($n -replace '\.gz$','')] = $true; $protected["$n.gz"] = $true } }
-    try { $led = Read-DeviceLedger $Dir; foreach ($sig in @($led.entries.Keys)) { & $add $led.entries[$sig].sample } } catch {}
-    foreach ($sub in @('outbox', 'outbox\failed')) {
-        $d = Join-Path $Dir $sub
-        if (-not (Test-Path -LiteralPath $d)) { continue }
-        foreach ($ev in @(Get-ChildItem -LiteralPath $d -Filter *.json -File -ErrorAction SilentlyContinue)) {
-            try { $j = Get-Content -LiteralPath $ev.FullName -Raw | ConvertFrom-Json; & $add $j.dump.path; & $add $j.dump.file } catch {}
-        }
-    }
-
-    # Orphaned sidecars (a .info/.versions whose dump is gone) - sweep regardless of budget.
+    # Orphaned sidecars (a .info/.versions/.handled whose dump is gone) - sweep regardless of budget/grace.
     foreach ($r in $roots) {
         if (-not (Test-Path -LiteralPath $r)) { continue }
         Get-ChildItem -LiteralPath $r -Filter *.txt -File -ErrorAction SilentlyContinue |
@@ -32,30 +28,50 @@ function Invoke-DumpRetention {
                            -not (Test-Path -LiteralPath ($_.FullName -replace '\.(info|versions)\.txt$', '.dmp')) -and
                            -not (Test-Path -LiteralPath ($_.FullName -replace '\.(info|versions)\.txt$', '.dmp.gz')) } |
             Remove-Item -Force -ErrorAction SilentlyContinue
+        Get-ChildItem -LiteralPath $r -Filter *.handled -File -ErrorAction SilentlyContinue |
+            Where-Object { -not (Test-Path -LiteralPath ($_.FullName -replace '\.handled$', '')) } |
+            Remove-Item -Force -ErrorAction SilentlyContinue
     }
 
-    $all = @()
-    foreach ($r in $roots) {
-        if (-not (Test-Path -LiteralPath $r)) { continue }
-        $all += @(Get-ChildItem -LiteralPath $r -File -ErrorAction SilentlyContinue | Where-Object { $_.Name -match '\.dmp(\.gz)?$' })
+    # Every dump on disk (raw .dmp or kept-at-rest .dmp.gz) under the roots, tagged with its processed time.
+    function Get-AllDumps {
+        $acc = @()
+        foreach ($r in $roots) {
+            if (-not (Test-Path -LiteralPath $r)) { continue }
+            foreach ($d in @(Get-ChildItem -LiteralPath $r -File -ErrorAction SilentlyContinue | Where-Object { $_.Name -match '\.dmp(\.gz)?$' })) {
+                $acc += [pscustomobject]@{ File = $d; HandledUtc = (Get-DumpHandledUtc $d.FullName) }
+            }
+        }
+        $acc
     }
-    if (-not $all.Count) { return }
-    $total = ($all | Measure-Object Length -Sum).Sum
-    if ($total -le $limitBytes) { return }
 
-    $evictable = @($all | Where-Object { -not $protected[$_.Name] } | Sort-Object LastWriteTime)
-    foreach ($d in $evictable) {
+    # 1) Grace sweep: delete every PROCESSED dump older than the grace period. Needed/unmarked dumps are skipped.
+    foreach ($p in @(Get-AllDumps | Where-Object { $_.HandledUtc })) {
+        $age = ($nowUtc - $p.HandledUtc).TotalSeconds
+        if ($age -lt $GraceSeconds) { continue }
+        try {
+            $sz = $p.File.Length
+            Remove-DumpArtifacts -DumpPath $p.File.FullName
+            Write-TelemetryLog ("retention: deleted processed dump {0} ({1:N1} MB), handled {2:N0}s ago (grace {3}s)" -f $p.File.Name, ($sz/1MB), $age, $GraceSeconds)
+        } catch { Write-TelemetryLog "retention: could not delete $($p.File.Name) (in use?), will retry." 'WARN' }
+    }
+
+    # 2) Disk-budget ceiling: if still over budget, evict the oldest-handled PROCESSED dumps first, even within
+    #    grace. A needed/unmarked dump is never evicted.
+    $left = @(Get-AllDumps)
+    $total = ($left | ForEach-Object { $_.File.Length } | Measure-Object -Sum).Sum
+    if (-not $total -or $total -le $limitBytes) { return }
+    foreach ($e in @($left | Where-Object { $_.HandledUtc } | Sort-Object HandledUtc)) {
         if ($total -le $limitBytes) { break }
         try {
-            $sz = $d.Length
-            Remove-Item -LiteralPath $d.FullName -Force -ErrorAction Stop
-            foreach ($sx in '.info.txt', '.versions.txt') { Remove-Item -LiteralPath ($d.FullName -replace '\.dmp(\.gz)?$', $sx) -Force -ErrorAction SilentlyContinue }
+            $sz = $e.File.Length
+            Remove-DumpArtifacts -DumpPath $e.File.FullName
             $total -= $sz
-            Write-TelemetryLog ("retention: evicted orphan dump {0} ({1:N1} MB); budget {2} GB" -f $d.Name, ($sz/1MB), $LimitGB)
-        } catch { Write-TelemetryLog "retention: could not evict $($d.Name) (in use?), will retry." 'WARN' }
+            Write-TelemetryLog ("retention: over budget - evicted processed dump {0} ({1:N1} MB) early; budget {2} GB" -f $e.File.Name, ($sz/1MB), $LimitGB) 'WARN'
+        } catch { Write-TelemetryLog "retention: could not evict $($e.File.Name) (in use?), will retry." 'WARN' }
     }
     if ($total -gt $limitBytes) {
-        Write-TelemetryLog ("retention: still {0:N1} GB over the {1} GB budget, but all remaining dumps are held/unsent - kept (use Collect for manual handling)." -f (($total-$limitBytes)/1GB), $LimitGB) 'WARN'
+        Write-TelemetryLog ("retention: still {0:N1} GB over the {1} GB budget, but all remaining dumps are needed/un-triaged - kept (no data loss)." -f (($total-$limitBytes)/1GB), $LimitGB) 'WARN'
     }
 }
 
@@ -113,13 +129,13 @@ function Invoke-DumpTriage {
 
     $emitPath = (Join-Path $dumpDir $restingName)   # logical final raw name; the flush resolves the .dmp.gz
     if ($res.Collect -eq 'drop') {
-        # Discard the bytes (already reported): a recurrence, an already-uploaded id, or a known id offline. Only
-        # place the engine deletes a dump; a kept dump is never deleted here - disk is bounded by retention,
-        # which only ever evicts dumps the backend already holds.
-        foreach ($f in @($DumpPath) + @('.info.txt', '.versions.txt' | ForEach-Object { $DumpPath -replace '\.dmp$', $_ })) {
-            if (Test-Path -LiteralPath $f) { Remove-Item -LiteralPath $f -Force -ErrorAction SilentlyContinue }
-        }
-        $res.Disposition = 'dropped'
+        # Reported, but the bytes are not needed (a recurrence, an already-uploaded id, or a known id). The engine
+        # no longer deletes here: it MARKS the dump processed where it lies (a '<dump>.handled' marker) and leaves
+        # it. The single delete path (Invoke-DumpRetention) removes it once it is older than the grace period (or
+        # sooner only if over the disk budget). The ingest pass skips any dump carrying a .handled marker, so a
+        # dropped dump is never re-triaged, and we never spend CPU gzipping a throwaway. Identical online/offline.
+        Set-DumpHandled -DumpPath $DumpPath -Reason ("drop:" + "$($res.Reason)")
+        $res.Disposition = 'dropped-held'; $res.KeptPath = $DumpPath; $emitPath = $DumpPath
     } else {
         # KEEP (collect/defer). Write the FINAL-named <...>.dmp.gz straight from the placeholder (rename + gzip in
         # one), then delete the placeholder. A kept dump always lives compressed (~5x smaller). If the compressor
