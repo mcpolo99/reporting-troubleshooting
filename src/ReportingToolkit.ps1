@@ -19,6 +19,16 @@ if (-not (Test-Admin)) {
 $__verFile = Join-Path (Split-Path $PSScriptRoot -Parent) 'VERSION'
 $ScriptVersion = if (Test-Path $__verFile) { (Get-Content $__verFile -Raw).Trim() } else { '0.0.0' }
 
+# Record EVERY launch (version + mode + user) to the app log, always - not only on the fatal-startup path
+# below. Self-contained append so it never depends on a component loading first and runs before any of them.
+try {
+    $__logDir = Join-Path $env:ProgramData 'ReportingTroubleshooting\Logs'
+    New-Item -ItemType Directory -Path $__logDir -Force -ErrorAction SilentlyContinue | Out-Null
+    $__line = '{0:yyyy-MM-dd HH:mm:ss.fff} [INFO ] [PID {1}] Reporting & Troubleshooting v{2} ({3}) starting. User: {4}\{5}  PS: {6}' -f `
+        (Get-Date), $PID, $ScriptVersion, $(if ($CLI) { 'CLI' } else { 'GUI' }), $env:USERDOMAIN, $env:USERNAME, $PSVersionTable.PSVersion
+    Add-Content -LiteralPath (Join-Path $__logDir ('app_{0:yyyyMMdd}.log' -f (Get-Date))) -Value $__line -Encoding UTF8 -ErrorAction SilentlyContinue
+} catch {}
+
 # -------- paths --------
 $script:ToolkitRoot = $PSScriptRoot
 $schemasPath = Join-Path $PSScriptRoot 'Schemas'

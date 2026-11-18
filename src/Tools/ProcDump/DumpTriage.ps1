@@ -82,6 +82,8 @@ try {
         ForEach-Object { try { Remove-Item $_.FullName -Force -ErrorAction Stop } catch {} }
 } catch {}
 
+Write-Log "DumpTriage (ingest worker) v$(Get-ToolkitVersion) starting."
+
 # read the monitor config for the dedupe settings (this is a separate process from the monitor)
 $MonConfig = Join-Path $env:ProgramData 'ReportingTroubleshooting\Monitor\config.json'
 $cfg = $null; if (Test-Path $MonConfig) { try { $cfg = Get-Content $MonConfig -Raw | ConvertFrom-Json } catch {} }

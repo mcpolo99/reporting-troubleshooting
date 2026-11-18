@@ -27,6 +27,15 @@ function Format-Version($v) {
     if ($null -eq $v) { 'not installed' } elseif ($v -eq [version]'0.0.0') { 'unversioned' } else { "$v" }
 }
 
+# The toolkit's single RUNTIME version: the repo-root VERSION file (one level above src\, the same source
+# ReportingToolkit.ps1 reads). Every entry point logs it at launch so the running build is always traceable
+# from the log. Falls back to '0.0.0' when the file is missing. $PSScriptRoot here is src\Common.
+function Get-ToolkitVersion {
+    $vf = Join-Path $PSScriptRoot '..\..\VERSION'
+    if (Test-Path -LiteralPath $vf) { try { return (Get-Content -LiteralPath $vf -Raw).Trim() } catch {} }
+    '0.0.0'
+}
+
 # --- interactive prompts (Enter keeps the current value) ---
 function Read-Value([string]$Prompt, $Current) {
     $v = Read-Host "$Prompt [$Current]"
