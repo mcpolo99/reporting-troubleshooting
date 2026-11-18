@@ -5,6 +5,13 @@ truth; each release is tagged `vX.Y.Z` and published as a GitHub release by `scr
 
 <!-- NEW RELEASES INSERTED BELOW -->
 
+## [v1.0.63] - 2026-11-18
+Changes since v1.0.62:
+
+### Features
+- log the toolkit version at every app launch (470c6a8)
+
+
 ## [v1.0.62] - 2026-11-18
 Changes since v1.0.61:
 
@@ -523,6 +530,7 @@ Changes since v1.0.0:
 - WPF/XAML launcher (GUI default, `-CLI` text menu) with shared light/dark theme.
 - Shared components (logging, admin/signature/prompt/version helpers) under `src/Common`.
 - Bootstrap installer (`src/Get.ps1` + `src/run.bat`) with version check against GitHub.
+
 
 
 
