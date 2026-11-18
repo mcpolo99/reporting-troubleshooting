@@ -63,6 +63,10 @@ try {
         $ev2 = Get-DumpEvent -DumpPath $placeholder
         Check 'signatureId is stable'          ($ev.signatureId -eq $ev2.signatureId)
 
+        # Keep a byte-identical copy BEFORE triage consumes the placeholder, so the recurrence check below triages
+        # the SAME signature deterministically (two freshly generated minidumps would not share a signature).
+        $savedRaw = Join-Path $root 'saved.dmp'; Copy-Item -LiteralPath $placeholder -Destination $savedRaw -Force
+
         Write-Host 'full triage pipeline (parse -> id -> ledger -> report -> gzip)'
         $r = Invoke-DumpTriage -DumpPath $placeholder -Dir $ki -IsOnline $false
         Check 'kept (collect or defer)'        ($r.Collect -in 'collect','defer')
@@ -78,6 +82,23 @@ try {
         # Compare resolved paths (the recorded path may be in 8.3 short form; the file is the same).
         $sampleReal = if ($sample -and (Test-Path -LiteralPath $sample)) { (Get-Item -LiteralPath $sample).FullName } else { $null }
         Check 'ledger sample is the .dmp.gz'   ($gz.Count -eq 1 -and $sampleReal -eq $gz[0].FullName)
+
+        # A recurrence of the SAME signature DROPS - but the dump must STILL be gzipped (never left raw) and
+        # marked '<dump>.handled' so the single delete path holds it for the grace window, not deleted here.
+        # The drop only fires once the id is FINAL (the managed Tier-2 walk pre-empts a drop to 'defer' while
+        # provisional), so assert when we truly get a drop and SKIP otherwise - same policy as the other checks.
+        Write-Host 'dropped recurrence is still gzipped + marked handled'
+        $ph2 = Join-Path $dumpDir ('ProcDump_{0}_powershell_pending_{1:yyyyMMdd_HHmmss}_2.dmp' -f $env:COMPUTERNAME, (Get-Date))
+        if (Test-Path -LiteralPath $savedRaw) {
+            Copy-Item -LiteralPath $savedRaw -Destination $ph2 -Force
+            $rd = Invoke-DumpTriage -DumpPath $ph2 -Dir $ki -IsOnline $false
+            if ($rd.Collect -eq 'drop') {
+                Check 'dropped placeholder consumed'      (-not (Test-Path -LiteralPath $ph2))
+                Check 'dropped dump gzipped at rest'      ("$($rd.KeptPath)" -match '\.dmp\.gz$' -and (Test-Path -LiteralPath $rd.KeptPath))
+                Check 'dropped .dmp.gz is marked handled' (Test-Path -LiteralPath ("$($rd.KeptPath)" + '.handled'))
+                Check 'dropped disposition is gz'         ($rd.Disposition -eq 'dropped-held-gz')
+            } else { Write-Host "  SKIP drop-gzip asserts - decision was '$($rd.Collect)' (id still provisional on this host)" -ForegroundColor Yellow }
+        } else { Write-Host '  SKIP drop-gzip check - no saved raw dump' -ForegroundColor Yellow }
 
         # --- the REAL ingest worker entrypoint: DumpTriage.ps1 -DumpDir, dry-run then real ---
         Write-Host 'ingest worker (DumpTriage.ps1 -DumpDir): dry-run then real'

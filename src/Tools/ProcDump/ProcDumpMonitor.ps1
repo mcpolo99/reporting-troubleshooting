@@ -120,8 +120,8 @@ function Get-DefaultConfig {
         KnownIssuesEnabled = $true      # identify each dump's stable fault id and dedupe already-seen problems
         SuppressKnown    = $true        # keep the FIRST dump of each id, count + DELETE later recurrences (first dump + count already capture it)
         BaselinePath     = ''           # optional: JSON of already-analysed ids to suppress even the first time (blank = installed baseline beside the script)
-        TelemetryEnabled = $true        # periodically forward events / sync known-sigs / upload new-signature dumps
-        TelemetrySeconds = 300          # how often the monitor flushes telemetry (when enabled)
+        TelemetrySendEnabled = $true    # SEND toggle ONLY: forward events / sync known-sigs / upload dumps to the backend. Local telemetry (build the event, write the outbox, record the ledger, gzip at rest) ALWAYS runs in ingest regardless of this.
+        TelemetrySeconds = 300          # how often the monitor flushes telemetry to the backend (when sending is enabled)
         # The ingest/registry/silo endpoints and the send-only device key are NOT config: they ship with the
         # build as an encoded blob (see Common\Telemetry.ps1 Get-TelemetryEndpoints), so they are not clear
         # text in config.json or the UI and need no manual per-machine step.
@@ -141,6 +141,11 @@ function Read-Config {
             $file = Get-Content $ConfigFile -Raw | ConvertFrom-Json
             foreach ($name in $cfg.PSObject.Properties.Name) {
                 if ($null -ne $file.$name) { $cfg.$name = $file.$name }
+            }
+            # Migrate the renamed send toggle: older config.json used 'TelemetryEnabled' for the SEND switch.
+            # If a machine had sending turned off, carry that forward so the rename never silently re-enables it.
+            if ($null -eq $file.TelemetrySendEnabled -and $null -ne $file.TelemetryEnabled) {
+                $cfg.TelemetrySendEnabled = [bool]$file.TelemetryEnabled
             }
         } catch {
             Write-Log "Config file unreadable, using defaults: $($_.Exception.Message)" 'WARN'
@@ -1233,9 +1238,10 @@ function Invoke-Monitor {
                 }
             }
 
-            # 3) Telemetry flush on its own timer (off unless enabled + endpoints configured). Detached, so
-            #    network egress never blocks the loop; forwards events, syncs known-sigs, uploads new-sig dumps.
-            if ($cfg.TelemetryEnabled -and ((Get-Date) - $lastTelemetry).TotalSeconds -ge $cfg.TelemetrySeconds) {
+            # 3) Telemetry SEND flush on its own timer (off unless sending is enabled + endpoints configured).
+            #    This gates ONLY network egress - the events/outbox/ledger were already built in ingest. Detached,
+            #    so the push never blocks the loop; forwards events, syncs known-sigs, uploads new-sig dumps.
+            if ($cfg.TelemetrySendEnabled -and ((Get-Date) - $lastTelemetry).TotalSeconds -ge $cfg.TelemetrySeconds) {
                 $lastTelemetry = Get-Date
                 Enqueue-Telemetry $cfg
             }
