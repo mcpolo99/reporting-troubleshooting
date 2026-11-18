@@ -76,7 +76,7 @@ function Show-MainWindow {
         Apps = 'Monitor'; DumpDir = 'Monitor'; CheckSeconds = 'Monitor'; CooldownSeconds = 'Monitor'
         DuplicateAction = 'Monitor'; DuplicateWindowSeconds = 'Monitor'; RunMode = 'Monitor'; TaskUser = 'Monitor'; HeadlessLauncher = 'Monitor'
         DumpDiskLimitGB = 'General'; DumpGraceSeconds = 'General'; CleanupSeconds = 'General'; KnownIssuesEnabled = 'General'; SuppressKnown = 'General'; WorkerPriority = 'General'
-        BaselinePath = 'General'; TelemetryEnabled = 'General'; TelemetrySeconds = 'General'; LogKeep = 'General'; LogMaxMB = 'General'
+        BaselinePath = 'General'; TelemetrySendEnabled = 'General'; TelemetrySeconds = 'General'; LogKeep = 'General'; LogMaxMB = 'General'
     }
 
     # PerfView safety: an ETW session started with 'PerfView start' keeps running after PerfView.exe exits,
@@ -189,11 +189,11 @@ function Show-MainWindow {
         $cfg = Read-Config; $task = Get-MonitorTask
         $state = if ($task) { $task.State } else { 'not enabled' }
         $tel = ''
-        if ($cfg.TelemetryEnabled) {
-            $ob = Join-Path $env:ProgramData 'ReportingTroubleshooting\Monitor\KnownIssues\outbox'
-            $pending = if (Test-Path $ob) { @(Get-ChildItem $ob -Filter *.json -File -ErrorAction SilentlyContinue).Count } else { 0 }
-            $tel = "  |  telemetry: $pending event(s) pending"
-        }
+        # The outbox is always written by ingest; show its depth whichever way sending is set, and flag when
+        # sending is OFF so a growing backlog is not mistaken for a stuck sender.
+        $ob = Join-Path $env:ProgramData 'ReportingTroubleshooting\Monitor\KnownIssues\outbox'
+        $pending = if (Test-Path $ob) { @(Get-ChildItem $ob -Filter *.json -File -ErrorAction SilentlyContinue).Count } else { 0 }
+        $tel = if ($cfg.TelemetrySendEnabled) { "  |  telemetry: $pending event(s) pending" } else { "  |  telemetry send OFF: $pending event(s) held locally" }
         "Task: $state  |  apps: $($cfg.Apps -join ', ')  |  dump budget: $($cfg.DumpDiskLimitGB) GB  |  dumps in $($cfg.DumpDir)$tel"
     }
     $script:RefreshPv  = [scriptblock]::Create("Start-ToolJob -Runspace `$script:RsPvCtl -Script { $($pvStatusSB.ToString()) }  -OnText `$script:SetPvStatus  | Out-Null")

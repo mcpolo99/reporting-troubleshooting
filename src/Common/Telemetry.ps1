@@ -13,7 +13,7 @@
 # The ingest/registry/silo endpoints and the send-only device key are NOT in config.json or the UI: they are
 # baked into the build as one encoded blob (Get-TelemetryEndpoints), so the URL/key are not clear text and do
 # not grep out of the files or repo. It is still only a public send-only ingest key - encoding just stops
-# trivial extraction. Only operational toggles stay in config: TelemetryEnabled / TelemetrySeconds, plus the
+# trivial extraction. Only operational toggles stay in config: TelemetrySendEnabled / TelemetrySeconds, plus the
 # machine's own DumpDir and local BaselinePath. If the blob is ever emptied, the endpoints fall back to local
 # files under KnownIssues, so the flow still runs offline.
 

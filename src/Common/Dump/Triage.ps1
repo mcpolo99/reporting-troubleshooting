@@ -79,8 +79,9 @@ function Invoke-DumpRetention {
 # =============================== TRIAGE (one dump) =====================
 # Full handling for one completed dump: read its signature, run the Tier-2 walk if the kind needs one, compute
 # the stable id, record it against the device ledger and get the COLLECT decision, ALWAYS emit one report, then
-# act on the decision - 'collect'/'defer' keep the gzipped bytes, 'drop' discards them (still reported). This is
-# the slow step (the walk opens the dump) - the monitor runs it in a DETACHED worker, never in its loop.
+# act on the decision. EVERY dump is gzipped at rest regardless of the decision; 'collect'/'defer' leave the
+# .dmp.gz unmarked (needed, awaits upload) while 'drop' marks it '<dump>.handled' (held for the delete timer).
+# This is the slow step (the walk opens the dump) - the monitor runs it in a DETACHED worker, never in its loop.
 # Returns @{ Collect; State; Reason; Id; Count; Kind; Leaf; Disposition; KeptPath; EventPath }.
 function Invoke-DumpTriage {
     param(
@@ -122,39 +123,41 @@ function Invoke-DumpTriage {
     $res.Leaf = if ($sig.Frames -and $sig.Frames.Count) { $sig.Frames[0] } elseif ($sig.Module) { '{0}+0x{1:x}' -f $sig.Module, $sig.Offset } else { '' }
 
     # Capture the RAW facts from the placeholder while it is still on disk (size + mtime always; sha only when we
-    # keep the bytes - never hash a multi-GB dump we are about to drop).
+    # keep the bytes for upload - a dropped dump is held compressed for the delete timer, not hashed).
     $rawBytes = -1; $rawMtime = $null; $rawSha = $null
     try { $pi = Get-Item -LiteralPath $DumpPath -ErrorAction Stop; $rawBytes = [long]$pi.Length; $rawMtime = $pi.LastWriteTimeUtc.ToString('o') } catch {}
     if ($res.Collect -ne 'drop') { $rawSha = Get-FileSha256 $DumpPath }
 
-    $emitPath = (Join-Path $dumpDir $restingName)   # logical final raw name; the flush resolves the .dmp.gz
-    if ($res.Collect -eq 'drop') {
-        # Reported, but the bytes are not needed (a recurrence, an already-uploaded id, or a known id). The engine
-        # no longer deletes here: it MARKS the dump processed where it lies (a '<dump>.handled' marker) and leaves
-        # it. The single delete path (Invoke-DumpRetention) removes it once it is older than the grace period (or
-        # sooner only if over the disk budget). The ingest pass skips any dump carrying a .handled marker, so a
-        # dropped dump is never re-triaged, and we never spend CPU gzipping a throwaway. Identical online/offline.
-        Set-DumpHandled -DumpPath $DumpPath -Reason ("drop:" + "$($res.Reason)")
-        $res.Disposition = 'dropped-held'; $res.KeptPath = $DumpPath; $emitPath = $DumpPath
-    } else {
-        # KEEP (collect/defer). Write the FINAL-named <...>.dmp.gz straight from the placeholder (rename + gzip in
-        # one), then delete the placeholder. A kept dump always lives compressed (~5x smaller). If the compressor
-        # is somehow unavailable or fails, keep the RAW placeholder in place (no rename -> no monitor re-triage).
-        $res.Disposition = 'kept'; $res.KeptPath = $DumpPath
-        if ((Get-Command Compress-DumpFile -ErrorAction SilentlyContinue) -and (Test-Path -LiteralPath $DumpPath)) {
-            $gz = Compress-DumpFile -SourcePath $DumpPath -DestPath $restingGz -Label $restingName -CancelFile $CancelFile
-            if ($gz.Ok) {
-                Remove-Item -LiteralPath $DumpPath -Force -ErrorAction SilentlyContinue
-                $res.Disposition = 'kept-gz'; $res.KeptPath = $restingGz; $emitPath = $restingGz
-            } else {
-                Add-DepGap 'gzip-at-rest' ("gzip of $([IO.Path]::GetFileName($DumpPath)) failed: $($gz.Error) - keeping raw placeholder") $Dir
-                $emitPath = $DumpPath
-                try { [void](Set-LedgerSample -Sig $res.Id -Sample $DumpPath -Dir $Dir) } catch {}   # sample stays the raw placeholder
-            }
+    # EVERY dump lives compressed at rest - ALWAYS gzip, whether it will be uploaded (needed) or only held for the
+    # delete timer (processed). Write the FINAL-named <...>.dmp.gz straight from the placeholder (rename + gzip
+    # folded into one), then delete the placeholder - the monitor's *.dmp scan only ever sees the placeholder
+    # vanish and a '.dmp.gz' appear (which it ignores). If the compressor is unavailable or fails, keep the RAW
+    # placeholder in place (no rename -> no monitor re-triage).
+    $res.KeptPath = $DumpPath; $emitPath = $DumpPath; $gzOk = $false
+    if ((Get-Command Compress-DumpFile -ErrorAction SilentlyContinue) -and (Test-Path -LiteralPath $DumpPath)) {
+        $gz = Compress-DumpFile -SourcePath $DumpPath -DestPath $restingGz -Label $restingName -CancelFile $CancelFile
+        if ($gz.Ok) {
+            Remove-Item -LiteralPath $DumpPath -Force -ErrorAction SilentlyContinue
+            $gzOk = $true; $res.KeptPath = $restingGz; $emitPath = $restingGz
         } else {
-            $emitPath = $DumpPath
-            try { [void](Set-LedgerSample -Sig $res.Id -Sample $DumpPath -Dir $Dir) } catch {}
+            Add-DepGap 'gzip-at-rest' ("gzip of $([IO.Path]::GetFileName($DumpPath)) failed: $($gz.Error) - keeping raw placeholder") $Dir
+            if ($res.Collect -ne 'drop') { try { [void](Set-LedgerSample -Sig $res.Id -Sample $DumpPath -Dir $Dir) } catch {} }   # kept sample stays the raw placeholder
         }
+    } elseif ($res.Collect -ne 'drop') {
+        try { [void](Set-LedgerSample -Sig $res.Id -Sample $DumpPath -Dir $Dir) } catch {}
+    }
+
+    if ($res.Collect -eq 'drop') {
+        # Reported, but the bytes are not needed (a recurrence, an already-uploaded id, or a known id). The dump is
+        # compressed like any other, then MARKED processed where it lies (a '<dump>.handled' marker). The single
+        # delete path (Invoke-DumpRetention) removes it once it is older than the grace period (or sooner only if
+        # over the disk budget). The ingest pass never re-triages a .dmp.gz. Identical online/offline.
+        Set-DumpHandled -DumpPath $res.KeptPath -Reason ("drop:" + "$($res.Reason)")
+        $res.Disposition = if ($gzOk) { 'dropped-held-gz' } else { 'dropped-held' }
+    } else {
+        # KEEP (collect/defer): left UNMARKED - a needed dump awaiting a grant/upload; the delete path never
+        # touches an unmarked dump.
+        $res.Disposition = if ($gzOk) { 'kept-gz' } else { 'kept' }
     }
 
     # ALWAYS emit one procdump-facts/v1 report, AFTER the dump reached its resting form, referencing that file.
