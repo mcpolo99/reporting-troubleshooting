@@ -38,6 +38,7 @@ $script:LogMaxMB = 5
 $script:LogCount = 0
 New-LogFile
 try { Remove-OldLogs 10 } catch {}
+Write-Log "Telemetry forwarder v$(Get-ToolkitVersion) starting."
 
 # Single instance. The monitor launches this forwarder on a timer; a slow flush (a big upload, or a long
 # offline retry sweep) must never let the next tick start a SECOND forwarder racing on the same outbox/dumps.
