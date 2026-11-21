@@ -13,10 +13,16 @@
       ...\PerfViewCapture.ps1 -Install
       ...\PerfViewCapture.ps1 -Start [-Profile Balanced] [-Label 6.0.0.222] [-Seconds 0]
       ...\PerfViewCapture.ps1 -Stop                    # stop the running capture (fires the stop event)
+      ...\PerfViewCapture.ps1 -Mark [-MarkText "froze on save"]   # drop a labeled search point into the running capture
       ...\PerfViewCapture.ps1 -Abort
       ...\PerfViewCapture.ps1 -Status
       ...\PerfViewCapture.ps1 -SendStopEvent           # same as -Stop: fires the stop event
       ...\PerfViewCapture.ps1 -Uninstall
+
+  MARKS are "search points" in a long trace: instead of starting/stopping exactly around a problem, run one
+  (circular) capture and -Mark each time you hit the issue. Each mark is a PerfViewLogger/Mark event with a
+  label + timestamp; in analysis, filter the Events view for "Mark" and jump to it. -Mark needs no admin and
+  runs while a capture blocks another console (like -Stop). The GUI adds a Mark button + a global hotkey.
 
   ONE capture model for every trace: -Start runs a single PerfView 'collect' that ALWAYS arms the stop
   event, so it can be stopped at any time with -Stop (or from the GUI, or by any process writing the
@@ -50,6 +56,8 @@ param(
     [switch]$Abort,
     [switch]$Status,
     [switch]$SendStopEvent,
+    [switch]$Mark,                   # drop a labeled 'search point' into the running capture (no admin)
+    [string]$MarkText,               # optional label for the mark; auto-numbered + timestamped when blank
     [switch]$Uninstall,
     [string]$Profile,
     [string]$Label,
@@ -163,6 +171,7 @@ function Get-DefaultConfig {
         LastLabel      = ''
         LogKeep        = 20
         LogMaxMB       = 10
+        MarkHotkey     = 'Ctrl+Alt+M'   # GUI global hotkey to drop a mark during a capture; blank = none
         Profiles       = Get-DefaultProfiles
     }
 }
@@ -421,6 +430,32 @@ function Send-StopEvent {
     if ($LASTEXITCODE -ne 0) { Write-Log "eventcreate returned $LASTEXITCODE." 'WARN' }
 }
 
+# =============================== MARK ===================================
+# Drop a labeled "search point" into the RUNNING capture. PerfView's own 'mark' verb emits a
+# PerfViewLogger/Mark event; the active collect always captures PerfView's logger, so the mark lands in the
+# ETL with the label + a timestamp (filter the Events view for "Mark" in analysis). It is a user-mode
+# EventSource write: NO admin, returns at once, and works from a SEPARATE process while a capture blocks its
+# own console - exactly like Stop-Trace. Marks are auto-numbered per capture via active.json so a blind
+# hotkey press still yields distinguishable points (mark 1, mark 2, ...).
+function Add-Mark([string]$Text) {
+    $active = Read-ActiveState
+    if (-not $active) { Write-Log 'No active capture to mark - start one first.' 'WARN'; return }
+    $n = 1 + [int]($active.MarkCount)
+    try { $active | Add-Member -NotePropertyName MarkCount -NotePropertyValue $n -Force; Save-ActiveState $active } catch {}
+    $note  = ("$Text" -replace '"', '').Trim()     # strip quotes so the label is one clean command-line token
+    $label = if ($note) { 'mark {0}: {1}' -f $n, $note } else { 'mark {0} @ {1:HH:mm:ss}' -f $n, (Get-Date) }
+    if (-not (Test-Path $PerfViewExe)) { Write-Log 'PerfView.exe not found - cannot mark.' 'ERROR'; return }
+    $pvLog  = Join-Path $LogDir ('PerfView_mark_{0:yyyyMMdd_HHmmss}.log' -f (Get-Date))
+    $argStr = '/AcceptEULA "/LogFile:{0}" mark "{1}"' -f $pvLog, $label
+    Write-Log "Mark $n : '$label'"
+    try {
+        $proc = Start-Process -FilePath $PerfViewExe -ArgumentList $argStr -NoNewWindow -PassThru -ErrorAction Stop
+        if (-not $proc.WaitForExit(15000)) { try { $proc.Kill() } catch {}; Write-Log "Mark '$label' did not return in time (is a capture running?)." 'WARN'; return }
+        if ($proc.ExitCode -eq 0) { Write-Log "Marked: '$label'" }
+        else { Write-Log "Mark '$label' returned exit $($proc.ExitCode) - is a capture running? (PerfView log: $pvLog)" 'WARN' }
+    } catch { Write-Log "Mark failed to launch PerfView: $($_.Exception.Message)" 'ERROR' }
+}
+
 # =============================== STATUS =================================
 function Get-LiveSession {
     try {
@@ -551,6 +586,7 @@ function Show-Menu {
         Write-Host ' 3) Status'
         Write-Host ' 4) Start capture      (pick profile, optional label, optional max seconds; 0 = until Stop)'
         Write-Host ' 5) Stop capture       (signal the stop event; it merges + zips and shows the output path)'
+        Write-Host ' 6) Mark point         (drop a labeled search point into the running capture)'
         Write-Host ' 7) Abort capture      (force-cancel a stuck/orphaned session, no data saved)'
         Write-Host ' 8) Open output folder'
         Write-Host ' U) Update PerfView to latest'
@@ -566,6 +602,10 @@ function Show-Menu {
                 Start-Trace $prof $label $secs
             }
             '5' { Stop-Trace }
+            '6' {
+                if (-not (Read-ActiveState)) { Write-Host 'No active capture - start one first (option 4).' -ForegroundColor Yellow }
+                else { Add-Mark (Read-Value 'Mark label (optional)' '') }
+            }
             '7' { Stop-Abort }
             '8' { if (Test-Path $cfg.OutputDir) { Start-Process explorer.exe $cfg.OutputDir } else { Write-Host 'Output folder does not exist yet.' } }
             'U' { $null = Install-PerfView -Force }
@@ -596,7 +636,7 @@ if ($env:RT_LIBRARY -eq '1') { return }
 
 # Starting / stopping / aborting a kernel ETW session, and installing, need admin. Status and the
 # stop-event helper do not, so don't force elevation just to read state.
-$needsAdmin = -not ($Status -or $SendStopEvent)
+$needsAdmin = -not ($Status -or $SendStopEvent -or $Mark)
 
 if ($ParamFile -and (Test-Path -LiteralPath $ParamFile)) {
     try {
@@ -627,7 +667,7 @@ if ($needsAdmin -and -not (Test-Admin) -and -not $ParamFile) {
     }
 }
 
-$unattended = $Install -or $Start -or $Stop -or $CollectTimed -or $Abort -or $Status -or $SendStopEvent -or $Uninstall
+$unattended = $Install -or $Start -or $Stop -or $Mark -or $CollectTimed -or $Abort -or $Status -or $SendStopEvent -or $Uninstall
 $script:EchoLog = -not $unattended
 New-LogFile
 Write-Log "Session (v$ScriptVersion) started by $env:USERDOMAIN\$env:USERNAME from $PSCommandPath"
@@ -638,6 +678,7 @@ Remove-OldLogs ([int]$cfgBoot.LogKeep)
 if     ($Install)       { $null = Install-PerfView }
 elseif ($Start)         { Start-Trace $Profile $Label $Seconds }   # -Seconds 0 (default) = until -Stop / event
 elseif ($Stop)          { Stop-Trace }
+elseif ($Mark)          { Add-Mark $MarkText }                     # labeled search point; no admin, like the stop event
 elseif ($CollectTimed)  { Start-Trace $Profile $Label $Seconds }   # same path; the stop event is always armed
 elseif ($Abort)         { Stop-Abort }
 elseif ($Status)        { Show-Status }

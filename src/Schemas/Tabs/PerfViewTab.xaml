@@ -19,6 +19,11 @@
       <Button x:Name="BtnPvStop"  Content="Stop"          Height="30" MinWidth="90"  Margin="0,0,8,0"/>
       <Button x:Name="BtnPvAbort" Content="Abort"         Height="30" MinWidth="80"/>
     </StackPanel>
+    <StackPanel Orientation="Horizontal" Margin="0,0,0,8">
+      <Button x:Name="BtnPvMark" Content="Mark point" Height="30" MinWidth="110" Margin="0,0,8,0"/>
+      <TextBox x:Name="TxtPvMark" Width="210" VerticalAlignment="Center" Margin="0,0,8,0"/>
+      <TextBlock x:Name="LblPvHotkey" Foreground="{DynamicResource AppIdColor}" VerticalAlignment="Center" TextWrapping="Wrap"/>
+    </StackPanel>
     <StackPanel Orientation="Horizontal" Margin="0,0,0,10">
       <Button x:Name="BtnPvOpen"   Content="Open output folder" Height="30" MinWidth="150" Margin="0,0,8,0"/>
       <Button x:Name="BtnPvStatus" Content="Refresh status"     Height="30" MinWidth="120"/>
