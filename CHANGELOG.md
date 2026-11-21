@@ -5,6 +5,13 @@ truth; each release is tagged `vX.Y.Z` and published as a GitHub release by `scr
 
 <!-- NEW RELEASES INSERTED BELOW -->
 
+## [v1.0.64] - 2026-11-21
+Changes since v1.0.63:
+
+### Features
+- add PerfView capture marks - search points via a Mark button and a global hotkey (1568f4b)
+
+
 ## [v1.0.63] - 2026-11-18
 Changes since v1.0.62:
 
@@ -530,6 +537,7 @@ Changes since v1.0.0:
 - WPF/XAML launcher (GUI default, `-CLI` text menu) with shared light/dark theme.
 - Shared components (logging, admin/signature/prompt/version helpers) under `src/Common`.
 - Bootstrap installer (`src/Get.ps1` + `src/run.bat`) with version check against GitHub.
+
 
 
 
