@@ -1,6 +1,14 @@
 # Builds and shows the main window; each tool's actions run in its own background runspace.
 function Show-MainWindow {
     Add-Type -AssemblyName PresentationFramework, System.Windows.Forms -ErrorAction Stop
+    # Win32 global hotkey (RegisterHotKey / WM_HOTKEY) so the PerfView 'mark' key works even when RT is not the
+    # focused window. Guarded: a second load in the same session throws, which is harmless.
+    try {
+        Add-Type -Namespace RtHotkey -Name Native -MemberDefinition @'
+[System.Runtime.InteropServices.DllImport("user32.dll", SetLastError=true)] public static extern bool RegisterHotKey(System.IntPtr hWnd, int id, uint fsModifiers, uint vk);
+[System.Runtime.InteropServices.DllImport("user32.dll", SetLastError=true)] public static extern bool UnregisterHotKey(System.IntPtr hWnd, int id);
+'@ -ErrorAction Stop
+    } catch {}
 
     # Force software rendering. On clean/VM/RDP/low-desktop-heap machines WPF's hardware composition
     # render target fails to allocate (HwndTarget.UpdateWindowSettings throws Win32 1816 "Not enough
@@ -40,7 +48,7 @@ function Show-MainWindow {
     # controls. Resolve every name across all of them.
     $findScopes = @($w) + @($script:TabPages.Values)
     foreach ($n in 'TxtOutput','LblBusy','LblVersion',
-                   'CmbPvProfile','TxtPvLabel','BtnPvStart','BtnPvStop','BtnPvAbort','TxtPvSeconds','BtnPvOpen','BtnPvStatus','LblPvStatus',
+                   'CmbPvProfile','TxtPvLabel','BtnPvStart','BtnPvStop','BtnPvAbort','TxtPvSeconds','BtnPvOpen','BtnPvStatus','LblPvStatus','BtnPvMark','TxtPvMark','LblPvHotkey',
                    'TxtPvProfName','PnlPvKernel','CmbPvClr','PnlPvProviders','TxtPvProvOther','TxtPvExtra','TxtPvCircular','TxtPvBuffer','BtnPvProfSave','BtnPvProfDelete','BtnPvProfDefault',
                    'TxtPvOutput','TxtPvSym','ChkPvMerge','ChkPvZip','BtnPvSettingsSave',
                    'BtnMonEnable','BtnMonStart','BtnMonStop','BtnMonStatus','BtnMonTestTelemetry','BtnMonForceFlush','BtnMonCollect','BtnMonDisable','LblMonStatus','BtnMonVerify','LblMonVerify','PnlCfgProcess','PnlCfgMonitor','PnlCfgGeneral','BtnMonSave','BtnMonReload','ChkMonTail','TxtMonLog','LblMonCompress','PbMonCompress',
@@ -56,6 +64,9 @@ function Show-MainWindow {
     # Second PerfView runspace for control actions (Stop/Abort/Status). A capture blocks RsPv for its whole
     # duration, so Stop (fire the event) and status must run here or they'd be stuck behind it.
     $script:RsPvCtl = New-ToolRunspace -ToolPath $script:ToolPerfViewPath -Load
+    # Dedicated runspace for marks so a quick mark (button or global hotkey) never contends with a Stop/Abort/
+    # Status already running on RsPvCtl - each fires its own labeled search point into the live capture.
+    $script:RsPvMark = New-ToolRunspace -ToolPath $script:ToolPerfViewPath -Load
     $script:RsMon = New-ToolRunspace -ToolPath $script:ToolMonitorPath  -Load
     $script:RsPkg = New-ToolRunspace -ToolPath $script:ToolPackagesPath -Load
     $script:RsUpd = New-ToolRunspace    # plain runspace for the lightweight GitHub update check (off the Pkg runspace)
@@ -93,6 +104,64 @@ function Show-MainWindow {
             }
         } catch {}
         Remove-Item $script:PvActiveFile -Force -ErrorAction SilentlyContinue
+    }
+
+    # ---------- PerfView mark hotkey (global) ----------
+    # Parse a combo like "Ctrl+Alt+M" into Win32 RegisterHotKey modifiers + virtual-key code. A-Z / 0-9 map to
+    # their ASCII value (= the VK code); F1..F12 are supported too. MOD_NOREPEAT (0x4000) stops auto-repeat
+    # from flooding marks when the key is held. Vk=0 means the combo had no usable key.
+    function script:ConvertTo-HotkeySpec([string]$combo) {
+        $mods = 0; $vk = 0
+        foreach ($raw in ("$combo" -split '\+')) {
+            $part = $raw.Trim()
+            switch -Regex ($part.ToLower()) {
+                '^(ctrl|control)$' { $mods = $mods -bor 0x2 }
+                '^alt$'            { $mods = $mods -bor 0x1 }
+                '^shift$'          { $mods = $mods -bor 0x4 }
+                '^(win|windows)$'  { $mods = $mods -bor 0x8 }
+                '^$'               { }
+                default {
+                    $k = $part.ToUpper()
+                    if ($k.Length -eq 1 -and $k -match '[A-Z0-9]') { $vk = [int][char]$k }
+                    elseif ($k -match '^F([1-9]|1[0-2])$')         { $vk = 0x70 + [int]$k.Substring(1) - 1 }
+                }
+            }
+        }
+        if ($vk) { $mods = $mods -bor 0x4000 }   # MOD_NOREPEAT
+        return @{ Mods = $mods; Vk = $vk }
+    }
+
+    # Register the global mark hotkey on the main window's HWND and route WM_HOTKEY (0x0312) to a mark. Called
+    # from SourceInitialized (the HWND exists by then). Failure is non-fatal - the Mark button still works.
+    function script:Register-PvHotkey {
+        try {
+            if ([string]::IsNullOrWhiteSpace($script:PvMarkHotkey)) { return }
+            $spec = script:ConvertTo-HotkeySpec $script:PvMarkHotkey
+            if (-not $spec.Vk) { & $script:Append "PerfView: mark hotkey '$($script:PvMarkHotkey)' not understood - use the Mark button."; return }
+            $helper = New-Object System.Windows.Interop.WindowInteropHelper($script:MainWin)
+            $script:PvHwnd     = $helper.Handle
+            $script:PvHotkeyId = 0xB001
+            $src = [System.Windows.Interop.HwndSource]::FromHwnd($script:PvHwnd)
+            if (-not $src) { return }
+            $script:PvHotkeyHook = [System.Windows.Interop.HwndSourceHook]{
+                param($hwnd, $msg, $wParam, $lParam, $handled)
+                if ($msg -eq 0x0312 -and $wParam.ToInt32() -eq $script:PvHotkeyId) {
+                    try { script:Fire-PvMark '' } catch {}
+                    $handled.Value = $true
+                }
+                return [IntPtr]::Zero
+            }
+            $src.AddHook($script:PvHotkeyHook)
+            if ([RtHotkey.Native]::RegisterHotKey($script:PvHwnd, $script:PvHotkeyId, [uint32]$spec.Mods, [uint32]$spec.Vk)) {
+                & $script:Append "PerfView: mark hotkey $($script:PvMarkHotkey) active (press it anywhere while capturing)."
+            } else {
+                & $script:Append "PerfView: could not register mark hotkey $($script:PvMarkHotkey) (another app may own it) - use the Mark button."
+            }
+        } catch { & $script:Append "PerfView: mark hotkey setup failed: $($_.Exception.Message)" }
+    }
+
+    function script:Unregister-PvHotkey {
+        try { if ($script:PvHwnd -and $script:PvHotkeyId) { [void][RtHotkey.Native]::UnregisterHotKey($script:PvHwnd, $script:PvHotkeyId) } } catch {}
     }
 
     # live tail of the background monitor's newest log
@@ -241,6 +310,8 @@ function Show-MainWindow {
         $script:TxtPvSym.Text    = [string]$c.SymbolPath
         $script:ChkPvMerge.IsChecked = [bool]$c.Merge
         $script:ChkPvZip.IsChecked   = [bool]$c.Zip
+        $script:PvMarkHotkey = "$($c.MarkHotkey)".Trim()
+        $script:LblPvHotkey.Text = if ($script:PvMarkHotkey) { "mark hotkey: $($script:PvMarkHotkey)  -  works anywhere while capturing" } else { 'mark hotkey: none set (edit MarkHotkey in config.json)' }
         script:Load-PvProfileFields ([string]$script:CmbPvProfile.SelectedItem)
     }
 
@@ -263,6 +334,24 @@ function Show-MainWindow {
     $script:BtnPvAbort.Add_Click({
         & $script:Append 'PerfView: abort (force-cancel, no data saved)...'
         Start-ToolJob -Runspace $script:RsPvCtl -Script { Stop-Abort } -OnText $script:Append -OnDone $script:RefreshPv | Out-Null
+    })
+    # Drop a labeled 'search point' into the running capture (button or global hotkey). Fires Add-Mark on the
+    # dedicated RsPvMark runspace (never blocks, never contends with Stop/Abort), with an in-flight gate so a
+    # rapid double-press is ignored rather than colliding on the runspace. A system sound confirms the press
+    # even when another app is focused.
+    function script:Fire-PvMark([string]$note) {
+        if (-not (Test-Path $script:PvActiveFile)) { & $script:Append 'PerfView: no capture running - start one before marking.'; return }
+        if ($script:PvMarkInFlight) { & $script:Append 'PerfView: mark still registering - press ignored (try again in a moment).'; return }
+        $script:PvMarkInFlight = $true
+        & $script:Append ('PerfView: mark' + $(if ($note) { " '$note'" } else { '' }) + '...')
+        try { [System.Media.SystemSounds]::Asterisk.Play() } catch {}
+        $done = { $script:PvMarkInFlight = $false; & $script:RefreshPv }
+        Start-ToolJob -Runspace $script:RsPvMark -Script { param($t) Add-Mark $t } -ArgList @($note) -OnText $script:Append -OnDone $done | Out-Null
+    }
+    $script:BtnPvMark.Add_Click({
+        $note = [string]$script:TxtPvMark.Text
+        script:Fire-PvMark $note
+        $script:TxtPvMark.Clear()
     })
     $script:BtnPvOpen.Add_Click({ script:Invoke-Action 'Pv' $script:RsPv { $cfg = Read-Config; if (Test-Path $cfg.OutputDir) { Start-Process explorer.exe $cfg.OutputDir; 'opened output folder' } else { 'output folder does not exist yet' } } @() $null })
     $script:BtnPvStatus.Add_Click({ & $script:RefreshPv })
@@ -795,8 +884,12 @@ function Show-MainWindow {
     [System.AppDomain]::CurrentDomain.add_UnhandledException({ script:Stop-PerfViewHard })
     [System.AppDomain]::CurrentDomain.add_ProcessExit({ script:Stop-PerfViewHard })
 
+    # Register the global mark hotkey once the window has an HWND (SourceInitialized fires inside ShowDialog).
+    $w.Add_SourceInitialized({ script:Register-PvHotkey })
+
     $w.Add_Closed({
         $timer.Stop()
+        script:Unregister-PvHotkey
         try {
             # Graceful close with a capture running: signal the stop event so PerfView finalizes (merge+zip)
             # on its own - the collect is an independent process and finishes after we exit. Only fall back
@@ -805,7 +898,7 @@ function Show-MainWindow {
                 Invoke-ToolSync -Runspace $script:RsPvCtl -Script { Send-StopEvent } | Out-Null
             }
         } catch { script:Stop-PerfViewHard }
-        foreach ($rs in @($script:RsPv, $script:RsPvCtl, $script:RsMon, $script:RsPkg, $script:RsUpd)) { try { $rs.Close() } catch {} }
+        foreach ($rs in @($script:RsPv, $script:RsPvCtl, $script:RsPvMark, $script:RsMon, $script:RsPkg, $script:RsUpd)) { try { $rs.Close() } catch {} }
     })
 
     $script:MainWin = $w
