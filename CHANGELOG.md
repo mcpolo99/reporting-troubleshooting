@@ -5,6 +5,13 @@ truth; each release is tagged `vX.Y.Z` and published as a GitHub release by `scr
 
 <!-- NEW RELEASES INSERTED BELOW -->
 
+## [v1.0.65] - 2026-11-21
+Changes since v1.0.64:
+
+### Fixes
+- make the PerfView mark hotkey a true global override (low-level keyboard hook) (b3f7380)
+
+
 ## [v1.0.64] - 2026-11-21
 Changes since v1.0.63:
 
@@ -537,6 +544,7 @@ Changes since v1.0.0:
 - WPF/XAML launcher (GUI default, `-CLI` text menu) with shared light/dark theme.
 - Shared components (logging, admin/signature/prompt/version helpers) under `src/Common`.
 - Bootstrap installer (`src/Get.ps1` + `src/run.bat`) with version check against GitHub.
+
 
 
 
