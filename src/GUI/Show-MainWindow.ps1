@@ -1,12 +1,60 @@
 # Builds and shows the main window; each tool's actions run in its own background runspace.
 function Show-MainWindow {
     Add-Type -AssemblyName PresentationFramework, System.Windows.Forms -ErrorAction Stop
-    # Win32 global hotkey (RegisterHotKey / WM_HOTKEY) so the PerfView 'mark' key works even when RT is not the
-    # focused window. Guarded: a second load in the same session throws, which is harmless.
+    # Global mark hotkey via a LOW-LEVEL keyboard hook (WH_KEYBOARD_LL), not RegisterHotKey. RegisterHotKey
+    # silently loses to any app that already owns the combo, and on a European layout Ctrl+Alt is AltGr, so the
+    # focused app eats Ctrl+Alt+<key> first - which is exactly why pressing it while clicking in another program
+    # recorded nothing. A low-level hook sees every keystroke system-wide BEFORE any app, can't fail to
+    # register, and can SWALLOW the chord so the foreground app never sees it. The chord detection runs in
+    # compiled code (fast per keystroke; a slow hook gets dropped by Windows); PowerShell only supplies the
+    # OnMark callback and toggles Active. Swallowing is gated on Active (a capture is running), so the key is a
+    # pure pass-through at all other times. Guarded: a second load in the session throws, which is harmless.
     try {
-        Add-Type -Namespace RtHotkey -Name Native -MemberDefinition @'
-[System.Runtime.InteropServices.DllImport("user32.dll", SetLastError=true)] public static extern bool RegisterHotKey(System.IntPtr hWnd, int id, uint fsModifiers, uint vk);
-[System.Runtime.InteropServices.DllImport("user32.dll", SetLastError=true)] public static extern bool UnregisterHotKey(System.IntPtr hWnd, int id);
+        Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+namespace RtHook {
+  public static class Hook {
+    public delegate IntPtr LowLevelKeyboardProc(int nCode, IntPtr wParam, IntPtr lParam);
+    [DllImport("user32.dll", SetLastError=true)] static extern IntPtr SetWindowsHookEx(int idHook, LowLevelKeyboardProc lpfn, IntPtr hMod, uint dwThreadId);
+    [DllImport("user32.dll", SetLastError=true)] static extern bool UnhookWindowsHookEx(IntPtr hhk);
+    [DllImport("user32.dll")] static extern IntPtr CallNextHookEx(IntPtr hhk, int nCode, IntPtr wParam, IntPtr lParam);
+    [DllImport("kernel32.dll", SetLastError=true)] static extern IntPtr GetModuleHandle(string name);
+    [DllImport("user32.dll")] static extern short GetAsyncKeyState(int vKey);
+
+    public static int  TargetVk;
+    public static bool NeedCtrl, NeedAlt, NeedShift, NeedWin;
+    public static bool Active;          // set by the UI: true only while a capture is running
+    public static Action OnMark;        // set by the UI: fires a mark
+    static IntPtr _hook = IntPtr.Zero;
+    static readonly LowLevelKeyboardProc _proc = Callback;   // kept alive by this static field
+
+    public static bool Install()  { if (_hook == IntPtr.Zero) _hook = SetWindowsHookEx(13, _proc, GetModuleHandle(null), 0); return _hook != IntPtr.Zero; }
+    public static void Uninstall(){ if (_hook != IntPtr.Zero) { UnhookWindowsHookEx(_hook); _hook = IntPtr.Zero; } }
+
+    static bool Down(int vk) { return (GetAsyncKeyState(vk) & 0x8000) != 0; }
+    static bool ModsHeld() {
+      if (NeedCtrl  && !Down(0x11)) return false;                 // VK_CONTROL
+      if (NeedAlt   && !Down(0x12)) return false;                 // VK_MENU (Alt / AltGr)
+      if (NeedShift && !Down(0x10)) return false;                 // VK_SHIFT
+      if (NeedWin   && !(Down(0x5B) || Down(0x5C))) return false; // VK_LWIN / VK_RWIN
+      return true;
+    }
+    static IntPtr Callback(int nCode, IntPtr wParam, IntPtr lParam) {
+      if (nCode >= 0) {
+        int msg = wParam.ToInt32();
+        if (msg == 0x100 || msg == 0x104) {                       // WM_KEYDOWN / WM_SYSKEYDOWN
+          int vk = Marshal.ReadInt32(lParam);
+          if (vk == TargetVk && Active && ModsHeld()) {
+            var cb = OnMark; if (cb != null) { try { cb(); } catch {} }
+            return (IntPtr)1;                                     // swallow: override the foreground app
+          }
+        }
+      }
+      return CallNextHookEx(IntPtr.Zero, nCode, wParam, lParam);
+    }
+  }
+}
 '@ -ErrorAction Stop
     } catch {}
 
@@ -107,9 +155,9 @@ function Show-MainWindow {
     }
 
     # ---------- PerfView mark hotkey (global) ----------
-    # Parse a combo like "Ctrl+Alt+M" into Win32 RegisterHotKey modifiers + virtual-key code. A-Z / 0-9 map to
-    # their ASCII value (= the VK code); F1..F12 are supported too. MOD_NOREPEAT (0x4000) stops auto-repeat
-    # from flooding marks when the key is held. Vk=0 means the combo had no usable key.
+    # Parse a combo like "Ctrl+Alt+M" into a modifier bitmask (0x1 Alt, 0x2 Ctrl, 0x4 Shift, 0x8 Win) + the
+    # virtual-key code the low-level hook watches for. A-Z / 0-9 map to their ASCII value (= the VK code);
+    # F1..F12 are supported too. Vk=0 means the combo had no usable key.
     function script:ConvertTo-HotkeySpec([string]$combo) {
         $mods = 0; $vk = 0
         foreach ($raw in ("$combo" -split '\+')) {
@@ -127,41 +175,38 @@ function Show-MainWindow {
                 }
             }
         }
-        if ($vk) { $mods = $mods -bor 0x4000 }   # MOD_NOREPEAT
         return @{ Mods = $mods; Vk = $vk }
     }
 
-    # Register the global mark hotkey on the main window's HWND and route WM_HOTKEY (0x0312) to a mark. Called
-    # from SourceInitialized (the HWND exists by then). Failure is non-fatal - the Mark button still works.
+    # Arm the global mark key via the low-level keyboard hook: load the chord into the compiled hook, point its
+    # OnMark callback at Fire-PvMark, and install it. Called from SourceInitialized. Failure is non-fatal - the
+    # Mark button still works. The hook only swallows/fires while Active (set from the timer when a capture is
+    # running), so the key is a pure pass-through otherwise.
     function script:Register-PvHotkey {
         try {
             if ([string]::IsNullOrWhiteSpace($script:PvMarkHotkey)) { return }
+            if (-not ('RtHook.Hook' -as [type])) { & $script:Append 'PerfView: mark hotkey hook unavailable on this host - use the Mark button.'; return }
             $spec = script:ConvertTo-HotkeySpec $script:PvMarkHotkey
             if (-not $spec.Vk) { & $script:Append "PerfView: mark hotkey '$($script:PvMarkHotkey)' not understood - use the Mark button."; return }
-            $helper = New-Object System.Windows.Interop.WindowInteropHelper($script:MainWin)
-            $script:PvHwnd     = $helper.Handle
-            $script:PvHotkeyId = 0xB001
-            $src = [System.Windows.Interop.HwndSource]::FromHwnd($script:PvHwnd)
-            if (-not $src) { return }
-            $script:PvHotkeyHook = [System.Windows.Interop.HwndSourceHook]{
-                param($hwnd, $msg, $wParam, $lParam, $handled)
-                if ($msg -eq 0x0312 -and $wParam.ToInt32() -eq $script:PvHotkeyId) {
-                    try { script:Fire-PvMark '' } catch {}
-                    $handled.Value = $true
-                }
-                return [IntPtr]::Zero
-            }
-            $src.AddHook($script:PvHotkeyHook)
-            if ([RtHotkey.Native]::RegisterHotKey($script:PvHwnd, $script:PvHotkeyId, [uint32]$spec.Mods, [uint32]$spec.Vk)) {
-                & $script:Append "PerfView: mark hotkey $($script:PvMarkHotkey) active (press it anywhere while capturing)."
+            [RtHook.Hook]::TargetVk  = [int]$spec.Vk
+            [RtHook.Hook]::NeedCtrl  = ($spec.Mods -band 0x2) -ne 0
+            [RtHook.Hook]::NeedAlt   = ($spec.Mods -band 0x1) -ne 0
+            [RtHook.Hook]::NeedShift = ($spec.Mods -band 0x4) -ne 0
+            [RtHook.Hook]::NeedWin   = ($spec.Mods -band 0x8) -ne 0
+            [RtHook.Hook]::Active    = [bool](Test-Path $script:PvActiveFile)
+            # Keep a reference so the delegate isn't collected; it marshals the compiled hook's callback to Fire-PvMark.
+            $script:PvMarkAction = [Action]{ try { script:Fire-PvMark '' } catch {} }
+            [RtHook.Hook]::OnMark = $script:PvMarkAction
+            if ([RtHook.Hook]::Install()) {
+                & $script:Append "PerfView: mark hotkey $($script:PvMarkHotkey) armed globally - it overrides other apps while a capture is running."
             } else {
-                & $script:Append "PerfView: could not register mark hotkey $($script:PvMarkHotkey) (another app may own it) - use the Mark button."
+                & $script:Append "PerfView: failed to install the mark hotkey hook - use the Mark button."
             }
         } catch { & $script:Append "PerfView: mark hotkey setup failed: $($_.Exception.Message)" }
     }
 
     function script:Unregister-PvHotkey {
-        try { if ($script:PvHwnd -and $script:PvHotkeyId) { [void][RtHotkey.Native]::UnregisterHotKey($script:PvHwnd, $script:PvHotkeyId) } } catch {}
+        try { if ('RtHook.Hook' -as [type]) { [RtHook.Hook]::Active = $false; [RtHook.Hook]::OnMark = $null; [RtHook.Hook]::Uninstall() } } catch {}
     }
 
     # live tail of the background monitor's newest log
@@ -872,7 +917,12 @@ function Show-MainWindow {
             Update-ToolJobs
             $script:LblBusy.Text = if (Test-ToolJobsBusy) { 'Working...' } else { 'Ready' }
             $script:TailCounter++
-            if ($script:TailCounter % 5 -eq 0) { script:Update-MonTail; script:Update-CompressionProgress }   # ~1s cadence
+            if ($script:TailCounter % 5 -eq 0) {
+                script:Update-MonTail; script:Update-CompressionProgress   # ~1s cadence
+                # Tell the global mark hook whether a capture is live, so Ctrl+Alt+M only overrides other apps
+                # (swallows the key + fires a mark) while a trace is actually running.
+                try { if ('RtHook.Hook' -as [type]) { [RtHook.Hook]::Active = [bool](Test-Path $script:PvActiveFile) } } catch {}
+            }
         } catch { & $script:Append "Timer error: $($_.Exception.Message)" }
     })
     $timer.Start()
