@@ -37,6 +37,10 @@
         <TextBlock Text="Name" Foreground="{DynamicResource AppFgColor}" VerticalAlignment="Center" Width="110"/>
         <TextBox x:Name="TxtPvProfName" Width="300"/>
       </StackPanel>
+      <StackPanel Orientation="Horizontal" Margin="0,2">
+        <TextBlock Text="Description" Foreground="{DynamicResource AppFgColor}" VerticalAlignment="Center" Width="110"/>
+        <TextBox x:Name="TxtPvProfDesc" Width="430"/>
+      </StackPanel>
 
       <TextBlock Text="Kernel events" Foreground="{DynamicResource AppFgColor}" Margin="0,8,0,2"/>
       <WrapPanel x:Name="PnlPvKernel" Margin="0,0,0,4"/>
@@ -73,14 +77,29 @@
     <TextBlock Text="Global settings" Foreground="{DynamicResource AppFgColor}" FontWeight="SemiBold" Margin="0,0,0,8"/>
     <Grid Margin="0,0,0,8">
       <Grid.ColumnDefinitions><ColumnDefinition Width="110"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
-      <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
+      <Grid.RowDefinitions>
+        <RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/>
+        <RowDefinition Height="Auto"/><RowDefinition Height="Auto"/>
+      </Grid.RowDefinitions>
       <TextBlock Grid.Row="0" Grid.Column="0" Text="OutputDir"  Foreground="{DynamicResource AppFgColor}" VerticalAlignment="Center" Margin="0,2"/>
       <TextBox   Grid.Row="0" Grid.Column="1" x:Name="TxtPvOutput" Margin="0,2"/>
       <TextBlock Grid.Row="1" Grid.Column="0" Text="SymbolPath" Foreground="{DynamicResource AppFgColor}" VerticalAlignment="Center" Margin="0,2"/>
       <TextBox   Grid.Row="1" Grid.Column="1" x:Name="TxtPvSym" Margin="0,2"/>
-      <StackPanel Grid.Row="2" Grid.Column="1" Orientation="Horizontal" Margin="0,4,0,0">
+      <TextBlock Grid.Row="2" Grid.Column="0" Text="Mark hotkey" Foreground="{DynamicResource AppFgColor}" VerticalAlignment="Center" Margin="0,2"/>
+      <StackPanel Grid.Row="2" Grid.Column="1" Orientation="Horizontal" Margin="0,2">
+        <TextBox x:Name="TxtPvHotkey" Width="150" VerticalAlignment="Center"/>
+        <TextBlock Text="e.g. Ctrl+Alt+M  (blank = none)" Foreground="{DynamicResource AppIdColor}" VerticalAlignment="Center" Margin="10,0,0,0"/>
+      </StackPanel>
+      <StackPanel Grid.Row="3" Grid.Column="1" Orientation="Horizontal" Margin="0,4,0,0">
         <CheckBox x:Name="ChkPvMerge" Content="Merge on stop" Foreground="{DynamicResource AppFgColor}" Margin="0,0,16,0"/>
         <CheckBox x:Name="ChkPvZip"   Content="Zip on stop"   Foreground="{DynamicResource AppFgColor}"/>
+      </StackPanel>
+      <TextBlock Grid.Row="4" Grid.Column="0" Text="Logs" Foreground="{DynamicResource AppFgColor}" VerticalAlignment="Center" Margin="0,4,0,0"/>
+      <StackPanel Grid.Row="4" Grid.Column="1" Orientation="Horizontal" Margin="0,4,0,0">
+        <TextBlock Text="Keep" Foreground="{DynamicResource AppFgColor}" VerticalAlignment="Center" Margin="0,0,6,0"/>
+        <TextBox x:Name="TxtPvLogKeep" Width="60" VerticalAlignment="Center" Margin="0,0,16,0"/>
+        <TextBlock Text="Max MB / file" Foreground="{DynamicResource AppFgColor}" VerticalAlignment="Center" Margin="0,0,6,0"/>
+        <TextBox x:Name="TxtPvLogMax" Width="60" VerticalAlignment="Center"/>
       </StackPanel>
     </Grid>
     <Button x:Name="BtnPvSettingsSave" Content="Save settings" Height="28" MinWidth="110" HorizontalAlignment="Left"/>

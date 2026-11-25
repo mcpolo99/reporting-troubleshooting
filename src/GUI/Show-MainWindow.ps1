@@ -97,8 +97,8 @@ namespace RtHook {
     $findScopes = @($w) + @($script:TabPages.Values)
     foreach ($n in 'TxtOutput','LblBusy','LblVersion',
                    'CmbPvProfile','TxtPvLabel','BtnPvStart','BtnPvStop','BtnPvAbort','TxtPvSeconds','BtnPvOpen','BtnPvStatus','LblPvStatus','BtnPvMark','TxtPvMark','LblPvHotkey',
-                   'TxtPvProfName','PnlPvKernel','CmbPvClr','PnlPvProviders','TxtPvProvOther','TxtPvExtra','TxtPvCircular','TxtPvBuffer','BtnPvProfSave','BtnPvProfDelete','BtnPvProfDefault',
-                   'TxtPvOutput','TxtPvSym','ChkPvMerge','ChkPvZip','BtnPvSettingsSave',
+                   'TxtPvProfName','TxtPvProfDesc','PnlPvKernel','CmbPvClr','PnlPvProviders','TxtPvProvOther','TxtPvExtra','TxtPvCircular','TxtPvBuffer','BtnPvProfSave','BtnPvProfDelete','BtnPvProfDefault',
+                   'TxtPvOutput','TxtPvSym','TxtPvHotkey','TxtPvLogKeep','TxtPvLogMax','ChkPvMerge','ChkPvZip','BtnPvSettingsSave',
                    'BtnMonEnable','BtnMonStart','BtnMonStop','BtnMonStatus','BtnMonTestTelemetry','BtnMonForceFlush','BtnMonCollect','BtnMonDisable','LblMonStatus','BtnMonVerify','LblMonVerify','PnlCfgProcess','PnlCfgMonitor','PnlCfgGeneral','BtnMonSave','BtnMonReload','ChkMonTail','TxtMonLog','LblMonCompress','PbMonCompress',
                    'BtnPkgInstallAll','BtnPkgRefresh','BtnPkgOpen','BtnPkgUpdate','LblPkgUpdate','PnlPackages','LblPkgStatus',
                    'BtnShortcut') {
@@ -330,6 +330,7 @@ namespace RtHook {
         $p = $script:PvProfiles | Where-Object { $_.Name -ieq $name } | Select-Object -First 1
         if (-not $p) { return }
         $script:TxtPvProfName.Text = [string]$p.Name
+        $script:TxtPvProfDesc.Text = [string]$p.Description
         $kset = @(($p.KernelEvents -split ',') | ForEach-Object { $_.Trim() } | Where-Object { $_ })
         foreach ($k in $script:PvKernelKeywords) { $script:PvKernelChecks[$k].IsChecked = ($kset -contains $k) }
         $script:CmbPvClr.Text = [string]$p.ClrEvents
@@ -351,12 +352,15 @@ namespace RtHook {
         $idx = $script:CmbPvProfile.Items.IndexOf([string]$c.DefaultProfile); if ($idx -lt 0) { $idx = 0 }
         if ($script:CmbPvProfile.Items.Count) { $script:CmbPvProfile.SelectedIndex = $idx }
         $script:PvLoading = $false
-        $script:TxtPvOutput.Text = [string]$c.OutputDir
-        $script:TxtPvSym.Text    = [string]$c.SymbolPath
+        $script:TxtPvOutput.Text   = [string]$c.OutputDir
+        $script:TxtPvSym.Text      = [string]$c.SymbolPath
+        $script:TxtPvHotkey.Text   = "$($c.MarkHotkey)".Trim()
+        $script:TxtPvLogKeep.Text  = "$($c.LogKeep)"
+        $script:TxtPvLogMax.Text   = "$($c.LogMaxMB)"
         $script:ChkPvMerge.IsChecked = [bool]$c.Merge
         $script:ChkPvZip.IsChecked   = [bool]$c.Zip
         $script:PvMarkHotkey = "$($c.MarkHotkey)".Trim()
-        $script:LblPvHotkey.Text = if ($script:PvMarkHotkey) { "mark hotkey: $($script:PvMarkHotkey)  -  works anywhere while capturing" } else { 'mark hotkey: none set (edit MarkHotkey in config.json)' }
+        $script:LblPvHotkey.Text = if ($script:PvMarkHotkey) { "mark hotkey: $($script:PvMarkHotkey)  -  works anywhere while capturing" } else { 'mark hotkey: none set (set it in Global settings below)' }
         script:Load-PvProfileFields ([string]$script:CmbPvProfile.SelectedItem)
     }
 
@@ -407,18 +411,18 @@ namespace RtHook {
         $provChecked = @($script:PvProviderPresets | Where-Object { $script:PvProviderChecks[$_].IsChecked })
         $provOther   = @(($script:TxtPvProvOther.Text -split ',') | ForEach-Object { $_.Trim() } | Where-Object { $_ })
         $providers = (@($provChecked + $provOther) -join ',')
-        $vals = @($script:TxtPvProfName.Text, $kernel, $script:CmbPvClr.Text, $providers, $script:TxtPvExtra.Text, $script:TxtPvCircular.Text, $script:TxtPvBuffer.Text)
+        $vals = @($script:TxtPvProfName.Text, $kernel, $script:CmbPvClr.Text, $providers, $script:TxtPvExtra.Text, $script:TxtPvCircular.Text, $script:TxtPvBuffer.Text, $script:TxtPvProfDesc.Text)
         if (-not $vals[0]) { & $script:Append 'Enter a profile name first.'; return }
         & $script:Append "PerfView: save profile '$($vals[0])'..."
         script:Invoke-Action 'Pv' $script:RsPv {
-            param($name,$kernel,$clr,$prov,$extra,$circ,$buf)
+            param($name,$kernel,$clr,$prov,$extra,$circ,$buf,$desc)
             $cfg = Read-Config
             $p = $cfg.Profiles | Where-Object { $_.Name -ieq $name } | Select-Object -First 1
             if (-not $p) {
                 $p = [pscustomobject]@{ Name=$name; Description=''; KernelEvents=''; ClrEvents=''; Providers=''; CircularMB=2048; BufferSizeMB=1024; ExtraArgs='' }
                 $cfg.Profiles = @($cfg.Profiles) + $p
             }
-            $p.Name = $name; $p.KernelEvents = $kernel; $p.ClrEvents = $clr; $p.Providers = $prov; $p.ExtraArgs = $extra
+            $p.Name = $name; $p.Description = $desc; $p.KernelEvents = $kernel; $p.ClrEvents = $clr; $p.Providers = $prov; $p.ExtraArgs = $extra
             $ci = 0; if ([int]::TryParse("$circ", [ref]$ci) -and $ci -ge 0) { $p.CircularMB = $ci }
             $bi = 0; if ([int]::TryParse("$buf", [ref]$bi) -and $bi -ge 1) { $p.BufferSizeMB = $bi }
             Save-Config $cfg; "profile '$name' saved"
@@ -443,14 +447,25 @@ namespace RtHook {
         script:Invoke-Action 'Pv' $script:RsPv { param($name) $cfg = Read-Config; $cfg.DefaultProfile = $name; Save-Config $cfg; "default profile = $name" } @($name) $reloadPv
     })
     $script:BtnPvSettingsSave.Add_Click({
-        $vals = @($script:TxtPvOutput.Text, $script:TxtPvSym.Text, $(if ($script:ChkPvMerge.IsChecked) { 'true' } else { 'false' }), $(if ($script:ChkPvZip.IsChecked) { 'true' } else { 'false' }))
+        $hot = ([string]$script:TxtPvHotkey.Text).Trim()
+        $vals = @($script:TxtPvOutput.Text, $script:TxtPvSym.Text,
+                  $(if ($script:ChkPvMerge.IsChecked) { 'true' } else { 'false' }), $(if ($script:ChkPvZip.IsChecked) { 'true' } else { 'false' }),
+                  $hot, $script:TxtPvLogKeep.Text, $script:TxtPvLogMax.Text)
         & $script:Append 'PerfView: save settings...'
         script:Invoke-Action 'Pv' $script:RsPv {
-            param($out,$sym,$merge,$zip)
+            param($out,$sym,$merge,$zip,$hotkey,$logkeep,$logmax)
             $cfg = Read-Config; $cfg.OutputDir = $out; $cfg.SymbolPath = $sym
             $cfg.Merge = ($merge -eq 'true'); $cfg.Zip = ($zip -eq 'true')
+            $cfg.MarkHotkey = $hotkey
+            $k = 0; if ([int]::TryParse("$logkeep", [ref]$k) -and $k -ge 0) { $cfg.LogKeep = $k }
+            $m = 0; if ([int]::TryParse("$logmax",  [ref]$m) -and $m -ge 1) { $cfg.LogMaxMB = $m }
             Save-Config $cfg; "settings saved (output: $out)"
         } $vals $script:RefreshPv
+        # Re-arm the global mark hotkey with the new chord (UI thread; independent of the async config save).
+        $script:PvMarkHotkey = $hot
+        script:Unregister-PvHotkey
+        script:Register-PvHotkey
+        $script:LblPvHotkey.Text = if ($script:PvMarkHotkey) { "mark hotkey: $($script:PvMarkHotkey)  -  works anywhere while capturing" } else { 'mark hotkey: none set (set it in Global settings below)' }
     })
 
     # ---------- Monitor: live config editor ----------
