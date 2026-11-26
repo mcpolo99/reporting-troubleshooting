@@ -157,6 +157,16 @@ function Get-DefaultProfiles {
             CircularMB   = 20000
             BufferSizeMB = 1024
             ExtraArgs    = ''
+        },
+        [pscustomobject]@{
+            Name = 'Max-Verbose'
+            Description  = 'EVERYTHING we can collect: Max kernel set + Registry + ImageLoad, richer CLR (object allocs, contention, CLR stacks), ALL app providers (DNS, WinINet/WinHttp/WebIO HTTP, Defender, Kernel-Power) and high-resolution CPU sampling (0.125 ms). HUGE traces and extra overhead - the capture itself perturbs timing (observer effect), so do NOT use it to measure precise latency; use it when you need every signal and the cause is unknown. Any provider the machine does not have is skipped with a warning. Toggle individual providers in the profile editor below.'
+            KernelEvents = 'Default,ThreadTime,FileIOInit,FileIO,DiskIO,MemoryHardFaults,VirtualAlloc,NetworkTCPIP,Registry,ImageLoad'
+            ClrEvents    = 'Default,GCSampledObjectAllocationHigh,Contention,Stack'
+            Providers    = 'Microsoft-Windows-Kernel-Memory,Microsoft-Windows-TCPIP,Microsoft-Windows-DNS-Client,Microsoft-Windows-WinINet,Microsoft-Windows-WinHttp,Microsoft-Windows-WebIO,Microsoft-Windows-Kernel-Power,Microsoft-Antimalware-Service,Microsoft-Antimalware-Engine'
+            CircularMB   = 20000
+            BufferSizeMB = 1024
+            ExtraArgs    = '/CpuSampleMSec:0.125'
         }
     )
 }

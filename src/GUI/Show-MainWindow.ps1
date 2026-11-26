@@ -125,7 +125,9 @@ namespace RtHook {
 
     # known PerfView toggles (rendered as checkboxes / dropdown instead of free text)
     $script:PvKernelKeywords  = @('Default','ThreadTime','FileIOInit','FileIO','DiskIO','MemoryHardFaults','VirtualAlloc','NetworkTCPIP','Registry','ImageLoad')
-    $script:PvProviderPresets = @('Microsoft-Windows-Kernel-Memory','Microsoft-Windows-TCPIP')
+    $script:PvProviderPresets = @('Microsoft-Windows-Kernel-Memory','Microsoft-Windows-TCPIP',
+                                  'Microsoft-Windows-DNS-Client','Microsoft-Windows-WinINet','Microsoft-Windows-WinHttp','Microsoft-Windows-WebIO',
+                                  'Microsoft-Windows-Kernel-Power','Microsoft-Antimalware-Service','Microsoft-Antimalware-Engine')
     $script:PvClrPresets      = @('Default','None','Verbose')
     # dropdown options for Monitor config fields (anything not listed falls back to checkbox/text by type)
     $script:MonFieldMeta = @{ DuplicateAction = @('Delete','Keep'); RunMode = @('Logon','Startup'); WorkerPriority = @('Idle','BelowNormal','Normal') }
