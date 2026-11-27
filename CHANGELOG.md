@@ -5,6 +5,13 @@ truth; each release is tagged `vX.Y.Z` and published as a GitHub release by `scr
 
 <!-- NEW RELEASES INSERTED BELOW -->
 
+## [v1.0.68] - 2026-11-27
+Changes since v1.0.67:
+
+### Features
+- crash symbolization - WER dumps, CLR start rundown, crash-to-trace link (bad63ea)
+
+
 ## [v1.0.67] - 2026-11-26
 Changes since v1.0.66:
 
@@ -558,6 +565,7 @@ Changes since v1.0.0:
 - WPF/XAML launcher (GUI default, `-CLI` text menu) with shared light/dark theme.
 - Shared components (logging, admin/signature/prompt/version helpers) under `src/Common`.
 - Bootstrap installer (`src/Get.ps1` + `src/run.bat`) with version check against GitHub.
+
 
 
 
