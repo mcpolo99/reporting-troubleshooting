@@ -852,16 +852,20 @@ namespace RtHook {
         $files = @($dlg.FileNames)
         if (-not $files.Count) { return }
         $script:LblGenSymStatus.Text = "Building symbols for $($files.Count) file(s)..."
-        & $script:Append "General: building symbols for $($files.Count) file(s) (ngen createpdb, best-effort per file)..."
+        & $script:Append "General: building symbols for $($files.Count) file(s) (ngen createpdb; files whose symbols are already on the public server are skipped)..."
         $done = { $script:LblGenSymStatus.Text = 'Symbol build complete - see Output above.' }
+        # Pass the configured symbol path so the public-symbol check queries the same server(s) (msdl, plus any
+        # you added, e.g. the NuGet symbol server). Only binaries with NO public symbols get a generated PDB.
         script:Invoke-Action 'Gen' $script:RsGen {
-            param($files)
-            $res  = Build-Pdbs -Files $files
+            param($files, $sym)
+            $res  = Build-Pdbs -Files $files -SkipIfPublic -SymbolPath $sym
             $ok   = @($res | Where-Object { $_.Generated })
-            $skip = @($res | Where-Object { -not $_.Generated })
+            $pub  = @($res | Where-Object { $_.Reason -match 'public symbols already' })
+            $skip = @($res | Where-Object { -not $_.Generated -and $_.Reason -notmatch 'public symbols already' })
+            foreach ($s in $pub)  { "  skipped $([IO.Path]::GetFileName($s.File)): public symbols already available" }
             foreach ($s in $skip) { "  skipped $([IO.Path]::GetFileName($s.File)): $($s.Reason)" }
-            "Built $($ok.Count) PDB(s); skipped $($skip.Count). Store: $(Get-SymbolStore)"
-        } @(, $files) $done
+            "Built $($ok.Count) PDB(s); $($pub.Count) already public; skipped $($skip.Count). Store: $(Get-SymbolStore)"
+        } @($files, $script:TxtGenSymPath.Text) $done
     })
 
     # ---------- Packages: one shared, verified tool store ----------

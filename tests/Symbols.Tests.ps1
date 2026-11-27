@@ -43,6 +43,19 @@ try {
     Check 'non-binary reason given'              ($r[0].Reason -match 'not a \.dll/\.exe')
     Check 'missing file skipped with reason'     ((-not $r[1].Generated) -and ($r[1].Reason -match 'not found'))
     Check 'one result object per input file'     ($r.Count -eq 2)
+
+    Write-Host 'public-symbol check (offline parts: server parse + PDB key)'
+    $srv = Get-SymbolServers 'SRV*C:\a*https://msdl.microsoft.com/download/symbols;SRV*C:\b*https://symbols.nuget.org/download/symbols'
+    Check 'both http servers parsed out'         (@($srv).Count -eq 2 -and ($srv -contains 'https://msdl.microsoft.com/download/symbols') -and ($srv -contains 'https://symbols.nuget.org/download/symbols'))
+    Check 'blank path -> default msdl server'     ((Get-SymbolServers '') -contains 'https://msdl.microsoft.com/download/symbols')
+    Check 'non-PE file has no PDB key'            ($null -eq (Get-PdbKey $txt))
+    Check 'missing file has no PDB key'           ($null -eq (Get-PdbKey 'Z:\nope.dll'))
+    # A real PE on this Windows box has a CodeView key (deterministic, no network).
+    $k = Get-PdbKey (Join-Path $env:WINDIR 'System32\kernelbase.dll')
+    Check 'native PE yields a .pdb name + signature' ($k -and $k.PdbName -match '\.pdb$' -and $k.Signature -match '^[0-9A-F]{33,}$')
+    # -SkipIfPublic must never run the network check on a non-binary (it is rejected earlier as not a .dll/.exe).
+    $rp = Build-Pdbs -Files @($txt) -SkipIfPublic -SymbolPath ''
+    Check 'SkipIfPublic leaves non-binary reason intact' ($rp[0].Reason -match 'not a \.dll/\.exe')
 }
 finally {
     Remove-Item -LiteralPath $script:PlatformRoot -Recurse -Force -ErrorAction SilentlyContinue
