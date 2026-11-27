@@ -39,9 +39,11 @@ $script:SharedStylesSchema = Join-Path $schemasPath 'SharedStyles.xaml'
 $script:ToolPerfView = 'Tools\PerfView\PerfViewCapture.ps1'
 $script:ToolMonitor  = 'Tools\ProcDump\ProcDumpMonitor.ps1'
 $script:ToolPackages = 'Tools\Packages\PackagesTool.ps1'
+$script:ToolPlatform = 'Tools\Platform\PlatformTool.ps1'   # host General tab: shared symbol store + platform.json
 $script:ToolPerfViewPath = Join-Path $PSScriptRoot $script:ToolPerfView
 $script:ToolMonitorPath  = Join-Path $PSScriptRoot $script:ToolMonitor
 $script:ToolPackagesPath = Join-Path $PSScriptRoot $script:ToolPackages
+$script:ToolPlatformPath = Join-Path $PSScriptRoot $script:ToolPlatform
 
 # A fatal startup failure (e.g. a Group-Policy-enforced execution policy that blocks loading the component
 # .ps1 even with -ExecutionPolicy Bypass) must not vanish with a blank console. Log it and keep the window
@@ -54,6 +56,7 @@ try {
     # installs off the UI thread in its own runspace (via Tools\Packages\PackagesTool.ps1).
     . (Join-Path $PSScriptRoot 'Common\Common.ps1')
     . (Join-Path $PSScriptRoot 'Common\Packages.ps1')
+    . (Join-Path $PSScriptRoot 'Common\Symbols.ps1')   # shared symbol store + platform.json (General tab)
     . (Join-Path $PSScriptRoot 'CLI\Show-CliMenu.ps1')
     . (Join-Path $PSScriptRoot 'GUI\Get-SystemUsesDarkMode.ps1')
     . (Join-Path $PSScriptRoot 'GUI\Set-WindowThemeResources.ps1')

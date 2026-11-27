@@ -10,7 +10,7 @@ internals. Part of the whole-app architecture ([`../README.md`](../README.md)).
 |---|---|---|
 | [01](01-concept.md) | Concept | What the host app is - purpose, actors, invariants |
 | [02](02-shell-and-tool-hosting.md) | Shell & tool hosting | The GUI/CLI shells, the isolated-runspace model, the tool plugin contract |
-| [03](03-shared-platform.md) | Shared platform | Package store + installer, logging, config, bootstrap/update |
+| [03](03-shared-platform.md) | Shared platform | Package store + installer, symbol store + PDB generation, logging, config (per-tool + platform.json), bootstrap/update |
 | [04](04-layers-and-dependency-rule.md) | Layers & dependency rule | The host's layers and why a tool is a plugin behind a boundary |
 
 ## One-paragraph concept

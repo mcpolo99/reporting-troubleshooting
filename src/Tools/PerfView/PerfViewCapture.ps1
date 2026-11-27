@@ -120,6 +120,7 @@ if (-not $CommonDir) { throw "Shared components (Common\) not found from $Script
 . (Join-Path $CommonDir 'Logging.ps1')
 . (Join-Path $CommonDir 'Common.ps1')
 . (Join-Path $CommonDir 'Packages.ps1')
+. (Join-Path $CommonDir 'Symbols.ps1')   # shared symbol store + platform symbol path (Get-SharedSymbolPath)
 
 # PerfView binary lives in the shared package store - single source of truth: Common\Packages.ps1.
 $ToolsDir    = Get-PackageDir 'perfview'
@@ -238,18 +239,12 @@ function Get-Profile($cfg, [string]$Name) {
     return $p
 }
 
-# Resolve the _NT_SYMBOL_PATH to export for a merge/collect. A custom cfg.SymbolPath wins; otherwise
-# PerfView caches into its OWN Symbols subfolder (not the shared C:\Symbols) backed by the MS public server.
-# Always creates the cache dir so PerfView can write to it.
+# Resolve the _NT_SYMBOL_PATH to export for a merge/collect. A custom cfg.SymbolPath wins; otherwise the
+# SHARED platform symbol store (Common\Symbols.ps1 -> %ProgramData%\ReportingTroubleshooting\Symbols) backed
+# by the MS public server, so PerfView, the monitor and any future tool resolve symbols into ONE store. The
+# shared resolver creates any referenced local cache dir so the symbol engine can write to it.
 function Get-SymbolPath($cfg) {
-    $sp = "$($cfg.SymbolPath)".Trim()
-    if (-not $sp) { $sp = "SRV*$SymbolDir*https://msdl.microsoft.com/download/symbols" }
-    # Make sure any local down-stream cache dir(s) referenced exist (SRV*<dir>*... or plain path).
-    foreach ($m in [regex]::Matches($sp, '(?i)(?:SRV\*)?([A-Za-z]:\\[^*;]+)')) {
-        $dir = $m.Groups[1].Value.Trim()
-        if ($dir -and $dir -notmatch '^https?:') { New-Item -ItemType Directory -Path $dir -Force -ErrorAction SilentlyContinue | Out-Null }
-    }
-    return $sp
+    return Get-SharedSymbolPath "$($cfg.SymbolPath)"
 }
 
 # =============================== ACTIVE STATE ============================

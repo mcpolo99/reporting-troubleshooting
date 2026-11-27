@@ -16,14 +16,24 @@
 ### WER LocalDumps fallback (RT-2)
 
 ProcDump only captures while it is armed and running. As a **fallback that does not depend on the armer**,
-the monitor can turn on the OS's own Windows Error Reporting *LocalDumps* feature (HKLM, admin): Windows then
-writes a full crash dump for the configured apps (or all apps) with no debugger attached. Control owns the
-switch - it reconciles the registry to the config on enable / config-change and **records the prior registry
-state so disable restores it exactly** (`Monitor\wer-backup.json`). The dumps land in a dedicated folder
-(`WerDumpFolder`, default `C:\dumps\WER`) that Ingest + Retention treat as another dump root, so a WER dump is
-parsed, id'd, deduped, gzipped, reported and uploaded on the **same terms** as a ProcDump dump - no new naming
-or event code (triage derives the resting name from the dump's own image). A crash caught by both WER and
-ProcDump is one signature, so the ledger keeps the first and drops the duplicate.
+the OS's own Windows Error Reporting *LocalDumps* feature (HKLM, admin) is turned on: Windows then
+writes a full crash dump for the configured apps (or all apps) with no debugger attached. The registry is
+reconciled to the config and the **prior registry state is recorded so a later disable restores it exactly**
+(`Monitor\wer-backup.json`). The dumps land in a dedicated folder (`WerDumpFolder`, default `C:\dumps\WER`)
+that Ingest + Retention treat as another dump root, so a WER dump is parsed, id'd, deduped, gzipped, reported
+and uploaded on the **same terms** as a ProcDump dump - no new naming or event code (triage derives the
+resting name from the dump's own image). A crash caught by both WER and ProcDump is one signature, so the
+ledger keeps the first and drops the duplicate.
+
+Because LocalDumps is a **Windows-environment** switch independent of the armer, its on/off is surfaced on the
+host's top-level **General** surface (see core [02](../core/02-shell-and-tool-hosting.md)), which applies it
+to the registry directly - the ProcDump monitor does not need to be running for WER to capture. The monitor's
+own enable/loop still reconciles it, and Ingest still triages the folder, so behaviour is identical whichever
+way it was turned on.
+
+> Forward reference: the monitor may later name a dump's unresolved JIT frames by calling the shared
+> **PDB generator** (core [03](../core/03-shared-platform.md)) on the dump's modules. Not done today - the
+> generator is a manual host action for now.
 
 ## The concerns - one job each
 

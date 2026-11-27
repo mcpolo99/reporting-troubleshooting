@@ -1,0 +1,49 @@
+<ScrollViewer xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+              xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+              VerticalScrollBarVisibility="Auto">
+  <StackPanel Margin="14">
+    <TextBlock Text="Machine-wide settings shared across the tools. These apply to the Windows environment, not to a single capture." Foreground="{DynamicResource AppIdColor}" TextWrapping="Wrap" Margin="0,0,0,12"/>
+
+    <!-- ============ Crash dumps (Windows Error Reporting) ============ -->
+    <TextBlock Text="Crash dumps (Windows Error Reporting)" Foreground="{DynamicResource AppFgColor}" FontWeight="SemiBold" Margin="0,0,0,4"/>
+    <TextBlock TextWrapping="Wrap" Foreground="{DynamicResource AppIdColor}" Margin="0,0,0,8"
+               Text="A fallback that does NOT need the ProcDump monitor: Windows itself keeps a full crash dump for the chosen apps (or every app). Writes HKLM\...\Windows Error Reporting\LocalDumps (needs admin - this app is elevated). 'Remove from Windows' restores exactly what was there before. With LocalDumps on, Windows does not show its crash dialog for those apps."/>
+    <CheckBox x:Name="ChkGenWerEnabled" Content="Keep crash dumps (Windows Error Reporting)" Foreground="{DynamicResource AppFgColor}" Margin="0,0,0,8"/>
+    <Grid Margin="0,0,0,6">
+      <Grid.ColumnDefinitions><ColumnDefinition Width="150"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+      <Grid.RowDefinitions>
+        <RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/>
+      </Grid.RowDefinitions>
+      <TextBlock Grid.Row="0" Grid.Column="0" Text="Dump folder" Foreground="{DynamicResource AppFgColor}" VerticalAlignment="Center" Margin="0,3"/>
+      <TextBox   Grid.Row="0" Grid.Column="1" x:Name="TxtGenWerFolder" Margin="0,3"/>
+      <TextBlock Grid.Row="1" Grid.Column="0" Text="Dump type" Foreground="{DynamicResource AppFgColor}" VerticalAlignment="Center" Margin="0,3"/>
+      <ComboBox  Grid.Row="1" Grid.Column="1" x:Name="CmbGenWerType" Width="140" HorizontalAlignment="Left" Margin="0,3"/>
+      <TextBlock Grid.Row="2" Grid.Column="0" Text="Max dumps / app" Foreground="{DynamicResource AppFgColor}" VerticalAlignment="Center" Margin="0,3"/>
+      <TextBox   Grid.Row="2" Grid.Column="1" x:Name="TxtGenWerCount" Width="80" HorizontalAlignment="Left" Margin="0,3"/>
+      <CheckBox  Grid.Row="3" Grid.Column="1" x:Name="ChkGenWerAllApps" Content="All applications (machine-wide, not just the monitored apps)" Foreground="{DynamicResource AppFgColor}" Margin="0,6,0,0"/>
+    </Grid>
+    <StackPanel Orientation="Horizontal" Margin="0,4,0,4">
+      <Button x:Name="BtnGenWerApply"  Content="Save &amp; apply to Windows" Height="28" MinWidth="170" Margin="0,0,8,0"/>
+      <Button x:Name="BtnGenWerRemove" Content="Remove from Windows"      Height="28" MinWidth="150"/>
+    </StackPanel>
+    <TextBlock x:Name="LblGenWerStatus" Foreground="{DynamicResource AppIdColor}" TextWrapping="Wrap" Margin="0,2,0,0"/>
+
+    <Border BorderBrush="{DynamicResource AppIdColor}" BorderThickness="0,1,0,0" Margin="0,14,0,10"/>
+
+    <!-- ============ Symbols (shared) ============ -->
+    <TextBlock Text="Symbols (shared store)" Foreground="{DynamicResource AppFgColor}" FontWeight="SemiBold" Margin="0,0,0,4"/>
+    <TextBlock TextWrapping="Wrap" Foreground="{DynamicResource AppIdColor}" Margin="0,0,0,8"
+               Text="One common symbol path shared by PerfView and the other tools (downloaded OS/CLR symbols + any generated app PDBs). Blank = the default shared store under %ProgramData%\ReportingTroubleshooting\Symbols, backed by the Microsoft public server. Set an explicit _NT_SYMBOL_PATH (e.g. an on-site store) to override."/>
+    <Grid Margin="0,0,0,6">
+      <Grid.ColumnDefinitions><ColumnDefinition Width="150"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+      <TextBlock Grid.Column="0" Text="Symbol path" Foreground="{DynamicResource AppFgColor}" VerticalAlignment="Center"/>
+      <TextBox   Grid.Column="1" x:Name="TxtGenSymPath"/>
+    </Grid>
+    <StackPanel Orientation="Horizontal" Margin="0,2,0,4">
+      <Button x:Name="BtnGenSymSave"  Content="Save symbol path" Height="28" MinWidth="140" Margin="0,0,8,0"/>
+      <Button x:Name="BtnGenSymBuild" Content="Build symbols from files..." Height="28" MinWidth="190"
+              ToolTip="Pick native-image binaries; ngen createpdb (ships with the .NET Framework) emits a PDB for each into the shared store. Best-effort per file - files without an NGEN native image are skipped with a reason."/>
+    </StackPanel>
+    <TextBlock x:Name="LblGenSymStatus" Foreground="{DynamicResource AppIdColor}" TextWrapping="Wrap" Margin="0,2,0,0"/>
+  </StackPanel>
+</ScrollViewer>

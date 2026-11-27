@@ -17,6 +17,25 @@ The single source of truth for tool binaries (ProcDump, PerfView, etc.).
   tool runspace off the UI thread.
 - Preserves any layout a tool needs inside the store (e.g. subfolders a tool's binary requires).
 
+## Symbol store & generation
+
+One machine-wide symbol store, shared by every tool exactly like the package store - never per-tool or
+per-case.
+
+- **Shared store.** `%ProgramData%\ReportingTroubleshooting\Symbols\` holds the downloaded OS/CLR symbols
+  (a downstream cache of the Microsoft public server) **and** any app PDBs generated on the edge. Created on
+  demand.
+- **One resolved symbol path.** A single shared resolver produces the `_NT_SYMBOL_PATH` every tool uses:
+  blank config = the shared store backed by the MS public server; an explicit value (e.g. an on-site store)
+  overrides it verbatim. PerfView's merge/collect resolves through this shared default instead of a private
+  per-tool cache, so all tools fill one store.
+- **Best-effort PDB generation.** A shared generator can emit a PDB for a selected binary with the public,
+  on-edge `ngen createpdb` (ships with the .NET Framework). It is attempted per file and reported
+  generated/skipped-with-reason, so an unsupported file (no NGEN native image; R2R/.NET-Core; native without
+  PDBs) never stops the batch. No decompilation and no dependency on the vendor tool chain (that is BinForge,
+  a separate concern this platform never calls). Manual today (a host surface action); exposed as a shared
+  function so a tool could call it later.
+
 ## Logging
 
 One logging facility, reused by the host and every tool: per-launch log files, size-roll, retention by
@@ -28,6 +47,11 @@ count, and a console echo mode the GUI uses to capture a tool's output on its in
 - Config is merged over defaults so a new setting appears without discarding a user's edits, and an
   invalid saved value heals back to a default.
 - The host reads a tool's config through the tool's runspace (so the tool owns its own schema).
+- **Platform-resource config** is distinct from per-tool config: a few settings describe a *shared resource*
+  rather than one tool's behaviour (e.g. the common symbol path), and live in a host-level `platform.json`
+  under the app root - the same merge-over-defaults/self-heal convention, but owned by the platform and read
+  by whichever tools consume that resource. This is the exception to "no centralized config"; a tool's own
+  behaviour still stays in the tool's own config.
 
 ## Bootstrap, elevation & update
 

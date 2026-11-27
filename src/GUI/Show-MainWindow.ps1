@@ -80,6 +80,7 @@ namespace RtHook {
         TabPackages = script:Read-Xaml (Join-Path $tabsDir 'PackagesTab.xaml')
         TabPerfView = script:Read-Xaml (Join-Path $tabsDir 'PerfViewTab.xaml')
         TabMonitor  = script:Read-Xaml (Join-Path $tabsDir 'MonitorTab.xaml')
+        TabGeneral  = script:Read-Xaml (Join-Path $tabsDir 'GeneralTab.xaml')
     }
     foreach ($tabName in $script:TabPages.Keys) {
         $tabItem = $w.FindName($tabName)
@@ -101,6 +102,8 @@ namespace RtHook {
                    'TxtPvOutput','TxtPvSym','TxtPvHotkey','TxtPvLogKeep','TxtPvLogMax','ChkPvMerge','ChkPvZip','ChkPvStartRundown','ChkPvMarkOnCrash','BtnPvSettingsSave',
                    'BtnMonEnable','BtnMonStart','BtnMonStop','BtnMonStatus','BtnMonTestTelemetry','BtnMonForceFlush','BtnMonCollect','BtnMonDisable','LblMonStatus','BtnMonVerify','LblMonVerify','PnlCfgProcess','PnlCfgMonitor','PnlCfgGeneral','BtnMonSave','BtnMonReload','ChkMonTail','TxtMonLog','LblMonCompress','PbMonCompress',
                    'BtnPkgInstallAll','BtnPkgRefresh','BtnPkgOpen','BtnPkgUpdate','LblPkgUpdate','PnlPackages','LblPkgStatus',
+                   'ChkGenWerEnabled','TxtGenWerFolder','CmbGenWerType','TxtGenWerCount','ChkGenWerAllApps','BtnGenWerApply','BtnGenWerRemove','LblGenWerStatus',
+                   'TxtGenSymPath','BtnGenSymSave','BtnGenSymBuild','LblGenSymStatus',
                    'BtnShortcut') {
         $el = $null
         foreach ($s in $findScopes) { $el = $s.FindName($n); if ($el) { break } }
@@ -117,8 +120,10 @@ namespace RtHook {
     $script:RsPvMark = New-ToolRunspace -ToolPath $script:ToolPerfViewPath -Load
     $script:RsMon = New-ToolRunspace -ToolPath $script:ToolMonitorPath  -Load
     $script:RsPkg = New-ToolRunspace -ToolPath $script:ToolPackagesPath -Load
+    # General tab (shared platform): the symbol store + platform.json + the PDB generator.
+    $script:RsGen = New-ToolRunspace -ToolPath $script:ToolPlatformPath -Load
     $script:RsUpd = New-ToolRunspace    # plain runspace for the lightweight GitHub update check (off the Pkg runspace)
-    $script:Busy  = @{ Pv = $false; Mon = $false; Pkg = $false }
+    $script:Busy  = @{ Pv = $false; Mon = $false; Pkg = $false; Gen = $false }
     $script:PvProfiles = @()
     $script:PvLoading  = $false
     $script:MonCtls    = @{}
@@ -138,9 +143,10 @@ namespace RtHook {
         DuplicateAction = 'Monitor'; DuplicateWindowSeconds = 'Monitor'; RunMode = 'Monitor'; TaskUser = 'Monitor'; HeadlessLauncher = 'Monitor'
         DumpDiskLimitGB = 'General'; DumpGraceSeconds = 'General'; CleanupSeconds = 'General'; KnownIssuesEnabled = 'General'; SuppressKnown = 'General'; WorkerPriority = 'General'
         BaselinePath = 'General'; TelemetrySendEnabled = 'General'; TelemetrySeconds = 'General'; LogKeep = 'General'; LogMaxMB = 'General'
-        # RT-2 WER LocalDumps crash-dump fallback (needs admin; applied by Enable Service). Grouped on 'General'.
-        WerDumpsEnabled = 'General'; WerDumpFolder = 'General'; WerDumpType = 'General'; WerDumpCount = 'General'; WerAllApps = 'General'
     }
+    # RT-2 WER LocalDumps fields are edited on the top-level General tab (a Windows-environment setting,
+    # independent of the ProcDump monitor), so they are NOT rendered in this per-tool config editor.
+    $script:MonHiddenFields = @('WerDumpsEnabled','WerDumpFolder','WerDumpType','WerDumpCount','WerAllApps')
 
     # PerfView safety: an ETW session started with 'PerfView start' keeps running after PerfView.exe exits,
     # so if this app closes/crashes mid-trace we must abort the session. These OS/file paths let us do that
@@ -317,7 +323,7 @@ namespace RtHook {
     $script:RefreshPv  = [scriptblock]::Create("Start-ToolJob -Runspace `$script:RsPvCtl -Script { $($pvStatusSB.ToString()) }  -OnText `$script:SetPvStatus  | Out-Null")
     $script:RefreshMon = [scriptblock]::Create("Start-ToolJob -Runspace `$script:RsMon -Script { $($monStatusSB.ToString()) } -OnText `$script:SetMonStatus | Out-Null")
 
-    $script:ToolName = @{ Pv = 'PerfView'; Mon = 'Monitor'; Pkg = 'Packages' }
+    $script:ToolName = @{ Pv = 'PerfView'; Mon = 'Monitor'; Pkg = 'Packages'; Gen = 'General' }
     function script:Invoke-Action($toolKey, $rs, [scriptblock]$sb, [object[]]$argList, [scriptblock]$onDone) {
         if ($script:Busy[$toolKey]) {
             $n = $script:ToolName[$toolKey]; if (-not $n) { $n = $toolKey }
@@ -665,7 +671,8 @@ namespace RtHook {
         $script:PnlCfgProcess.Children.Clear(); $script:PnlCfgMonitor.Children.Clear(); $script:PnlCfgGeneral.Children.Clear()
         $script:MonCtls = @{}
         foreach ($prop in $cfg.PSObject.Properties) {
-            if ($prop.Name -eq 'ProcDumpArgs') { continue }   # rendered as toggles on the Process sub-tab
+            if ($prop.Name -eq 'ProcDumpArgs') { continue }        # rendered as toggles on the Process sub-tab
+            if ($script:MonHiddenFields -contains $prop.Name) { continue }   # WER fields live on the top-level General tab
             $grp = $script:MonFieldGroup[$prop.Name]; if (-not $grp) { $grp = 'General' }
             $panel = switch ($grp) { 'Process' { $script:PnlCfgProcess } 'Monitor' { $script:PnlCfgMonitor } default { $script:PnlCfgGeneral } }
             $r = script:New-ConfigRow $prop.Name $prop.Value $script:MonFieldMeta[$prop.Name]
@@ -735,6 +742,115 @@ namespace RtHook {
             }
             Save-Config $cfg; 'config saved'
         } @($kv) $doneMon
+    })
+
+    # ---------- General tab: WER crash dumps (Windows env) + shared symbols ----------
+    foreach ($t in @('Full','Mini')) { [void]$script:CmbGenWerType.Items.Add($t) }
+    script:Set-NumericOnly $script:TxtGenWerCount
+
+    # WER settings are stored in (and applied by) the MONITOR tool's functions, but surfaced here as a
+    # host-level "Windows environment" setting: applying writes HKLM directly, no need to run the monitor.
+    function script:Load-GenAll {
+        try {
+            $c = Invoke-ToolSync -Runspace $script:RsMon -Script { Read-Config } | Select-Object -First 1
+            if ($c) {
+                $script:ChkGenWerEnabled.IsChecked = [bool]$c.WerDumpsEnabled
+                $script:TxtGenWerFolder.Text       = [string]$c.WerDumpFolder
+                $script:CmbGenWerType.SelectedItem = $(if ("$($c.WerDumpType)" -match '(?i)mini') { 'Mini' } else { 'Full' })
+                $script:TxtGenWerCount.Text        = "$($c.WerDumpCount)"
+                $script:ChkGenWerAllApps.IsChecked = [bool]$c.WerAllApps
+            }
+        } catch { & $script:Append "General: WER settings load failed: $($_.Exception.Message)" }
+        try {
+            $p = Invoke-ToolSync -Runspace $script:RsGen -Script { (Read-PlatformConfig).SymbolPath } | Select-Object -First 1
+            $script:TxtGenSymPath.Text = [string]$p
+        } catch { & $script:Append "General: symbol path load failed: $($_.Exception.Message)" }
+        script:Refresh-GenWerStatus
+    }
+
+    # The current LocalDumps registry state (what Windows will actually do), independent of the saved config.
+    function script:Refresh-GenWerStatus {
+        try {
+            $s = Invoke-ToolSync -Runspace $script:RsMon -Script {
+                $cfg  = Read-Config
+                $keys = Get-WerTargetKeys $cfg
+                $on   = @($keys | Where-Object { (Get-WerKeyState $_).DumpFolder })
+                [pscustomobject]@{
+                    Scope  = $(if ($cfg.WerAllApps) { 'all applications' } else { "$(@($cfg.Apps).Count) app(s)" })
+                    Active = $on.Count; Total = @($keys).Count; Folder = $cfg.WerDumpFolder
+                }
+            } | Select-Object -First 1
+            if ($s) {
+                $script:LblGenWerStatus.Text = if ($s.Active) { "In Windows now: LocalDumps set for $($s.Active)/$($s.Total) target key(s) ($($s.Scope)) -> $($s.Folder)." }
+                                               else { "In Windows now: LocalDumps not set by this app ($($s.Scope))." }
+            }
+        } catch { $script:LblGenWerStatus.Text = "WER status unavailable: $($_.Exception.Message)" }
+    }
+
+    $script:BtnGenWerApply.Add_Click({
+        $vals = @(
+            $(if ($script:ChkGenWerEnabled.IsChecked) { 'true' } else { 'false' }),
+            $script:TxtGenWerFolder.Text,
+            [string]$script:CmbGenWerType.SelectedItem,
+            $script:TxtGenWerCount.Text,
+            $(if ($script:ChkGenWerAllApps.IsChecked) { 'true' } else { 'false' }))
+        & $script:Append 'General: saving WER settings and applying to Windows...'
+        $done = { script:Refresh-GenWerStatus; & $script:RefreshMon }
+        script:Invoke-Action 'Mon' $script:RsMon {
+            param($en, $folder, $type, $count, $all)
+            $cfg = Read-Config
+            $cfg.WerDumpsEnabled = ($en -eq 'true')
+            if ("$folder".Trim()) { $cfg.WerDumpFolder = "$folder".Trim() }
+            $cfg.WerDumpType = $(if ("$type" -match '(?i)mini') { 'Mini' } else { 'Full' })
+            $n = 0; if ([int]::TryParse("$count", [ref]$n) -and $n -ge 1) { $cfg.WerDumpCount = $n }
+            $cfg.WerAllApps = ($all -eq 'true')
+            Save-Config $cfg
+            # Apply directly (writes/restores HKLM) without needing the monitor task to be running.
+            if ($cfg.WerDumpsEnabled) { Sync-WerLocalDumps $cfg } else { Restore-WerLocalDumps }
+            $(if ($cfg.WerDumpsEnabled) { "WER LocalDumps applied -> $($cfg.WerDumpFolder)" } else { 'WER LocalDumps removed (prior registry restored)' })
+        } $vals $done
+    })
+
+    $script:BtnGenWerRemove.Add_Click({
+        & $script:Append 'General: removing WER LocalDumps from Windows (restoring prior registry)...'
+        $done = { script:Refresh-GenWerStatus; & $script:RefreshMon }
+        script:Invoke-Action 'Mon' $script:RsMon {
+            $cfg = Read-Config; $cfg.WerDumpsEnabled = $false; Save-Config $cfg
+            Restore-WerLocalDumps
+            'WER LocalDumps removed (prior registry restored)'
+        } @() $done
+        $script:ChkGenWerEnabled.IsChecked = $false
+    })
+
+    $script:BtnGenSymSave.Add_Click({
+        & $script:Append 'General: saving shared symbol path...'
+        script:Invoke-Action 'Gen' $script:RsGen {
+            param($p)
+            $cfg = Read-PlatformConfig; $cfg.SymbolPath = "$p".Trim(); Save-PlatformConfig $cfg
+            "symbol path saved (resolves to: $(Get-SharedSymbolPath $cfg.SymbolPath))"
+        } @($script:TxtGenSymPath.Text) $null
+    })
+
+    $script:BtnGenSymBuild.Add_Click({
+        if ($script:Busy['Gen']) { & $script:Append 'General: a symbol build is already running.'; return }
+        $dlg = New-Object System.Windows.Forms.OpenFileDialog
+        $dlg.Title = 'Select native-image binaries to build symbols for'
+        $dlg.Filter = 'Binaries (*.dll;*.exe)|*.dll;*.exe|All files (*.*)|*.*'
+        $dlg.Multiselect = $true
+        if ($dlg.ShowDialog() -ne [System.Windows.Forms.DialogResult]::OK) { return }
+        $files = @($dlg.FileNames)
+        if (-not $files.Count) { return }
+        $script:LblGenSymStatus.Text = "Building symbols for $($files.Count) file(s)..."
+        & $script:Append "General: building symbols for $($files.Count) file(s) (ngen createpdb, best-effort per file)..."
+        $done = { $script:LblGenSymStatus.Text = 'Symbol build complete - see Output above.' }
+        script:Invoke-Action 'Gen' $script:RsGen {
+            param($files)
+            $res  = Build-Pdbs -Files $files
+            $ok   = @($res | Where-Object { $_.Generated })
+            $skip = @($res | Where-Object { -not $_.Generated })
+            foreach ($s in $skip) { "  skipped $([IO.Path]::GetFileName($s.File)): $($s.Reason)" }
+            "Built $($ok.Count) PDB(s); skipped $($skip.Count). Store: $(Get-SymbolStore)"
+        } @(, $files) $done
     })
 
     # ---------- Packages: one shared, verified tool store ----------
@@ -893,6 +1009,7 @@ namespace RtHook {
     if (Test-Path $script:PvActiveFile) { & $script:Append 'Found an orphaned PerfView trace from a previous session - aborting it.'; script:Stop-PerfViewHard }
     try { script:Load-PvAll } catch { & $script:Append "PerfView config load failed: $($_.Exception.Message)" }
     try { script:Build-MonEditor } catch { & $script:Append "Monitor config load failed: $($_.Exception.Message)" }
+    try { script:Load-GenAll }     catch { & $script:Append "General settings load failed: $($_.Exception.Message)" }
     try { script:Build-PkgEditor } catch { & $script:Append "Package status load failed: $($_.Exception.Message)" }
     & $script:RefreshPv; & $script:RefreshMon
     # Non-blocking check on startup: enable the update button / status line if a newer build exists.
@@ -971,7 +1088,7 @@ namespace RtHook {
                 Invoke-ToolSync -Runspace $script:RsPvCtl -Script { Send-StopEvent } | Out-Null
             }
         } catch { script:Stop-PerfViewHard }
-        foreach ($rs in @($script:RsPv, $script:RsPvCtl, $script:RsPvMark, $script:RsMon, $script:RsPkg, $script:RsUpd)) { try { $rs.Close() } catch {} }
+        foreach ($rs in @($script:RsPv, $script:RsPvCtl, $script:RsPvMark, $script:RsMon, $script:RsPkg, $script:RsGen, $script:RsUpd)) { try { $rs.Close() } catch {} }
     })
 
     $script:MainWin = $w

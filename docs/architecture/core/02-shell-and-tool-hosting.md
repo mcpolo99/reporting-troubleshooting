@@ -53,6 +53,22 @@ knows about it:
 The host therefore launches and hosts any tool uniformly; a tool's internals (how the Monitor arms
 capture, how PerfView collects a trace) are opaque to the host and documented in that tool's own library.
 
+## Host-level surfaces (not a tool tab)
+
+Most of the window is tool tabs (one per hosted tool). A few surfaces belong to the **host**, not to any
+one tool: they configure a *shared platform resource* or a *machine/Windows-environment* setting that is not
+one tool's behaviour. These live on a top-level **General** surface, kept separate from the tool tabs:
+
+- the **common symbol path** (a shared-platform resource; [03](03-shared-platform.md)), and the manual
+  "build symbols from files" action;
+- the **Windows Error Reporting crash-dump** switch - a Windows-environment (HKLM) setting applied
+  independently of whether the Monitor runs, so it is surfaced here rather than inside the Monitor tool tab
+  (the Monitor still consumes the resulting dumps).
+
+A host surface runs its work off the UI thread in a runspace exactly like a tool action; it just isn't bound
+to one tool's lifecycle. Per-capture behaviour stays on the tool it belongs to (e.g. PerfView's start-rundown
+and crash-marking toggles live on the PerfView tab, where they are used).
+
 ## Hosted tools (the registry)
 
 | Tool | Kind | Architecture |
