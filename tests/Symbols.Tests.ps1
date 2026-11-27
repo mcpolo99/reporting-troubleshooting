@@ -25,7 +25,7 @@ try {
 
     Write-Host 'shared symbol path'
     $def = Get-SharedSymbolPath ''
-    Check 'blank -> SRV* shared store + MS server' ($def -match '^SRV\*.*\\Symbols\*https://msdl\.microsoft\.com/download/symbols$')
+    Check 'blank -> SRV* shared store + msdl + nuget' ($def -match '^SRV\*.*\\Symbols\*https://msdl\.microsoft\.com/download/symbols\*https://symbols\.nuget\.org/download/symbols$')
     Check 'explicit override wins verbatim'        ((Get-SharedSymbolPath 'SRV*C:\on-site*https://x') -eq 'SRV*C:\on-site*https://x')
     Check 'whitespace override falls back'          ((Get-SharedSymbolPath '   ') -eq $def)
 
@@ -47,7 +47,8 @@ try {
     Write-Host 'public-symbol check (offline parts: server parse + PDB key)'
     $srv = Get-SymbolServers 'SRV*C:\a*https://msdl.microsoft.com/download/symbols;SRV*C:\b*https://symbols.nuget.org/download/symbols'
     Check 'both http servers parsed out'         (@($srv).Count -eq 2 -and ($srv -contains 'https://msdl.microsoft.com/download/symbols') -and ($srv -contains 'https://symbols.nuget.org/download/symbols'))
-    Check 'blank path -> default msdl server'     ((Get-SymbolServers '') -contains 'https://msdl.microsoft.com/download/symbols')
+    $defSrv = Get-SymbolServers ''
+    Check 'blank path -> default msdl + nuget servers' (($defSrv -contains 'https://msdl.microsoft.com/download/symbols') -and ($defSrv -contains 'https://symbols.nuget.org/download/symbols'))
     Check 'non-PE file has no PDB key'            ($null -eq (Get-PdbKey $txt))
     Check 'missing file has no PDB key'           ($null -eq (Get-PdbKey 'Z:\nope.dll'))
     # A real PE on this Windows box has a CodeView key (deterministic, no network).

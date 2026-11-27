@@ -22,19 +22,26 @@ The single source of truth for tool binaries (ProcDump, PerfView, etc.).
 One machine-wide symbol store, shared by every tool exactly like the package store - never per-tool or
 per-case.
 
-- **Shared store.** `%ProgramData%\ReportingTroubleshooting\Symbols\` holds the downloaded OS/CLR symbols
-  (a downstream cache of the Microsoft public server) **and** any app PDBs generated on the edge. Created on
-  demand.
+- **Shared store.** `%ProgramData%\ReportingTroubleshooting\Symbols\` holds the downloaded OS/CLR + public
+  package symbols (a single downstream cache of the public symbol servers) **and** any app PDBs generated on
+  the edge. Created on demand.
 - **One resolved symbol path.** A single shared resolver produces the `_NT_SYMBOL_PATH` every tool uses:
-  blank config = the shared store backed by the MS public server; an explicit value (e.g. an on-site store)
-  overrides it verbatim. PerfView's merge/collect resolves through this shared default instead of a private
-  per-tool cache, so all tools fill one store.
-- **Best-effort PDB generation.** A shared generator can emit a PDB for a selected binary with the public,
-  on-edge `ngen createpdb` (ships with the .NET Framework). It is attempted per file and reported
-  generated/skipped-with-reason, so an unsupported file (no NGEN native image; R2R/.NET-Core; native without
-  PDBs) never stops the batch. No decompilation and no dependency on the vendor tool chain (that is BinForge,
-  a separate concern this platform never calls). Manual today (a host surface action); exposed as a shared
-  function so a tool could call it later.
+  blank config = the shared store backed by the public symbol servers (Microsoft **msdl** for OS/CLR/.NET
+  Framework + **NuGet.org** for packages that published a `.snupkg`, e.g. Newtonsoft.Json), both searched in
+  order and caching into the one store; an explicit value (e.g. an on-site store) overrides it verbatim.
+  PerfView's merge/collect resolves through this shared default instead of a private per-tool cache, so all
+  tools fill one store.
+- **Best-effort PDB generation (only for symbols no server has).** A shared generator can emit a PDB for a
+  selected binary with the public, on-edge `ngen createpdb` (ships with the .NET Framework). Before generating,
+  it asks the configured public symbol server(s) whether that module's PDB is already published and skips it if
+  so - so it generates only for binaries with **no public symbols** (vendor DLLs), never for framework/OSS
+  libraries already covered by a server. The published check reads the PE's CodeView record into the
+  symbol-server key and probes it over HTTP (no symchk/dbghelp dependency); found = skip, reachable-not-found =
+  generate, unreachable/unknown = generate (so a vendor symbol is never wrongly skipped). Generation is
+  attempted per file and reported generated/skipped-with-reason, so an unsupported file (no NGEN native image;
+  R2R/.NET-Core; native without PDBs) never stops the batch. No decompilation and no dependency on the vendor
+  tool chain (that is BinForge, a separate concern this platform never calls). Manual today (a host surface
+  action); exposed as a shared function so a tool could call it later.
 
 ## Logging
 

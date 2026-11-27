@@ -9,7 +9,14 @@
 $script:PlatformRoot       = Join-Path $env:ProgramData 'ReportingTroubleshooting'
 $script:PlatformConfigFile = Join-Path $script:PlatformRoot 'platform.json'
 $script:SymbolStoreDir     = Join-Path $script:PlatformRoot 'Symbols'
-$script:MsSymbolServer     = 'https://msdl.microsoft.com/download/symbols'
+# The public symbol servers the default path searches (in order), all caching into the one shared store:
+#   - Microsoft (msdl): OS / CLR / .NET Framework symbols
+#   - NuGet.org: symbols for packages that published a .snupkg (Newtonsoft.Json and many OSS libraries)
+# A site can still override SymbolPath entirely (e.g. an on-prem store) on the General tab.
+$script:PublicSymbolServers = @(
+    'https://msdl.microsoft.com/download/symbols',
+    'https://symbols.nuget.org/download/symbols'
+)
 
 # Thin log shim: use the shared Write-Log when present (a tool runspace), else the console. Lets this file be
 # dot-sourced both into a tool (with logging) and standalone without a hard dependency.
@@ -29,7 +36,7 @@ function Get-PlatformConfigPath { $script:PlatformConfigFile }
 
 function Get-DefaultPlatformConfig {
     [pscustomobject]@{
-        # Blank = the default: cache into the shared symbol store, backed by the Microsoft public server.
+        # Blank = the default: cache into the shared symbol store, backed by the public symbol servers.
         # A non-blank value is used verbatim as _NT_SYMBOL_PATH (so an air-gapped site can point at a local store).
         SymbolPath = ''
     }
@@ -62,7 +69,8 @@ function Save-PlatformConfig($cfg) {
 # symbol engine can write to them. This is the single shared default; PerfView and any future tool call it.
 function Get-SharedSymbolPath([string]$Override) {
     $sp = "$Override".Trim()
-    if (-not $sp) { $sp = "SRV*$(Get-SymbolStore)*$script:MsSymbolServer" }
+    # One SRV entry, one downstream store, multiple upstream servers tried in order (symsrv/PerfView syntax).
+    if (-not $sp) { $sp = "SRV*$(Get-SymbolStore)*" + ($script:PublicSymbolServers -join '*') }
     foreach ($m in [regex]::Matches($sp, '(?i)(?:SRV\*)?([A-Za-z]:\\[^*;]+)')) {
         $dir = $m.Groups[1].Value.Trim()
         if ($dir -and $dir -notmatch '^https?:') { New-Item -ItemType Directory -Path $dir -Force -ErrorAction SilentlyContinue | Out-Null }
@@ -87,10 +95,15 @@ function Get-SymbolServers([string]$SymbolPath) {
     @([regex]::Matches($SymbolPath, '(?i)https?://[^*;]+') | ForEach-Object { $_.Value.TrimEnd('/') }) | Select-Object -Unique
 }
 
-# Read a PE's CodeView (RSDS) debug record and return the symbol-server key for its PDB:
-# @{ PdbName=<leaf>; Signature=<GUID:N upper><Age:X upper> }, or $null when the file has no CodeView entry
-# (no debug directory, native-without-PDB, unreadable). This is the same key dbghelp/symsrv index by, so it
-# lets us probe a symbol server with a plain HTTP GET - no symchk/dbghelp dependency (RT ships neither).
+# Read a PE's debug directory and return its PDB symbol-server key(s):
+#   @{ PdbName=<leaf>; Signature=<primary key>; Signatures=@(all candidate keys); Embedded=<bool> }
+# or $null when the file has no CodeView entry (no debug directory, native-without-PDB, unreadable).
+# The SSQP key is <GUID:N upper> + <age>: a WINDOWS PDB uses the CodeView age (hex), a PORTABLE PDB uses the
+# literal 'FFFFFFFF' (its real age is meaningless to the server). A portable PDB is signalled by a PdbChecksum
+# (type 19) or Embedded (type 17) debug entry, so we scan ALL entries before forming the key. An embedded PDB
+# lives inside the DLL itself (no server, no generation needed) -> Embedded=$true means "already resolvable".
+# Same keying dbghelp/symsrv use, so we can probe a symbol server with a plain HTTP GET - no symchk/dbghelp
+# dependency (RT ships neither).
 function Get-PdbKey([string]$File) {
     try { $b = [System.IO.File]::ReadAllBytes($File) } catch { return $null }
     if ($b.Length -lt 0x40) { return $null }
@@ -125,44 +138,59 @@ function Get-PdbKey([string]$File) {
     }
     $dbgOff = & $rvaToFile $dbgRva
     if (-not $dbgOff) { return $null }
-    # Walk the 28-byte debug directory entries for a CodeView (type 2) record.
+    # Scan ALL 28-byte debug directory entries: capture the CodeView (type 2) record, and note whether a
+    # PdbChecksum (19) or Embedded portable PDB (17) entry marks this as a portable PDB.
+    $guid = $null; $age = 0; $name = $null; $portable = $false; $embedded = $false
     for ($e = $dbgOff; ($e + 28) -le $b.Length -and ($e - $dbgOff) -lt $dbgSize; $e += 28) {
         $type = [BitConverter]::ToUInt32($b, $e + 12)
-        if ($type -ne 2) { continue }
+        if ($type -eq 19) { $portable = $true; continue }                      # IMAGE_DEBUG_TYPE_PDBCHECKSUM
+        if ($type -eq 17) { $portable = $true; $embedded = $true; continue }    # EMBEDDED_PORTABLE_PDB
+        if ($type -ne 2)  { continue }                                         # CODEVIEW
         $cv = [BitConverter]::ToUInt32($b, $e + 24)         # PointerToRawData (file offset of the CV record)
-        if (($cv + 24) -gt $b.Length) { return $null }
-        if ([BitConverter]::ToUInt32($b, $cv) -ne 0x53445352) { return $null }   # 'RSDS'
+        if (($cv + 24) -gt $b.Length) { continue }
+        if ([BitConverter]::ToUInt32($b, $cv) -ne 0x53445352) { continue }      # 'RSDS'
         $guid = [guid]::new([byte[]]($b[($cv+4)..($cv+19)]))
         $age  = [BitConverter]::ToUInt32($b, $cv + 20)
         $end  = $cv + 24; while ($end -lt $b.Length -and $b[$end] -ne 0) { $end++ }
         $path = [System.Text.Encoding]::UTF8.GetString($b[($cv+24)..($end-1)])
         $name = [System.IO.Path]::GetFileName(($path -replace '\\', '/'))
-        if (-not $name) { return $null }
-        return [pscustomobject]@{ PdbName = $name; Signature = ($guid.ToString('N').ToUpperInvariant() + ('{0:X}' -f $age)) }
     }
-    $null
+    if (-not $guid -or -not $name) { return $null }
+    $gN   = $guid.ToString('N').ToUpperInvariant()
+    $aHex = '{0:X}' -f $age
+    # Portable: 'FFFFFFFF' is the real server key; keep the raw-age key as a harmless fallback. Windows: age only.
+    # (Per-branch statement assignment, then re-wrap: a single-element array from an if-EXPRESSION unrolls to a
+    # scalar string, which would make Signatures[0] index the first character instead of the whole key.)
+    if ($portable) { $sigs = @("${gN}FFFFFFFF", "$gN$aHex") } else { $sigs = @("$gN$aHex") }
+    $sigs = @($sigs | Select-Object -Unique)
+    [pscustomobject]@{ PdbName = $name; Signature = $sigs[0]; Signatures = $sigs; Embedded = $embedded }
 }
 
-# Is this module's PDB already published on one of the configured public symbol servers? $true = found (skip
-# generating), $false = all reachable servers returned not-found, $null = unknown (no CodeView key, or every
-# server errored/unreachable). Callers treat $null as "build anyway" so a vendor symbol is never wrongly skipped.
+# Are this module's symbols already available without us generating them? $true = yes (an embedded PDB, or a
+# PDB published on a configured public server) -> skip; $false = every reachable server returned not-found;
+# $null = unknown (no CodeView key, or every server errored/unreachable). Callers treat $null as "build anyway"
+# so a vendor symbol is never wrongly skipped. Portable PDBs carry two candidate keys (FFFFFFFF + raw age);
+# a hit on either, on any server, counts as published.
 function Test-SymbolPublished([string]$File, [string]$SymbolPath) {
     $key = Get-PdbKey $File
     if (-not $key) { return $null }
+    if ($key.Embedded) { return $true }        # symbols live inside the DLL - nothing to download or generate
     $servers = Get-SymbolServers $SymbolPath
     if (-not $servers.Count) { return $null }
     $sawServer = $false
     foreach ($srv in $servers) {
-        $url = "$srv/$($key.PdbName)/$($key.Signature)/$($key.PdbName)"
-        try {
-            $r = Invoke-WebRequest -Uri $url -Method Get -Headers @{ Range = 'bytes=0-0' } -MaximumRedirection 5 -TimeoutSec 20 -UseBasicParsing -ErrorAction Stop
-            $sawServer = $true
-            if ([int]$r.StatusCode -ge 200 -and [int]$r.StatusCode -lt 300) { return $true }
-        } catch {
-            $sc = $null; try { $sc = [int]$_.Exception.Response.StatusCode } catch { }
-            if ($sc -eq 416) { return $true }                 # range-not-satisfiable = the file exists (0 bytes)
-            if ($sc -eq 404 -or $sc -eq 403) { $sawServer = $true; continue }   # definitively not on this server
-            # any other error (DNS/timeout/offline/proxy) = we cannot tell from this server
+        foreach ($sig in @($key.Signatures)) {
+            $url = "$srv/$($key.PdbName)/$sig/$($key.PdbName)"
+            try {
+                $r = Invoke-WebRequest -Uri $url -Method Get -Headers @{ Range = 'bytes=0-0' } -MaximumRedirection 5 -TimeoutSec 20 -UseBasicParsing -ErrorAction Stop
+                $sawServer = $true
+                if ([int]$r.StatusCode -ge 200 -and [int]$r.StatusCode -lt 300) { return $true }
+            } catch {
+                $sc = $null; try { $sc = [int]$_.Exception.Response.StatusCode } catch { }
+                if ($sc -eq 416) { return $true }                 # range-not-satisfiable = the file exists (0 bytes)
+                if ($sc -eq 404 -or $sc -eq 403) { $sawServer = $true; continue }   # not on this server under this key
+                # any other error (DNS/timeout/offline/proxy) = we cannot tell from this server
+            }
         }
     }
     if ($sawServer) { return $false } else { return $null }
