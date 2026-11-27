@@ -14,10 +14,12 @@
 # Deletion is identical online or offline (it never consults the endpoint or the ledger). Also sweeps orphaned
 # .info/.versions/.handled sidecars whose dump is gone. GraceSeconds default 2h.
 function Invoke-DumpRetention {
-    param([Parameter(Mandatory)][string]$DumpDir, [double]$LimitGB = 30, [string]$Dir, [int]$GraceSeconds = 7200)
+    param([Parameter(Mandatory)][string]$DumpDir, [double]$LimitGB = 30, [string]$Dir, [int]$GraceSeconds = 7200, [string[]]$ExtraRoots)
     if (-not $Dir) { $Dir = Get-KnownIssuesDir }
     $limitBytes = [Math]::Max($LimitGB, 0.1) * 1GB
-    $roots = @($DumpDir, (Join-Path $DumpDir 'failed-uploads'))
+    # ExtraRoots (e.g. the WER LocalDumps folder, RT-2) are retained on the SAME terms as the main dump dir.
+    $roots = @($DumpDir, (Join-Path $DumpDir 'failed-uploads')) + @($ExtraRoots | Where-Object { "$_".Trim() })
+    $roots = @($roots | Select-Object -Unique)
     $nowUtc = (Get-Date).ToUniversalTime()
 
     # Orphaned sidecars (a .info/.versions/.handled whose dump is gone) - sweep regardless of budget/grace.

@@ -11,6 +11,19 @@
 | Deliver reports + grant-authorized evidence to the backend | Flush |
 | Bound local disk without losing un-delivered evidence | Retention |
 | Hand evidence off manually when the link is unavailable | Control |
+| Keep a full crash dump even when ProcDump is not attached (WER fallback) | Control (configures) + Ingest (triages) |
+
+### WER LocalDumps fallback (RT-2)
+
+ProcDump only captures while it is armed and running. As a **fallback that does not depend on the armer**,
+the monitor can turn on the OS's own Windows Error Reporting *LocalDumps* feature (HKLM, admin): Windows then
+writes a full crash dump for the configured apps (or all apps) with no debugger attached. Control owns the
+switch - it reconciles the registry to the config on enable / config-change and **records the prior registry
+state so disable restores it exactly** (`Monitor\wer-backup.json`). The dumps land in a dedicated folder
+(`WerDumpFolder`, default `C:\dumps\WER`) that Ingest + Retention treat as another dump root, so a WER dump is
+parsed, id'd, deduped, gzipped, reported and uploaded on the **same terms** as a ProcDump dump - no new naming
+or event code (triage derives the resting name from the dump's own image). A crash caught by both WER and
+ProcDump is one signature, so the ledger keeps the first and drops the duplicate.
 
 ## The concerns - one job each
 

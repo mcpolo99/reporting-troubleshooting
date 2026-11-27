@@ -131,6 +131,15 @@ function Get-DefaultConfig {
         RunMode          = 'Logon'      # Logon = as user at logon (GUI apps, hang detection) | Startup = SYSTEM at boot
         TaskUser         = (Get-ConsoleUser)   # Logon mode: DOMAIN\user; defaults to the current console user (editable)
         HeadlessLauncher = $true        # Logon mode: start via 'conhost --headless' so no window flashes
+        # --- Windows Error Reporting crash dumps (RT-2): a FALLBACK full-dump source that does not need ProcDump
+        #     to be attached. Turns on the OS WER LocalDumps mechanism (HKLM, needs admin) so a crash leaves a full
+        #     dump even when the ProcDump monitor is not running. The dumps land in WerDumpFolder and flow through
+        #     the SAME ingest/triage/telemetry pipeline (the ledger de-dupes a crash caught by both WER and ProcDump).
+        WerDumpsEnabled  = $false       # master switch for WER LocalDumps (applied by Enable-Service / the monitor; Disable-Service restores the prior registry)
+        WerDumpFolder    = 'C:\dumps\WER'   # where WER writes crash dumps (triaged + retained like the main dump dir)
+        WerDumpType      = 'Full'       # Full = full memory (-ma equivalent, names every frame) | Mini = small
+        WerDumpCount     = 10           # WER keeps at most this many dumps per application (its own cap)
+        WerAllApps       = $false       # $false = only the configured Apps; $true = every application on the machine
     }
 }
 
@@ -240,6 +249,109 @@ function Install-KnownIssuesDeps($cfg) {
 # ProcDump is the binary this monitor runs and is the one the engine gates on signature.
 function Install-Sysinternals([switch]$Force) {
     return (Install-Package 'sysinternals' -Force:$Force)
+}
+
+# =============================== WER LOCAL DUMPS (RT-2) ==================
+# Windows Error Reporting's LocalDumps feature (HKLM) writes a full crash dump for an application WITHOUT any
+# debugger attached - the fallback for when the ProcDump monitor is not running. We turn it on/off to match the
+# config, record the exact prior registry state so Disable-Service restores it byte-for-byte, and let the normal
+# ingest pipeline triage the dumps. Needs admin (HKLM); the service runs elevated, so Enable-Service applies it.
+$WerKeyPath    = 'HKLM:\SOFTWARE\Microsoft\Windows\Windows Error Reporting\LocalDumps'
+$WerBackupFile = Join-Path $BaseDir 'wer-backup.json'
+# The three values we manage on a (base or per-app) LocalDumps key. DumpType: 1 = mini, 2 = full.
+function ConvertTo-WerDumpType([string]$t) { if ("$t" -match '(?i)full') { 2 } else { 1 } }
+
+# Snapshot one key's managed values (or $null for "value/key absent") so we can restore exactly.
+function Get-WerKeyState([string]$Path) {
+    $exists = Test-Path -LiteralPath $Path
+    $state = [ordered]@{ Existed = $exists; DumpFolder = $null; DumpType = $null; DumpCount = $null }
+    if ($exists) {
+        $p = Get-ItemProperty -LiteralPath $Path -ErrorAction SilentlyContinue
+        foreach ($v in 'DumpFolder','DumpType','DumpCount') { if ($p -and $null -ne $p.$v) { $state[$v] = $p.$v } }
+    }
+    $state
+}
+
+# Apply our three values to a key (creating it if needed). DumpFolder is REG_EXPAND_SZ, counts/types REG_DWORD.
+function Set-WerKey([string]$Path, [string]$Folder, [int]$Type, [int]$Count) {
+    if (-not (Test-Path -LiteralPath $Path)) { New-Item -Path $Path -Force | Out-Null }
+    New-ItemProperty -LiteralPath $Path -Name 'DumpFolder' -Value $Folder -PropertyType ExpandString -Force | Out-Null
+    New-ItemProperty -LiteralPath $Path -Name 'DumpType'   -Value $Type   -PropertyType DWord        -Force | Out-Null
+    New-ItemProperty -LiteralPath $Path -Name 'DumpCount'  -Value $Count  -PropertyType DWord        -Force | Out-Null
+}
+
+# Restore one key to a snapshot: re-set the saved values (removing ones that were absent), and if the key did not
+# exist before AND we own it (a per-app subkey we created), remove it.
+function Restore-WerKey([string]$Path, $State, [bool]$RemoveIfCreated) {
+    if (-not $State) { return }
+    if (-not $State.Existed) {
+        if ($RemoveIfCreated -and (Test-Path -LiteralPath $Path)) { Remove-Item -LiteralPath $Path -Recurse -Force -ErrorAction SilentlyContinue }
+        return
+    }
+    if (-not (Test-Path -LiteralPath $Path)) { New-Item -Path $Path -Force | Out-Null }
+    foreach ($v in 'DumpFolder','DumpType','DumpCount') {
+        if ($null -ne $State.$v) {
+            $pt = if ($v -eq 'DumpFolder') { 'ExpandString' } else { 'DWord' }
+            New-ItemProperty -LiteralPath $Path -Name $v -Value $State.$v -PropertyType $pt -Force | Out-Null
+        } else {
+            Remove-ItemProperty -LiteralPath $Path -Name $v -Force -ErrorAction SilentlyContinue
+        }
+    }
+}
+
+# The LocalDumps keys we target for the current config: the base key (WerAllApps) or one per configured app.
+function Get-WerTargetKeys($cfg) {
+    if ($cfg.WerAllApps) { return @($WerKeyPath) }
+    @($cfg.Apps | Where-Object { "$_".Trim() } | ForEach-Object {
+        $app = if ("$_" -notlike '*.exe') { "$_.exe" } else { "$_" }
+        Join-Path $WerKeyPath $app
+    })
+}
+
+# Reconcile the WER LocalDumps registry to the config. Records the prior state once (wer-backup.json) so a later
+# disable restores it exactly. Safe to call repeatedly (idempotent). Needs admin; logs + returns a status line.
+function Sync-WerLocalDumps($cfg) {
+    if (-not (Test-Admin)) { Write-Log 'WER LocalDumps change needs admin - skipped (enable/disable from the elevated service).' 'WARN'; return }
+    try {
+        if ($cfg.WerDumpsEnabled) {
+            New-Item -ItemType Directory -Path $cfg.WerDumpFolder -Force | Out-Null
+            # Free-disk sanity: a full dump is roughly the process working set (GBs). Warn, never block.
+            try {
+                $drive = [IO.Path]::GetPathRoot($cfg.WerDumpFolder)
+                $free  = (Get-CimInstance Win32_LogicalDisk -Filter "DeviceID='$($drive.TrimEnd('\'))'" -ErrorAction SilentlyContinue).FreeSpace
+                if ($free -and $free -lt 5GB) { Write-Log ("WER: only {0:N1} GB free on {1} - a full crash dump can be several GB; raise free space or lower WerDumpCount." -f ($free/1GB), $drive) 'WARN' }
+            } catch {}
+            $type = ConvertTo-WerDumpType $cfg.WerDumpType
+            $cnt  = [Math]::Max([int]$cfg.WerDumpCount, 1)
+            $targets = @(Get-WerTargetKeys $cfg)
+            # Back up the prior state ONCE (first enable), so repeated syncs don't overwrite the real baseline.
+            if (-not (Test-Path -LiteralPath $WerBackupFile)) {
+                $backup = [ordered]@{ Base = (Get-WerKeyState $WerKeyPath); Keys = [ordered]@{} }
+                foreach ($k in $targets) { $backup.Keys[$k] = (Get-WerKeyState $k) }
+                $backup | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath $WerBackupFile -Encoding UTF8
+            }
+            if (-not (Test-Path -LiteralPath $WerKeyPath)) { New-Item -Path $WerKeyPath -Force | Out-Null }
+            foreach ($k in $targets) { Set-WerKey $k $cfg.WerDumpFolder $type $cnt }
+            $scope = if ($cfg.WerAllApps) { 'ALL applications' } else { "$($targets.Count) app(s): $(@($cfg.Apps) -join ', ')" }
+            Write-Log "WER LocalDumps ON - $scope -> $($cfg.WerDumpFolder) ($($cfg.WerDumpType), keep $cnt). Dumps are triaged like ProcDump dumps. NOTE: with LocalDumps on, Windows does not show its crash dialog for these apps."
+        } else {
+            Restore-WerLocalDumps
+        }
+    } catch { Write-Log "WER LocalDumps sync failed: $($_.Exception.Message)" 'WARN' }
+}
+
+# Undo our WER LocalDumps configuration, restoring the registry to the recorded baseline (or removing the per-app
+# subkeys we created). No-op when we never enabled it (no backup file). Called by Disable-Service + a disabled sync.
+function Restore-WerLocalDumps {
+    if (-not (Test-Path -LiteralPath $WerBackupFile)) { return }
+    if (-not (Test-Admin)) { Write-Log 'WER LocalDumps restore needs admin - skipped.' 'WARN'; return }
+    try {
+        $b = Get-Content -LiteralPath $WerBackupFile -Raw | ConvertFrom-Json
+        foreach ($p in $b.Keys.PSObject.Properties) { Restore-WerKey $p.Name $p.Value $true }   # per-app subkeys: remove if we created them
+        Restore-WerKey $WerKeyPath $b.Base $false                                                 # base key: restore values, never delete the shared key
+        Remove-Item -LiteralPath $WerBackupFile -Force -ErrorAction SilentlyContinue
+        Write-Log 'WER LocalDumps OFF - registry restored to its previous state.'
+    } catch { Write-Log "WER LocalDumps restore failed: $($_.Exception.Message)" 'WARN' }
 }
 
 # ---------- Safe ProcDump shutdown ----------
@@ -873,6 +985,7 @@ function Enable-Service {
     if (-not (Install-Sysinternals)) { Write-Log 'Install aborted: ProcDump not available.' 'ERROR'; return }
     Install-KnownIssuesDeps $cfg
     Save-Config $cfg                        # merge defaults (new keys appear in the editor); preserves edits
+    Sync-WerLocalDumps $cfg                 # RT-2: apply/restore WER LocalDumps to match the config (needs admin; we are elevated)
 
     Stop-Monitor $cfg                   # stop any running instance so the fresh start picks up current src
     Register-MonitorTask $cfg               # task runs "$InstalledScript -Monitor" in place - nothing copied
@@ -927,6 +1040,7 @@ function Disable-Service {
     # (outside BaseDir) and are untouched regardless.
     $cfg = Read-Config
     Stop-Monitor $cfg
+    Restore-WerLocalDumps                   # RT-2: undo WER LocalDumps so disabling the service leaves the box as it was
     if (Get-MonitorTask) {
         # Disable the trigger first so no logon / StartWhenAvailable event can fire it mid-removal, then remove it.
         Disable-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue | Out-Null
@@ -1086,6 +1200,7 @@ function Invoke-Monitor {
         }
         if (-not $cfg.Apps) { Write-Log 'No apps configured - exiting.' 'ERROR'; $script:ExitCode = 1; return }
         New-Item -ItemType Directory -Path $cfg.DumpDir -Force | Out-Null
+        try { Sync-WerLocalDumps $cfg } catch {}   # RT-2: keep the WER LocalDumps registry matching the config
 
         Remove-Item $StopFile -Force -ErrorAction SilentlyContinue   # stale request from earlier
         Stop-ProcDumpInstances $cfg      # detach orphans from a previous run (gracefully)
@@ -1229,6 +1344,7 @@ function Invoke-Monitor {
                     $monitors.Values | ForEach-Object { Close-ProcDumpCapture $_ }
                     $cfg = Read-Config
                     $script:LogMaxMB = $cfg.LogMaxMB
+                    try { Sync-WerLocalDumps $cfg } catch {}   # RT-2: re-apply WER LocalDumps if its settings changed
                     $monitors = Get-AdoptedMonitors $cfg
                     $seenProcs = @{}
                     $cooldown  = @{}

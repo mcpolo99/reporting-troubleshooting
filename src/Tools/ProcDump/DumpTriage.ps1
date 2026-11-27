@@ -90,6 +90,14 @@ $cfg = $null; if (Test-Path $MonConfig) { try { $cfg = Get-Content $MonConfig -R
 function Cfg($name, $default) { if ($cfg -and $null -ne $cfg.$name -and "$($cfg.$name)" -ne '') { $cfg.$name } else { $default } }
 
 if (-not $DumpDir) { $DumpDir = Cfg 'DumpDir' 'C:\dumps' }
+# RT-2: when WER LocalDumps is on, its folder is triaged + retained on the same terms as the main dump dir, so a
+# crash caught by WER (no ProcDump attached) flows through identically. A WER dump is named <exe>.<pid>.dmp, which
+# does not match our scheme, so triage derives the resting name from the dump's own image - no extra naming code.
+$werDir = $null
+if ([bool](Cfg 'WerDumpsEnabled' $false)) {
+    $werDir = "$(Cfg 'WerDumpFolder' '')".Trim()
+    if (-not $werDir -or ($werDir -ieq $DumpDir) -or -not (Test-Path -LiteralPath $werDir)) { $werDir = $null }
+}
 $suppressKnown  = [bool](Cfg 'SuppressKnown' $true)
 $clrmd    = Resolve-PackageTool 'clrmd'
 # Known store resolution order: an explicit config BaselinePath, else the SYNCED copy under KnownIssues (what
@@ -147,8 +155,10 @@ if ($DumpPath) {
         # Skip any dump already marked PROCESSED (a '<dump>.handled' marker) - it was triaged in an earlier pass and
         # is only awaiting the delete grace, so never re-triage it (and a dropped dump stays raw, so this is what
         # keeps it out of the scan).
-        $dumps = @(Get-ChildItem -Path $DumpDir -Filter *.dmp -File -ErrorAction SilentlyContinue |
-                   Where-Object { -not (Test-Path -LiteralPath ($_.FullName + '.handled')) } |
+        $scanRoots = @($DumpDir) + @($werDir | Where-Object { $_ })
+        $dumps = @($scanRoots | ForEach-Object {
+                     Get-ChildItem -Path $_ -Filter *.dmp -File -ErrorAction SilentlyContinue |
+                       Where-Object { -not (Test-Path -LiteralPath ($_.FullName + '.handled')) } } |
                    Sort-Object CreationTime)
         Say ("Triaging {0} dump(s) in {1} (walk tool: {2})`n" -f $dumps.Count, $DumpDir, $(if ($clrmd) { 'ClrMD' } else { 'NONE - hangs stay provisional' }))
         $kept = 0; $dropped = 0; $defer = 0; $skipped = 0; $errors = 0
@@ -183,7 +193,7 @@ if ($DumpPath) {
         # The ingest worker owns the dump dir, so it runs the single delete path too (never the armer). The grace
         # period holds a processed dump before deletion; the disk budget is the hard ceiling. Not in a dry run.
         if (-not $DryRun -and (Get-Command Invoke-DumpRetention -ErrorAction SilentlyContinue)) {
-            try { Invoke-DumpRetention -DumpDir $DumpDir -LimitGB ([double](Cfg 'DumpDiskLimitGB' 30)) -Dir $script:StateDir -GraceSeconds ([int](Cfg 'DumpGraceSeconds' 7200)) } catch {}
+            try { Invoke-DumpRetention -DumpDir $DumpDir -LimitGB ([double](Cfg 'DumpDiskLimitGB' 30)) -Dir $script:StateDir -GraceSeconds ([int](Cfg 'DumpGraceSeconds' 7200)) -ExtraRoots @($werDir | Where-Object { $_ }) } catch {}
         }
     } finally { if ($owned) { try { $mtx.ReleaseMutex() } catch {} }; $mtx.Dispose() }
 }

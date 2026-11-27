@@ -24,6 +24,13 @@
   label + timestamp; in analysis, filter the Events view for "Mark" and jump to it. -Mark needs no admin and
   runs while a capture blocks another console (like -Stop). The GUI adds a Mark button + a global hotkey.
 
+  COMPANION (spawned automatically by -Start; config StartRundown / MarkOnCrash): a detached watcher that lives
+  for the capture. RT-1 (StartRundown): fires a CLR *start* rundown at capture start and on every mark, so
+  already-running .NET methods are NAMED in the trace even if the process crashes before PerfView's end-of-capture
+  rundown (without it those frames are '?!?'). RT-3 (MarkOnCrash): watches the Application log (1000/1026) and the
+  monitor's dump folders during the capture, drops an automatic mark per crash, and writes a '<trace>.crashes.json'
+  index next to the trace listing the crashes + any dumps written, so analysis takes trace + dump(s) together.
+
   ONE capture model for every trace: -Start runs a single PerfView 'collect' that ALWAYS arms the stop
   event, so it can be stopped at any time with -Stop (or from the GUI, or by any process writing the
   event). -Seconds adds a hard time cap ONLY when > 0; -Seconds 0 (default) means no limit - it runs
@@ -58,6 +65,7 @@ param(
     [switch]$SendStopEvent,
     [switch]$Mark,                   # drop a labeled 'search point' into the running capture (no admin)
     [string]$MarkText,               # optional label for the mark; auto-numbered + timestamped when blank
+    [switch]$Companion,              # internal: the per-capture watcher (CLR start rundown + auto-mark on crash). Spawned by -Start.
     [switch]$Uninstall,
     [string]$Profile,
     [string]$Label,
@@ -79,6 +87,10 @@ $SymbolDir   = Join-Path $BaseDir 'Symbols'                        # PerfView's 
 $SessionName = 'PerfViewCapture'                     # fixed ETW session name for start/stop/abort pairing
 $StopEventSource = 'PerfViewStop'
 $StopEventText   = 'PERFVIEW_STOP_NOW'
+# CLR rundown provider (Microsoft-Windows-DotNETRuntimeRundown). Enabling it with the StartRundown keyword on the
+# live capture session makes running .NET processes enumerate their modules + already-JIT-compiled methods INTO the
+# trace (RT-1), so their frames get method names even if the process crashes before PerfView's end-of-capture rundown.
+$ClrRundownGuid  = 'A669021C-C450-4609-A035-5AF59AF4DF18'
 # $ToolsDir / $PerfViewExe are set from the shared package store after Packages.ps1 is dot-sourced below.
 $ScriptDir   = if ($PSCommandPath) { Split-Path -Parent $PSCommandPath } else { (Get-Location).Path }
 
@@ -182,6 +194,8 @@ function Get-DefaultConfig {
         LogKeep        = 20
         LogMaxMB       = 10
         MarkHotkey     = 'Ctrl+Alt+M'   # GUI global hotkey to drop a mark during a capture; blank = none
+        StartRundown   = $true          # RT-1: fire a CLR start rundown at capture start + on every mark, so already-running .NET methods are named even if the process crashes before stop
+        MarkOnCrash    = $true          # RT-3: an app crash during the capture (Application log 1000/1026, or a new dump) drops an automatic mark and is indexed next to the trace
         Profiles       = Get-DefaultProfiles
     }
 }
@@ -396,6 +410,7 @@ function Start-Trace([string]$ProfileName, [string]$Label, [int]$MaxSeconds = 0)
                else { "No time limit - runs until you Stop it (fires the '$StopEventText' event)." }
     Write-Log "Capture started (profile '$($p.Name)'). $howStop  Output on stop: $out (+ .zip). Reproduce the problem, then Stop."
 
+    Start-CaptureCompanion   # RT-1/RT-3: detached watcher for the CLR start rundown + auto-mark on crash
     $code = Invoke-PerfView $args 'Collect'
     Clear-ActiveState
     if ($code -eq 0) {
@@ -461,9 +476,143 @@ function Add-Mark([string]$Text) {
     try {
         $proc = Start-Process -FilePath $PerfViewExe -ArgumentList $argStr -NoNewWindow -PassThru -ErrorAction Stop
         if (-not $proc.WaitForExit(15000)) { try { $proc.Kill() } catch {}; Write-Log "Mark '$label' did not return in time (is a capture running?)." 'WARN'; return }
-        if ($proc.ExitCode -eq 0) { Write-Log "Marked: '$label'" }
+        if ($proc.ExitCode -eq 0) {
+            Write-Log "Marked: '$label'"
+            # RT-1: also refresh the CLR rundown at each mark, so methods JIT-compiled since the last rundown are
+            # named too (a crash after a mark then loses at most what was compiled since that mark). Needs admin;
+            # when the mark runs un-elevated this logs a warning and the mark itself is unaffected.
+            if ((Read-Config).StartRundown) { Invoke-ClrStartRundown "mark $n" }
+        }
         else { Write-Log "Mark '$label' returned exit $($proc.ExitCode) - is a capture running? (PerfView log: $pvLog)" 'WARN' }
     } catch { Write-Log "Mark failed to launch PerfView: $($_.Exception.Message)" 'ERROR' }
+}
+
+# =============================== CLR RUNDOWN + COMPANION (RT-1 / RT-3) ==
+# Fire a CLR *start* rundown into the live capture session. Enabling the DotNETRuntimeRundown provider with the
+# StartRundown keyword makes every running .NET process enumerate its loaded modules and already-JIT-compiled
+# methods into whatever session has the provider on - PerfView's own user-mode session (named $SessionName). Those
+# MethodDCStart events let analysis name JIT frames that otherwise stay '?!?' for a process that dies before the
+# end-of-capture rundown. Keywords 0x78 = StartRundown(0x40) | NGen(0x20) | Jit(0x10) | Loader(0x08) - method
+# NAMES, no IL-to-native map (0x1000), to keep the extra data bounded on a large process. Needs admin (the session
+# is system-wide); logged, non-fatal, and never restarts or stops PerfView's capture.
+function Invoke-ClrStartRundown([string]$Why) {
+    if (-not (Get-LiveSession)) { Write-Log "CLR start rundown ($Why) skipped - capture session '$SessionName' is not live yet." 'WARN'; return }
+    try {
+        $out = & logman.exe update trace $SessionName -p "{$ClrRundownGuid}" 0x78 0x5 -ets 2>&1
+        if ($LASTEXITCODE -eq 0) {
+            Write-Log "CLR start rundown fired ($Why): running .NET processes enumerated their methods into the trace (keywords 0x78)."
+        } else {
+            Write-Log "CLR start rundown ($Why) could not be enabled on '$SessionName' (logman: $("$out".Trim())). Frames of a process that crashes before stop may stay unnamed." 'WARN'
+        }
+    } catch { Write-Log "CLR start rundown ($Why) failed: $($_.Exception.Message)" 'WARN' }
+}
+
+# The dump folders to watch for crash dumps written DURING a capture (RT-3): the ProcDump monitor's dump dir and,
+# when on, its WER LocalDumps folder. Read from the monitor's own config.json (a sibling tool under the app root).
+function Get-MonitorDumpDirs {
+    $dirs = @()
+    $mc = Join-Path $env:ProgramData 'ReportingTroubleshooting\Monitor\config.json'
+    if (Test-Path -LiteralPath $mc) {
+        try {
+            $m = Get-Content -LiteralPath $mc -Raw | ConvertFrom-Json
+            if ($m.DumpDir) { $dirs += "$($m.DumpDir)" }
+            if ([bool]$m.WerDumpsEnabled -and $m.WerDumpFolder) { $dirs += "$($m.WerDumpFolder)" }
+        } catch {}
+    }
+    @($dirs | Where-Object { $_ -and (Test-Path -LiteralPath $_) } | Select-Object -Unique)
+}
+
+# App crashes recorded in the Application log since the capture started: Application Error (1000) and .NET Runtime
+# (1026). Best-effort field extraction (exe / pid / exception code); the RecordId de-dupes across polls.
+function Get-CrashEvents([datetime]$SinceUtc) {
+    $res = @()
+    try {
+        $evs = Get-WinEvent -FilterHashtable @{ LogName = 'Application'; ProviderName = @('Application Error', '.NET Runtime'); Id = @(1000, 1026); StartTime = $SinceUtc.ToLocalTime() } -ErrorAction SilentlyContinue
+        foreach ($e in @($evs)) {
+            $p = @($e.Properties | ForEach-Object { "$($_.Value)" })
+            $exe = 'app'; $procId = ''; $code = ''
+            if ($e.Id -eq 1000) {
+                if ($p.Count -ge 1) { $exe = $p[0] }
+                if ($p.Count -ge 7) { $code = $p[6] }
+                if ($p.Count -ge 9) { $procId = $p[8] }
+            } else {
+                $code = '0xE0434352'   # CLR unhandled exception (COM+ 0xE0434352)
+                if ("$($e.Message)" -match '(?im)^Application:\s*(\S+)') { $exe = $matches[1] }
+            }
+            $res += [pscustomobject]@{ Record = "$($e.RecordId)"; Time = $e.TimeCreated.ToString('o'); Exe = $exe; Pid = $procId; Code = $code }
+        }
+    } catch {}
+    $res
+}
+
+# The per-capture companion: a detached child of Start-Trace that lives for the whole capture (while active.json
+# exists). RT-1: once the session is live, fire a CLR start rundown. RT-3: watch the Application log + dump folders
+# and drop an automatic mark for each crash, recording crashes + dumps written during the capture; on stop it
+# writes a '<trace>.crashes.json' sidecar next to the trace so analysis can take trace + dump(s) together.
+function Invoke-Companion {
+    $cfg    = Read-Config
+    $active = Read-ActiveState
+    if (-not $active) { Write-Log 'Companion: no active capture - nothing to watch.' 'WARN'; return }
+    $startUtc = try { ([datetime]$active.StartedUtc).ToUniversalTime() } catch { (Get-Date).ToUniversalTime() }
+    $out      = "$($active.OutFile)"
+    $dumpDirs = Get-MonitorDumpDirs
+    Write-Log "Companion started for '$out' (rundown=$([bool]$cfg.StartRundown), markOnCrash=$([bool]$cfg.MarkOnCrash), dump dirs: $(@($dumpDirs) -join '; '))."
+
+    # Wait for PerfView's session to go live (up to 60s), then fire the start rundown.
+    $wait = (Get-Date).AddSeconds(60)
+    while ((Get-Date) -lt $wait -and (Test-Path $ActiveFile) -and -not (Get-LiveSession)) { Start-Sleep -Milliseconds 500 }
+    if ($cfg.StartRundown -and (Test-Path $ActiveFile)) { Start-Sleep -Seconds 2; Invoke-ClrStartRundown 'capture start' }
+
+    $seenEvents = New-Object 'System.Collections.Generic.HashSet[string]'
+    $seenDumps  = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
+    foreach ($dd in $dumpDirs) { Get-ChildItem -Path $dd -Filter *.dmp -File -ErrorAction SilentlyContinue | ForEach-Object { [void]$seenDumps.Add($_.FullName) } }
+    $crashes = @(); $dumps = @()
+    $hardStop = (Get-Date).AddHours(24)   # safety: never outlive a reasonable capture if active.json is orphaned
+
+    while ((Test-Path $ActiveFile) -and (Get-Date) -lt $hardStop) {
+        if ($cfg.MarkOnCrash) {
+            foreach ($ev in (Get-CrashEvents $startUtc)) {
+                if (-not $seenEvents.Add($ev.Record)) { continue }
+                $label = "crash: $($ev.Exe) pid $($ev.Pid) $($ev.Code)".Trim()
+                Write-Log "Companion: app crash during capture - $label (auto-marking the trace)."
+                Add-Mark $label
+                $crashes += [pscustomobject]@{ time = $ev.Time; exe = $ev.Exe; pid = $ev.Pid; code = $ev.Code }
+            }
+            foreach ($dd in $dumpDirs) {
+                foreach ($d in @(Get-ChildItem -Path $dd -Filter *.dmp -File -ErrorAction SilentlyContinue)) {
+                    if ($seenDumps.Add($d.FullName)) {
+                        $dumps += [pscustomobject]@{ file = $d.FullName; time = $d.CreationTime.ToString('o'); sizeMB = [math]::Round($d.Length / 1MB, 1) }
+                        Write-Log "Companion: dump written during capture - $($d.Name) ($([math]::Round($d.Length/1MB,1)) MB)."
+                    }
+                }
+            }
+        }
+        Start-Sleep -Seconds 3
+    }
+
+    # Capture finished (active.json cleared by Stop-Trace): write the crash/dump index next to the trace.
+    if ($crashes.Count -or $dumps.Count) {
+        $side = [pscustomobject]@{ trace = $out; capturedUtc = $startUtc.ToString('o'); crashes = $crashes; dumps = $dumps }
+        try {
+            $side | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath "$out.crashes.json" -Encoding UTF8
+            Write-Log "Companion: wrote crash/dump index $out.crashes.json ($($crashes.Count) crash(es), $($dumps.Count) dump(s))."
+        } catch { Write-Log "Companion: could not write the crash/dump index: $($_.Exception.Message)" 'WARN' }
+    } else {
+        Write-Log 'Companion: capture ended - no crashes or new dumps observed during it.'
+    }
+}
+
+# Spawn the companion detached (inherits this elevated process's admin, which the CLR rundown needs). No-op when
+# both features are off. Called from Start-Trace right after the capture is armed.
+function Start-CaptureCompanion {
+    $cfg = Read-Config
+    if (-not ($cfg.StartRundown -or $cfg.MarkOnCrash)) { return }
+    try {
+        Start-Process powershell.exe -WindowStyle Hidden -ArgumentList @(
+            '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-WindowStyle', 'Hidden',
+            '-File', "`"$PSCommandPath`"", '-Companion') | Out-Null
+        Write-Log "Capture companion launched (CLR start rundown: $([bool]$cfg.StartRundown); auto-mark on crash: $([bool]$cfg.MarkOnCrash))."
+    } catch { Write-Log "Could not launch the capture companion: $($_.Exception.Message)" 'WARN' }
 }
 
 # =============================== STATUS =================================
@@ -641,12 +790,13 @@ function Invoke-Uninstall {
 
 # =============================== ENTRY POINT ============================
 # When loaded as a library (RT_LIBRARY=1, e.g. the GUI's background runspace) expose the functions only:
-# no elevation, no logging session, no dispatch. The caller drives the functions directly.
-if ($env:RT_LIBRARY -eq '1') { return }
+# no elevation, no logging session, no dispatch. The caller drives the functions directly. EXCEPTION: the
+# companion the GUI spawns as its own process inherits RT_LIBRARY=1 from the GUI env and MUST still run.
+if ($env:RT_LIBRARY -eq '1' -and -not $Companion) { return }
 
-# Starting / stopping / aborting a kernel ETW session, and installing, need admin. Status and the
-# stop-event helper do not, so don't force elevation just to read state.
-$needsAdmin = -not ($Status -or $SendStopEvent -or $Mark)
+# Starting / stopping / aborting a kernel ETW session, and installing, need admin. Status, the stop-event helper,
+# marks and the companion do not force elevation (the companion inherits admin from the elevated -Start that spawns it).
+$needsAdmin = -not ($Status -or $SendStopEvent -or $Mark -or $Companion)
 
 if ($ParamFile -and (Test-Path -LiteralPath $ParamFile)) {
     try {
@@ -677,7 +827,7 @@ if ($needsAdmin -and -not (Test-Admin) -and -not $ParamFile) {
     }
 }
 
-$unattended = $Install -or $Start -or $Stop -or $Mark -or $CollectTimed -or $Abort -or $Status -or $SendStopEvent -or $Uninstall
+$unattended = $Install -or $Start -or $Stop -or $Mark -or $Companion -or $CollectTimed -or $Abort -or $Status -or $SendStopEvent -or $Uninstall
 $script:EchoLog = -not $unattended
 New-LogFile
 Write-Log "Session (v$ScriptVersion) started by $env:USERDOMAIN\$env:USERNAME from $PSCommandPath"
@@ -689,6 +839,7 @@ if     ($Install)       { $null = Install-PerfView }
 elseif ($Start)         { Start-Trace $Profile $Label $Seconds }   # -Seconds 0 (default) = until -Stop / event
 elseif ($Stop)          { Stop-Trace }
 elseif ($Mark)          { Add-Mark $MarkText }                     # labeled search point; no admin, like the stop event
+elseif ($Companion)     { Invoke-Companion }                      # per-capture watcher: CLR start rundown + auto-mark on crash
 elseif ($CollectTimed)  { Start-Trace $Profile $Label $Seconds }   # same path; the stop event is always armed
 elseif ($Abort)         { Stop-Abort }
 elseif ($Status)        { Show-Status }

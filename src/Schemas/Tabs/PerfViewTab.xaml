@@ -102,6 +102,11 @@
         <TextBox x:Name="TxtPvLogMax" Width="60" VerticalAlignment="Center"/>
       </StackPanel>
     </Grid>
+    <StackPanel Margin="0,4,0,10">
+      <CheckBox x:Name="ChkPvStartRundown" Content="CLR start rundown (name already-running .NET methods, even if the process crashes)" Foreground="{DynamicResource AppFgColor}" Margin="0,0,0,4"/>
+      <CheckBox x:Name="ChkPvMarkOnCrash" Content="Auto-mark + index crashes during a capture (Application log 1000/1026 and new dumps)" Foreground="{DynamicResource AppFgColor}"/>
+      <TextBlock Text="Rundown fires at capture start and on every mark; without it, a process that crashes before Stop has unnamed (?!?) JIT frames." Foreground="{DynamicResource AppIdColor}" TextWrapping="Wrap" Margin="0,4,0,0"/>
+    </StackPanel>
     <Button x:Name="BtnPvSettingsSave" Content="Save settings" Height="28" MinWidth="110" HorizontalAlignment="Left"/>
   </StackPanel>
 </ScrollViewer>

@@ -98,7 +98,7 @@ namespace RtHook {
     foreach ($n in 'TxtOutput','LblBusy','LblVersion',
                    'CmbPvProfile','TxtPvLabel','BtnPvStart','BtnPvStop','BtnPvAbort','TxtPvSeconds','BtnPvOpen','BtnPvStatus','LblPvStatus','BtnPvMark','TxtPvMark','LblPvHotkey',
                    'TxtPvProfName','TxtPvProfDesc','PnlPvKernel','CmbPvClr','PnlPvProviders','TxtPvProvOther','TxtPvExtra','TxtPvCircular','TxtPvBuffer','BtnPvProfSave','BtnPvProfDelete','BtnPvProfDefault',
-                   'TxtPvOutput','TxtPvSym','TxtPvHotkey','TxtPvLogKeep','TxtPvLogMax','ChkPvMerge','ChkPvZip','BtnPvSettingsSave',
+                   'TxtPvOutput','TxtPvSym','TxtPvHotkey','TxtPvLogKeep','TxtPvLogMax','ChkPvMerge','ChkPvZip','ChkPvStartRundown','ChkPvMarkOnCrash','BtnPvSettingsSave',
                    'BtnMonEnable','BtnMonStart','BtnMonStop','BtnMonStatus','BtnMonTestTelemetry','BtnMonForceFlush','BtnMonCollect','BtnMonDisable','LblMonStatus','BtnMonVerify','LblMonVerify','PnlCfgProcess','PnlCfgMonitor','PnlCfgGeneral','BtnMonSave','BtnMonReload','ChkMonTail','TxtMonLog','LblMonCompress','PbMonCompress',
                    'BtnPkgInstallAll','BtnPkgRefresh','BtnPkgOpen','BtnPkgUpdate','LblPkgUpdate','PnlPackages','LblPkgStatus',
                    'BtnShortcut') {
@@ -130,7 +130,7 @@ namespace RtHook {
                                   'Microsoft-Windows-Kernel-Power','Microsoft-Antimalware-Service','Microsoft-Antimalware-Engine')
     $script:PvClrPresets      = @('Default','None','Verbose')
     # dropdown options for Monitor config fields (anything not listed falls back to checkbox/text by type)
-    $script:MonFieldMeta = @{ DuplicateAction = @('Delete','Keep'); RunMode = @('Logon','Startup'); WorkerPriority = @('Idle','BelowNormal','Normal') }
+    $script:MonFieldMeta = @{ DuplicateAction = @('Delete','Keep'); RunMode = @('Logon','Startup'); WorkerPriority = @('Idle','BelowNormal','Normal'); WerDumpType = @('Full','Mini') }
     # Which config sub-tab each field belongs to (#53). ProcDumpArgs is rendered as toggles on 'Process', so it is
     # not listed here. Any field not listed falls through to 'General'.
     $script:MonFieldGroup = @{
@@ -138,6 +138,8 @@ namespace RtHook {
         DuplicateAction = 'Monitor'; DuplicateWindowSeconds = 'Monitor'; RunMode = 'Monitor'; TaskUser = 'Monitor'; HeadlessLauncher = 'Monitor'
         DumpDiskLimitGB = 'General'; DumpGraceSeconds = 'General'; CleanupSeconds = 'General'; KnownIssuesEnabled = 'General'; SuppressKnown = 'General'; WorkerPriority = 'General'
         BaselinePath = 'General'; TelemetrySendEnabled = 'General'; TelemetrySeconds = 'General'; LogKeep = 'General'; LogMaxMB = 'General'
+        # RT-2 WER LocalDumps crash-dump fallback (needs admin; applied by Enable Service). Grouped on 'General'.
+        WerDumpsEnabled = 'General'; WerDumpFolder = 'General'; WerDumpType = 'General'; WerDumpCount = 'General'; WerAllApps = 'General'
     }
 
     # PerfView safety: an ETW session started with 'PerfView start' keeps running after PerfView.exe exits,
@@ -361,6 +363,8 @@ namespace RtHook {
         $script:TxtPvLogMax.Text   = "$($c.LogMaxMB)"
         $script:ChkPvMerge.IsChecked = [bool]$c.Merge
         $script:ChkPvZip.IsChecked   = [bool]$c.Zip
+        $script:ChkPvStartRundown.IsChecked = [bool]$c.StartRundown
+        $script:ChkPvMarkOnCrash.IsChecked  = [bool]$c.MarkOnCrash
         $script:PvMarkHotkey = "$($c.MarkHotkey)".Trim()
         $script:LblPvHotkey.Text = if ($script:PvMarkHotkey) { "mark hotkey: $($script:PvMarkHotkey)  -  works anywhere while capturing" } else { 'mark hotkey: none set (set it in Global settings below)' }
         script:Load-PvProfileFields ([string]$script:CmbPvProfile.SelectedItem)
@@ -452,13 +456,15 @@ namespace RtHook {
         $hot = ([string]$script:TxtPvHotkey.Text).Trim()
         $vals = @($script:TxtPvOutput.Text, $script:TxtPvSym.Text,
                   $(if ($script:ChkPvMerge.IsChecked) { 'true' } else { 'false' }), $(if ($script:ChkPvZip.IsChecked) { 'true' } else { 'false' }),
-                  $hot, $script:TxtPvLogKeep.Text, $script:TxtPvLogMax.Text)
+                  $hot, $script:TxtPvLogKeep.Text, $script:TxtPvLogMax.Text,
+                  $(if ($script:ChkPvStartRundown.IsChecked) { 'true' } else { 'false' }), $(if ($script:ChkPvMarkOnCrash.IsChecked) { 'true' } else { 'false' }))
         & $script:Append 'PerfView: save settings...'
         script:Invoke-Action 'Pv' $script:RsPv {
-            param($out,$sym,$merge,$zip,$hotkey,$logkeep,$logmax)
+            param($out,$sym,$merge,$zip,$hotkey,$logkeep,$logmax,$rundown,$markcrash)
             $cfg = Read-Config; $cfg.OutputDir = $out; $cfg.SymbolPath = $sym
             $cfg.Merge = ($merge -eq 'true'); $cfg.Zip = ($zip -eq 'true')
             $cfg.MarkHotkey = $hotkey
+            $cfg.StartRundown = ($rundown -eq 'true'); $cfg.MarkOnCrash = ($markcrash -eq 'true')
             $k = 0; if ([int]::TryParse("$logkeep", [ref]$k) -and $k -ge 0) { $cfg.LogKeep = $k }
             $m = 0; if ([int]::TryParse("$logmax",  [ref]$m) -and $m -ge 1) { $cfg.LogMaxMB = $m }
             Save-Config $cfg; "settings saved (output: $out)"
