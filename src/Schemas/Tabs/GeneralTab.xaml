@@ -33,7 +33,7 @@
     <!-- ============ Symbols (shared) ============ -->
     <TextBlock Text="Symbols (shared store)" Foreground="{DynamicResource AppFgColor}" FontWeight="SemiBold" Margin="0,0,0,4"/>
     <TextBlock TextWrapping="Wrap" Foreground="{DynamicResource AppIdColor}" Margin="0,0,0,8"
-               Text="One common symbol path shared by PerfView and the other tools (downloaded OS/CLR symbols + any generated app PDBs). Blank = the default shared store under %ProgramData%\ReportingTroubleshooting\Symbols, backed by the Microsoft public server. Set an explicit _NT_SYMBOL_PATH (e.g. an on-site store) to override."/>
+               Text="One common symbol path shared by PerfView and the other tools (downloaded OS/CLR symbols + any generated app PDBs). Prefilled with the default shared store under %ProgramData%\ReportingTroubleshooting\Symbols, backed by the Microsoft public server - leave it as-is to keep that default, or set an explicit _NT_SYMBOL_PATH (e.g. an on-site store) to override."/>
     <Grid Margin="0,0,0,6">
       <Grid.ColumnDefinitions><ColumnDefinition Width="150"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
       <TextBlock Grid.Column="0" Text="Symbol path" Foreground="{DynamicResource AppFgColor}" VerticalAlignment="Center"/>

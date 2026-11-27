@@ -762,8 +762,14 @@ namespace RtHook {
             }
         } catch { & $script:Append "General: WER settings load failed: $($_.Exception.Message)" }
         try {
-            $p = Invoke-ToolSync -Runspace $script:RsGen -Script { (Read-PlatformConfig).SymbolPath } | Select-Object -First 1
-            $script:TxtGenSymPath.Text = [string]$p
+            # Prefill with the saved override, or - when none is set (blank = default) - the resolved default
+            # shared-store path, so the field always SHOWS the effective symbol path. The default is remembered
+            # so Save can re-blank it (keep it dynamic) if the user leaves it untouched.
+            $p = Invoke-ToolSync -Runspace $script:RsGen -Script {
+                [pscustomobject]@{ Saved = (Read-PlatformConfig).SymbolPath; Default = (Get-SharedSymbolPath '') }
+            } | Select-Object -First 1
+            $script:GenSymDefault = [string]$p.Default
+            $script:TxtGenSymPath.Text = if ("$($p.Saved)".Trim()) { [string]$p.Saved } else { $script:GenSymDefault }
         } catch { & $script:Append "General: symbol path load failed: $($_.Exception.Message)" }
         script:Refresh-GenWerStatus
     }
@@ -825,10 +831,15 @@ namespace RtHook {
     $script:BtnGenSymSave.Add_Click({
         & $script:Append 'General: saving shared symbol path...'
         script:Invoke-Action 'Gen' $script:RsGen {
-            param($p)
-            $cfg = Read-PlatformConfig; $cfg.SymbolPath = "$p".Trim(); Save-PlatformConfig $cfg
-            "symbol path saved (resolves to: $(Get-SharedSymbolPath $cfg.SymbolPath))"
-        } @($script:TxtGenSymPath.Text) $null
+            param($p, $def)
+            $val = "$p".Trim()
+            # If left at the prefilled default, store blank so the path stays dynamic (tracks the app root)
+            # rather than freezing today's default as an explicit override.
+            if ($val -eq "$def".Trim()) { $val = '' }
+            $cfg = Read-PlatformConfig; $cfg.SymbolPath = $val; Save-PlatformConfig $cfg
+            if ($val) { "symbol path saved (override: $val)" }
+            else { "symbol path saved (default shared store: $(Get-SharedSymbolPath ''))" }
+        } @($script:TxtGenSymPath.Text, $script:GenSymDefault) $null
     })
 
     $script:BtnGenSymBuild.Add_Click({
