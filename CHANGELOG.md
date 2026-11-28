@@ -5,6 +5,16 @@ truth; each release is tagged `vX.Y.Z` and published as a GitHub release by `scr
 
 <!-- NEW RELEASES INSERTED BELOW -->
 
+## [v1.0.69] - 2026-11-28
+Changes since v1.0.68:
+
+### Features
+- default to all public symbol servers (msdl + NuGet.org) + correct portable-PDB keys (2cf079b)
+- skip public symbols when building from files (only generate for vendor binaries) (a84421f)
+- prefill General-tab symbol path with the default shared store (0cc7594)
+- General settings tab - shared symbol store/PDB build + WER environment switch (485313e)
+
+
 ## [v1.0.68] - 2026-11-27
 Changes since v1.0.67:
 
@@ -565,6 +575,7 @@ Changes since v1.0.0:
 - WPF/XAML launcher (GUI default, `-CLI` text menu) with shared light/dark theme.
 - Shared components (logging, admin/signature/prompt/version helpers) under `src/Common`.
 - Bootstrap installer (`src/Get.ps1` + `src/run.bat`) with version check against GitHub.
+
 
 
 
